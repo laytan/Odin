@@ -7,11 +7,12 @@ import "core:bytes"
 
 // Reader is a buffered wrapper for an io.Reader
 Reader :: struct {
-	buf:            []byte,
-	buf_allocator:  mem.Allocator,
+	buf:            []byte `fmt:"-"`,
+	buf_allocator:  mem.Allocator `fmt:"-"`,
 
-	rd:             io.Reader, // reader
+	rd:             io.Reader `fmt:"-"`, // reader
 	r, w:           int, // read and write positions for buf
+	off:            int, // offset into reader.
 
 	err:            io.Error,
 
@@ -55,7 +56,7 @@ reader_size :: proc(b: ^Reader) -> int {
 
 reader_reset :: proc(b: ^Reader, r: io.Reader) {
 	b.rd = r
-	b.r, b.w = 0, 0
+	b.r, b.w, b.off = 0, 0, 0
 	b.err = nil
 	b.last_byte      = -1
 	b.last_rune_size = -1
@@ -159,6 +160,7 @@ reader_discard :: proc(b: ^Reader, n: int) -> (discarded: int, err: io.Error) {
 		}
 		skip = min(skip, remaining)
 		b.r += skip
+		b.off += skip
 		remaining -= skip
 		if remaining == 0 {
 			return n, nil
@@ -212,9 +214,30 @@ reader_read :: proc(b: ^Reader, p: []byte) -> (n: int, err: io.Error) {
 
 	n = copy(p, b.buf[b.r:b.w])
 	b.r += n
+	b.off += n
 	b.last_byte = int(b.buf[b.r-1])
 	b.last_rune_size = -1
 	return n, nil
+}
+
+reader_seek :: proc(b: ^Reader, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+	whence := whence
+	new_offset := offset
+	if whence == .Current {
+		if offset == 0 {
+			return i64(b.off), nil
+		}
+		whence = .Start
+		new_offset = i64(b.off) + offset
+	}
+
+	n = io.seek(b.rd, offset, whence) or_return
+	if i64(b.off) != n {
+		b.w, b.r = 0, 0
+		_reader_read_new_chunk(b) or_return
+	}
+	b.off = int(n)
+	return
 }
 
 // reader_read_byte reads and returns a single byte
@@ -229,6 +252,7 @@ reader_read_byte :: proc(b: ^Reader) -> (c: byte, err: io.Error) {
 	}
 	c = b.buf[b.r]
 	b.r += 1
+	b.off += 1
 	b.last_byte = int(c)
 	return
 }
@@ -240,6 +264,7 @@ reader_unread_byte :: proc(b: ^Reader) -> io.Error {
 	}
 	if b.r > 0 {
 		b.r -= 1
+		b.off -= 1
 	} else {
 		// b.r == 0 && b.w == 0
 		b.w = 1
@@ -270,6 +295,7 @@ reader_read_rune :: proc(b: ^Reader) -> (r: rune, size: int, err: io.Error) {
 		r, size = utf8.decode_rune(b.buf[b.r : b.w])
 	}
 	b.r += size
+	b.off += size
 	b.last_byte = int(b.buf[b.r-1])
 	b.last_rune_size = size
 	return
@@ -281,6 +307,7 @@ reader_unread_rune :: proc(b: ^Reader) -> io.Error {
 		return .Invalid_Unread
 	}
 	b.r -= b.last_rune_size
+	b.off -= b.last_rune_size
 	b.last_byte = -1
 	b.last_rune_size = -1
 	return nil
@@ -293,6 +320,7 @@ reader_write_to :: proc(b: ^Reader, w: io.Writer) -> (n: i64, err: io.Error) {
 			return 0, .Negative_Write
 		}
 		b.r += n
+		b.off += n
 		return i64(n), err
 	}
 
@@ -329,8 +357,6 @@ reader_to_stream :: proc(b: ^Reader) -> (s: io.Stream) {
 	return
 }
 
-
-
 @(private)
 _reader_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
 	b := (^Reader)(stream_data)
@@ -340,8 +366,12 @@ _reader_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offse
 	case .Destroy:
 		reader_destroy(b)
 		return
+	case .Seek:
+		return reader_seek(b, offset, whence)
+	case .Size:
+		return io.size(b.rd)
 	case .Query:
-		return io.query_utility({.Read, .Destroy, .Query})
+		return io.query_utility({.Read, .Destroy, .Seek, .Query, .Size})
 	}
 	return 0, .Empty
 }
@@ -368,18 +398,21 @@ reader_read_slice :: proc(b: ^Reader, delim: byte) -> (line: []byte, err: io.Err
 			i += s
 			line = b.buf[b.r:][:i+1]
 			b.r += i + 1
+			b.off += i + 1
 			break
 		}
 
 		if b.err != nil {
 			line = b.buf[b.r : b.w]
 			b.r = b.w
+			b.off += reader_buffered(b)
 			err = _reader_consume_err(b)
 			break
 		}
 
 		if reader_buffered(b) >= len(b.buf) {
 			b.r = b.w
+			b.off += reader_buffered(b)
 			line = b.buf
 			err = .Buffer_Full
 			break
