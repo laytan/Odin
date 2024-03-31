@@ -94,6 +94,11 @@ jobs:
           cd tests/core
           make
         timeout-minutes: 10
+      - name: Vendor library tests
+        run: |
+          cd tests/vendor
+          make
+        timeout-minutes: 10
       - name: Odin internals tests
         run: |
           cd tests/internal
@@ -131,6 +136,11 @@ jobs:
       - name: Core library tests
         run: |
           cd tests/core
+          make
+        timeout-minutes: 10
+      - name: Vendor library tests
+        run: |
+          cd tests/vendor
           make
         timeout-minutes: 10
       - name: Odin internals tests

@@ -80,33 +80,7 @@ main :: proc() {
 build and installation
 ----------------------
 
-raylib binary releases for Windows, Linux, macOS, Android and HTML5 are available at the [Github Releases page](https://github.com/raysan5/raylib/releases).
 
-raylib is also available via multiple [package managers](https://github.com/raysan5/raylib/issues/613) on multiple OS distributions.
-
-#### Installing and building raylib on multiple platforms
-
-[raylib Wiki](https://github.com/raysan5/raylib/wiki#development-platforms) contains detailed instructions on building and usage on multiple platforms.
-
- - [Working on Windows](https://github.com/raysan5/raylib/wiki/Working-on-Windows)
- - [Working on macOS](https://github.com/raysan5/raylib/wiki/Working-on-macOS)
- - [Working on GNU Linux](https://github.com/raysan5/raylib/wiki/Working-on-GNU-Linux)
- - [Working on Chrome OS](https://github.com/raysan5/raylib/wiki/Working-on-Chrome-OS)
- - [Working on FreeBSD](https://github.com/raysan5/raylib/wiki/Working-on-FreeBSD)
- - [Working on Raspberry Pi](https://github.com/raysan5/raylib/wiki/Working-on-Raspberry-Pi)
- - [Working for Android](https://github.com/raysan5/raylib/wiki/Working-for-Android)
- - [Working for Web (HTML5)](https://github.com/raysan5/raylib/wiki/Working-for-Web-(HTML5))
- - [Working anywhere with CMake](https://github.com/raysan5/raylib/wiki/Working-with-CMake)
-
-*Note that the Wiki is open for edit, if you find some issues while building raylib for your target platform, feel free to edit the Wiki or open an issue related to it.*
-
-#### Setup raylib with multiple IDEs
-
-raylib has been developed on Windows platform using [Notepad++](https://notepad-plus-plus.org/) and [MinGW GCC](https://www.mingw-w64.org/) compiler but it can be used with other IDEs on multiple platforms.
-
-[Projects directory](https://github.com/raysan5/raylib/tree/master/projects) contains several ready-to-use **project templates** to build raylib and code examples with multiple IDEs.
-
-*Note that there are lots of IDEs supported, some of the provided templates could require some review, so please, if you find some issue with a template or you think they could be improved, feel free to send a PR or open a related issue.*
 
 learning and docs
 ------------------

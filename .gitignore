@@ -319,3 +319,5 @@ build.sh
 
 # RAD debugger project file
 *.raddbg
+
+vendor/stb/lib/darwin/*

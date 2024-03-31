@@ -34,7 +34,11 @@ when ODIN_TEST {
 
 main :: proc() {
 	t := testing.T{}
-	test_glfw(&t)
+
+	// Only platforms with bundled libraries.
+	when ODIN_OS == .Windows || ODIN_OS == .Darwin {
+		test_glfw(&t)
+	}
 
 	fmt.printf("%v/%v tests successful.\n", TEST_count - TEST_fail, TEST_count)
 	if TEST_fail > 0 {
