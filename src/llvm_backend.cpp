@@ -8,6 +8,9 @@
 #define MULTITHREAD_OBJECT_GENERATION 0
 #endif
 
+#ifndef COVERAGE
+#define COVERAGE 0
+#endif
 
 #include "llvm_backend.hpp"
 #include "llvm_abi.cpp"

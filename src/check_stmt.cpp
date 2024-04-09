@@ -537,6 +537,8 @@ gb_internal void check_stmt(CheckerContext *ctx, Ast *node, u32 flags) {
 		ctx->state_flags = out;
 	}
 
+	add_package_dependency(ctx, "runtime", "coverage");
+
 	check_stmt_internal(ctx, node, flags);
 
 	ctx->state_flags = prev_state_flags;

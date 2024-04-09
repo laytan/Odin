@@ -1058,3 +1058,68 @@ __read_bits :: proc "contextless" (dst, src: [^]byte, offset: uintptr, size: uin
 		dst[j/8] |=  b
 	}
 }
+
+// TODO: support multithreaded, prob thread local it, and hook into the thread package?
+
+coverage_buf: []byte
+coverages_i:  uint
+
+LCP     := "/Users/laytan/third-party/Odin/" // TODO: dynamic from the compiler?
+LCP_OFF :: 31 + len(".odin")
+
+@(no_instrumentation)
+coverage_init :: proc "contextless" () #no_bounds_check {
+	BUF_INITIAL_CAP :: 1024*1024 // 1MiB
+
+	// TODO: if we make this virtual memory, and very big, we can make this entire process branchless.
+	coverage_buf = ([^]byte)(_unix_calloc(1, BUF_INITIAL_CAP))[:BUF_INITIAL_CAP]
+	// Signature.
+	coverage_buf[0] = 'o'
+	coverage_buf[1] = 'c'
+	// Version.
+	coverage_buf[2] = 1
+	// Little Endian?
+	coverage_buf[3] = 1 if ODIN_ENDIAN == .Little else 0
+
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[4], raw_data(LCP), len(LCP))
+	coverages_i = 4 + 1 + len(LCP)
+}
+
+@(no_instrumentation, optimization_mode="speed")
+coverage_maybe_grow :: #force_inline proc "contextless" (needed: uint) #no_bounds_check {
+	if intrinsics.expect(coverages_i + needed >= len(coverage_buf), false) {
+		// when !ODIN_DISABLE_ASSERT do if coverage_buf == nil do trap()
+		new_cap := len(coverage_buf)*2
+		coverage_buf = ([^]byte)(_unix_realloc(raw_data(coverage_buf), new_cap))[:new_cap]
+		intrinsics.mem_zero(raw_data(coverage_buf[coverages_i:]), new_cap-int(coverages_i))
+	}
+}
+
+@(instrumentation_enter, optimization_mode="speed")
+coverage_enter :: proc "contextless" (_, _: rawptr, loc: Source_Code_Location) #no_bounds_check {
+	fplen: uint = len(loc.file_path) - LCP_OFF
+	coverage_maybe_grow(fplen+size_of(i32)+1)
+
+	enter_mark: i32 = -1
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &enter_mark, size_of(i32))
+	coverages_i += size_of(i32)
+
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], raw_data(loc.file_path[len(LCP):]), fplen)
+	coverages_i += fplen+1
+}
+
+@(instrumentation_exit, optimization_mode="speed")
+coverage_exit :: proc "contextless" (_, _: rawptr, loc: Source_Code_Location) #no_bounds_check {
+	coverage_maybe_grow(size_of(i32))
+	exit_mark: i32 = -2
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &exit_mark, size_of(i32))
+	coverages_i += size_of(i32)
+}
+
+// TODO: `@(instrumentation_statement)`
+@(no_instrumentation, optimization_mode="speed")
+coverage :: proc "contextless" (loc: ^Source_Code_Location) #no_bounds_check {
+	coverage_maybe_grow(size_of(i32))
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &loc.line, size_of(i32))
+	coverages_i += size_of(i32)
+}

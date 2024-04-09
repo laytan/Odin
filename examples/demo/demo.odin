@@ -2584,7 +2584,7 @@ main :: proc() {
 		ranged_fields_for_array_compound_literals()
 		deprecated_attribute()
 		range_statements_with_multiple_return_values()
-		threading_example()
+		// threading_example()
 		soa_struct_layout()
 		constant_literal_expressions()
 		union_maybe()
@@ -2595,5 +2595,7 @@ main :: proc() {
 		or_break_and_or_continue_operators()
 		arbitrary_precision_mathematics()
 		matrix_type()
+
+		// os.write_entire_file("coverage.out", runtime.coverage_buf[:runtime.coverages_i])
 	}
 }

@@ -2503,6 +2503,30 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 		p->state_flags = out;
 	}
 
+	#if COVERAGE
+	if (p->entity->Procedure.has_instrumentation) {
+		switch (node->kind) {
+		case Ast_AssignStmt:
+		case Ast_ExprStmt:
+		case Ast_ReturnStmt:
+		case Ast_IfStmt:
+		case Ast_ForStmt:
+		case Ast_RangeStmt:
+		case Ast_UnrollRangeStmt:
+		case Ast_SwitchStmt:
+		case Ast_TypeSwitchStmt:
+		case Ast_BranchStmt:
+			{
+				// lookup proc, emit call with current location
+				auto args = array_make<lbValue>(temporary_allocator(), 1);
+				args[0] = lb_emit_source_code_location_as_global_ptr(p, node);
+				lb_emit_runtime_call(p, "coverage", args);
+				break;
+			}
+		}
+	}
+	#endif
+
 	switch (node->kind) {
 	case_ast_node(bs, EmptyStmt, node);
 	case_end;
@@ -2565,6 +2589,15 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 		}
 
 		TEMPORARY_ALLOCATOR_GUARD();
+
+		#if COVERAGE
+		if (p->entity->Procedure.has_instrumentation) {
+			// lookup proc, emit call with current location
+			auto args = array_make<lbValue>(temporary_allocator(), 1);
+			args[0] = lb_emit_source_code_location_as_global_ptr(p, node);
+			lb_emit_runtime_call(p, "coverage", args);
+		}
+		#endif
 
 		auto const &values = vd->values;
 		if (values.count == 0) {
@@ -2634,6 +2667,7 @@ gb_internal void lb_build_stmt(lbProcedure *p, Ast *node) {
 		lb_build_expr(p, es->expr);
 	case_end;
 
+	// TODO: working on code coverage with defer might be tricky?
 	case_ast_node(ds, DeferStmt, node);
 		lb_add_defer_node(p, p->scope_index, ds->stmt);
 	case_end;
