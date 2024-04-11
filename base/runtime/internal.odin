@@ -1059,15 +1059,32 @@ __read_bits :: proc "contextless" (dst, src: [^]byte, offset: uintptr, size: uin
 	}
 }
 
+// In `init` get all the file paths in the codebase, put them in a hash map `map[PATH]ID` where ID
+// is an index into a big array of continuous cstrings at the start of the file.
+// Probably do that in odin, in the testing package, `Internal_Test` would need a file path or something though.
+// And then walk each file in the package, recusing into referenced packages.
+// The compiler will need to call the testing binary passing through the custom collections too.
+
 // TODO: support multithreaded, prob thread local it, and hook into the thread package?
 
-coverage_buf: []byte
-coverages_i:  uint
-
-LCP     := "/Users/laytan/third-party/Odin/" // TODO: dynamic from the compiler?
-LCP_OFF :: 31 + len(".odin")
+coverage_files: map[string]i32
+coverage_buf:   []byte
+coverages_i:    uint
+coverage_proc := coverage_proc_real
 
 @(no_instrumentation)
+coverage_proc_real :: proc "contextless" (loc: ^Source_Code_Location) #no_bounds_check {
+	coverage_maybe_grow(size_of(i32))
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &loc.line, size_of(i32))
+	coverages_i += size_of(i32)
+}
+
+@(no_instrumentation)
+coverage_proc_fake :: proc "contextless" (loc: ^Source_Code_Location) {}
+
+COVERAGE :: true
+
+@(init, no_instrumentation)
 coverage_init :: proc "contextless" () #no_bounds_check {
 	BUF_INITIAL_CAP :: 1024*1024 // 1MiB
 
@@ -1081,31 +1098,32 @@ coverage_init :: proc "contextless" () #no_bounds_check {
 	// Little Endian?
 	coverage_buf[3] = 1 if ODIN_ENDIAN == .Little else 0
 
-	intrinsics.mem_copy_non_overlapping(&coverage_buf[4], raw_data(LCP), len(LCP))
-	coverages_i = 4 + 1 + len(LCP)
+	coverages_i = 4
 }
 
-@(no_instrumentation, optimization_mode="speed")
-coverage_maybe_grow :: #force_inline proc "contextless" (needed: uint) #no_bounds_check {
-	if intrinsics.expect(coverages_i + needed >= len(coverage_buf), false) {
-		// when !ODIN_DISABLE_ASSERT do if coverage_buf == nil do trap()
-		new_cap := len(coverage_buf)*2
-		coverage_buf = ([^]byte)(_unix_realloc(raw_data(coverage_buf), new_cap))[:new_cap]
-		intrinsics.mem_zero(raw_data(coverage_buf[coverages_i:]), new_cap-int(coverages_i))
-	}
-}
+when COVERAGE {
 
 @(instrumentation_enter, optimization_mode="speed")
 coverage_enter :: proc "contextless" (_, _: rawptr, loc: Source_Code_Location) #no_bounds_check {
-	fplen: uint = len(loc.file_path) - LCP_OFF
-	coverage_maybe_grow(fplen+size_of(i32)+1)
+	if coverage_proc == coverage_proc_fake do return
+	coverage_proc = coverage_proc_fake
+	defer coverage_proc = coverage_proc_real
+
+	coverage_maybe_grow(2*size_of(i32))
+
+	// TODO: map get or insert
+	idx, has_idx := coverage_files[loc.file_path]
+	if !has_idx {
+		idx = i32(len(coverage_files))
+		coverage_files[loc.file_path] = idx 
+	}
 
 	enter_mark: i32 = -1
 	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &enter_mark, size_of(i32))
 	coverages_i += size_of(i32)
 
-	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], raw_data(loc.file_path[len(LCP):]), fplen)
-	coverages_i += fplen+1
+	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &idx, size_of(i32))
+	coverages_i += size_of(i32)
 }
 
 @(instrumentation_exit, optimization_mode="speed")
@@ -1116,10 +1134,20 @@ coverage_exit :: proc "contextless" (_, _: rawptr, loc: Source_Code_Location) #n
 	coverages_i += size_of(i32)
 }
 
+}
+
+@(no_instrumentation, optimization_mode="speed")
+coverage_maybe_grow :: #force_inline proc "contextless" (needed: uint) #no_bounds_check {
+	if intrinsics.expect(coverages_i + needed >= len(coverage_buf), false) {
+		when !ODIN_DISABLE_ASSERT do if coverage_buf == nil do trap()
+		new_cap := len(coverage_buf)*2
+		coverage_buf = ([^]byte)(_unix_realloc(raw_data(coverage_buf), new_cap))[:new_cap]
+		intrinsics.mem_zero(raw_data(coverage_buf[coverages_i:]), new_cap-int(coverages_i))
+	}
+}
+
 // TODO: `@(instrumentation_statement)`
 @(no_instrumentation, optimization_mode="speed")
-coverage :: proc "contextless" (loc: ^Source_Code_Location) #no_bounds_check {
-	coverage_maybe_grow(size_of(i32))
-	intrinsics.mem_copy_non_overlapping(&coverage_buf[coverages_i], &loc.line, size_of(i32))
-	coverages_i += size_of(i32)
+coverage :: #force_inline proc "contextless" (loc: ^Source_Code_Location) #no_bounds_check {
+	coverage_proc(loc)
 }
