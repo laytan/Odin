@@ -39,6 +39,30 @@ class WasmMemoryInterface {
 		return new DataView(this.memory.buffer);
 	}
 
+	offsetter(addr) {
+		const W = this.intSize;
+		let offset = addr;
+		let off = (amount, alignment) => {
+			if (alignment === undefined) {
+				alignment = Math.min(amount, W);
+			}
+			if (offset % alignment != 0) {
+				offset += alignment - (offset%alignment);
+			}
+			let x = offset;
+			offset += amount;
+			return x;
+		};
+
+		let align = (alignment) => {
+			const modulo = offset & (alignment-1);
+			if (modulo != 0) {
+				offset += alignment - modulo
+			}
+		};
+
+		return [off, align];
+	}
 
 	loadF32Array(addr, len) {
 		let array = new Float32Array(this.memory.buffer, addr, len);
@@ -95,6 +119,10 @@ class WasmMemoryInterface {
 		}
 	};
 	loadPtr(addr) { return this.loadU32(addr); }
+
+	loadBool(addr) {
+		return this.loadU8(addr) != 0;
+	}
 
 	loadB32(addr) {
 		return this.loadU32(addr) != 0;
@@ -1430,30 +1458,132 @@ function odinSetupDefaultImports(wasmMemoryInterface, consoleElement, memory) {
 				crypto.getRandomValues(view)
 			},
 		},
+		"odin_io": {
+			// TODO: test on js_wasm64p32
+			// TODO: error handling
+			http_request: async (clientPtr, reqPtr, cbIdx) => {
+				let wmi = wasmMemoryInterface;
+				const [off, align] = wmi.offsetter(reqPtr);
+
+				const callback = wmi.exports.__indirect_function_table.get(cbIdx);
+
+				// Increase the `nbio.IO` `num_wating`.
+				const io = wmi.loadPtr(clientPtr);
+				let numWaiting = wmi.loadInt(io);
+				wmi.storeInt(io, numWaiting+1);
+
+				const method = wmi.loadString(
+					wmi.loadPtr(off(wmi.intSize)),
+					wmi.loadInt(off(wmi.intSize)),
+				);
+
+				const url = wmi.loadString(
+					wmi.loadPtr(off(wmi.intSize)),
+					wmi.loadInt(off(wmi.intSize)),
+				);
+
+				let headersPtr = wmi.loadPtr(off(wmi.intSize));
+				const headersLen = wmi.loadInt(off(wmi.intSize));
+				const headers = {};
+				for (let i = 0; i < headersLen; i += 1) {
+					const key = wmi.loadString(
+						wmi.loadPtr(headersPtr),
+						wmi.loadPtr(headersPtr+wmi.intSize),
+					);
+					headersPtr += wmi.intSize * 2;
+
+					const value = wmi.loadString(
+						wmi.loadPtr(headersPtr),
+						wmi.loadPtr(headersPtr+wmi.intSize),
+					);
+					headersPtr += wmi.intSize * 2;
+
+					headers[key] = value;
+				}
+
+				let body = wmi.loadBytes(
+					wmi.loadPtr(off(wmi.intSize)),
+					wmi.loadInt(off(wmi.intSize)),
+				);
+				if (body.length == 0) {
+					body = undefined;
+				}
+
+				const ignoreRedirects = wmi.loadBool(off(1));
+
+				align(wmi.intSize);
+
+				const cors = wmi.loadString(
+					wmi.loadPtr(off(wmi.intSize)),
+					wmi.loadInt(off(wmi.intSize)),
+				);
+
+				const credentials = wmi.loadString(
+					wmi.loadPtr(off(wmi.intSize)),
+					wmi.loadInt(off(wmi.intSize)),
+				);
+
+				let response;
+				let error = 0;
+				try {
+					response = await fetch(url, {
+						method,
+						body,
+						headers,
+						redirect: ignoreRedirects ? "manual" : "follow",
+						mode: cors,
+						credentials,
+					});
+				} catch(e) {
+					// NOTE: there is surprisingly little info given about these errors,
+					// most info is printed to the console without a way to get at it.
+					error = 6; // Unknown.
+
+					// NOTE: for some reason a type error comes up most times, when it isn't actually
+					// a type error.
+					if (e instanceof TypeError) {
+						error = 2; // Network.
+					}
+				}
+
+				// Decrease the `nbio.IO` `num_wating`.
+				numWaiting = wmi.loadInt(io);
+				wmi.storeInt(io, numWaiting-1);
+
+				if (error !== 0) {
+					callback(clientPtr, reqPtr, error);
+					return;
+				}
+
+				wmi.storeInt(off(wmi.intSize), response.status);
+
+				const resBody = new Uint8Array(await response.arrayBuffer());
+				const bodyPtr = wmi.exports.http_alloc(reqPtr, resBody.byteLength);
+				const bodyBytes = wmi.loadBytes(bodyPtr, resBody.byteLength);
+				bodyBytes.set(resBody);
+				wmi.storeI32(off(wmi.intSize), bodyPtr);
+				wmi.storeInt(off(wmi.intSize), resBody.byteLength);
+
+				response.headers.forEach((value, key) => {
+					const keyLength = new TextEncoder().encode(key).length;
+					const keyPtr = wmi.exports.http_alloc(reqPtr, keyLength);
+					wmi.storeString(keyPtr, key);
+
+					const valueLength = new TextEncoder().encode(value).length;
+					const valuePtr = wmi.exports.http_alloc(reqPtr, valueLength);
+					wmi.storeString(valuePtr, value);
+
+					wmi.exports.http_res_header_set(reqPtr, keyPtr, keyLength, valuePtr, valueLength);
+				});
+
+				callback(clientPtr, reqPtr, 0);
+			},
+		},
 		"odin_dom": {
 			init_event_raw: (ep) => {
-				const W = wasmMemoryInterface.intSize;
-				let offset = ep;
-				let off = (amount, alignment) => {
-					if (alignment === undefined) {
-						alignment = Math.min(amount, W);
-					}
-					if (offset % alignment != 0) {
-						offset += alignment - (offset%alignment);
-					}
-					let x = offset;
-					offset += amount;
-					return x;
-				};
-
-				let align = (alignment) => {
-					const modulo = offset & (alignment-1);
-					if (modulo != 0) {
-						offset += alignment - modulo
-					}
-				};
-
 				let wmi = wasmMemoryInterface;
+				const W = wmi.intSize;
+				const [off, align] = wmi.offsetter(ep);
 
 				let e = event_temp_data.event;
 

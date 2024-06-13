@@ -1,3 +1,4 @@
+//+build !js
 package filepath
 
 import "core:os"

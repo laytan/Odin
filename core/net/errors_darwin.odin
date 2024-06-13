@@ -156,6 +156,7 @@ UDP_Send_Error :: enum c.int {
 	// TODO: not sure what the exact circumstances for this is yet
 	Network_Unreachable         = c.int(os.ENETUNREACH),
 	No_Outbound_Ports_Available = c.int(os.EAGAIN),   // There are no more emphemeral outbound ports available to bind the socket to, in order to send.
+	Host_Unreachable            = c.int(os.EHOSTUNREACH), // Remote host cannot be reached
 
 	// The send timeout duration passed before all data was sent. See Socket_Option.Send_Timeout.
 	// NOTE: No, really. Presumably this means something different for nonblocking sockets...
