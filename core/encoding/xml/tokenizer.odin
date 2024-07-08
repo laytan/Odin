@@ -126,7 +126,7 @@ error :: proc(t: ^Tokenizer, offset: int, msg: string, args: ..any) {
 	t.error_count += 1
 }
 
-@(optimization_mode="favor_size")
+@(optimization_mode="speed")
 advance_rune :: proc(t: ^Tokenizer) {
 	#no_bounds_check {
 		/*
@@ -170,7 +170,7 @@ peek_byte :: proc(t: ^Tokenizer, offset := 0) -> byte {
 	return 0
 }
 
-@(optimization_mode="favor_size")
+@(optimization_mode="speed")
 skip_whitespace :: proc(t: ^Tokenizer) {
 	for {
 		switch t.ch {
@@ -182,7 +182,7 @@ skip_whitespace :: proc(t: ^Tokenizer) {
 	}
 }
 
-@(optimization_mode="favor_size")
+@(optimization_mode="speed")
 is_letter :: proc(r: rune) -> bool {
 	if r < utf8.RUNE_SELF {
 		switch r {
@@ -296,7 +296,7 @@ skip_cdata :: proc(t: ^Tokenizer) -> (err: Error) {
 	return
 }
 
-@(optimization_mode="favor_size")
+@(optimization_mode="speed")
 scan_string :: proc(t: ^Tokenizer, offset: int, close: rune = '<', consume_close := false, multiline := true) -> (value: string, err: Error) {
 	err = .None
 

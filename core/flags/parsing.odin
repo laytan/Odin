@@ -32,7 +32,7 @@ Inputs:
 Returns:
 - error: A union of errors; parsing, file open, a help request, or validation.
 */
-@(optimization_mode="favor_size")
+@(optimization_mode="size")
 parse :: proc(
 	model: ^$T,
 	args: []string,
