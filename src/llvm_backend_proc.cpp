@@ -202,23 +202,19 @@ gb_internal lbProcedure *lb_create_procedure(lbModule *m, Entity *entity, bool i
 
 		lb_set_wasm_export_attributes(p->value, p->name);
 	} else if (!p->is_foreign) {
-		if (USE_SEPARATE_MODULES) {
-			LLVMSetLinkage(p->value, LLVMExternalLinkage);
-		} else {
-			LLVMSetLinkage(p->value, LLVMInternalLinkage);
+		LLVMSetLinkage(p->value, LLVMInternalLinkage);
 
-			// NOTE(bill): if a procedure is defined in package runtime and uses a custom link name,
-			// then it is very likely it is required by LLVM and thus cannot have internal linkage
-			if (entity->pkg != nullptr && entity->pkg->kind == Package_Runtime && p->body != nullptr) {
-				GB_ASSERT(entity->kind == Entity_Procedure);
-				String link_name = entity->Procedure.link_name;
-				if (entity->flags & EntityFlag_CustomLinkName && 
-					link_name != "") {
-					if (string_starts_with(link_name, str_lit("__"))) {
-						LLVMSetLinkage(p->value, LLVMExternalLinkage);
-					} else {
-						LLVMSetLinkage(p->value, LLVMInternalLinkage);
-					}
+		// NOTE(bill): if a procedure is defined in package runtime and uses a custom link name,
+		// then it is very likely it is required by LLVM and thus cannot have internal linkage
+		if (entity->pkg != nullptr && entity->pkg->kind == Package_Runtime && p->body != nullptr) {
+			GB_ASSERT(entity->kind == Entity_Procedure);
+			String link_name = entity->Procedure.link_name;
+			if (entity->flags & EntityFlag_CustomLinkName && 
+				link_name != "") {
+				if (string_starts_with(link_name, str_lit("__"))) {
+					LLVMSetLinkage(p->value, LLVMExternalLinkage);
+				} else {
+					LLVMSetLinkage(p->value, LLVMInternalLinkage);
 				}
 			}
 		}

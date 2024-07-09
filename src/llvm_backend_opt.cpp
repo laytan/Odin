@@ -488,7 +488,7 @@ gb_internal void lb_run_function_pass_manager(LLVMPassManagerRef fpm, lbProcedur
 	    return;
 	case lbFunctionPassManager_default:
 	case lbFunctionPassManager_default_without_memcpy:
-	    if (build_context.optimization_level < 0) {
+	    if (p->module->optimization_level < 0) {
 	        return;
 	    }
 	    break;

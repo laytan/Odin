@@ -141,6 +141,8 @@ struct lbModule {
 	LLVMModuleRef mod;
 	LLVMContextRef ctx;
 
+	i32 optimization_level;
+
 	struct lbGenerator *gen;
 	LLVMTargetMachineRef target_machine;
 

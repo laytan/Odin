@@ -134,6 +134,10 @@ enum ProcedureOptimizationMode : u8 {
 	ProcedureOptimizationMode_Default,
 	ProcedureOptimizationMode_None,
 	ProcedureOptimizationMode_FavorSize,
+	ProcedureOptimizationMode_Minimal,
+	ProcedureOptimizationMode_Size,
+	ProcedureOptimizationMode_Speed,
+	ProcedureOptimizationMode_Aggressive,
 };
 
 

@@ -1183,10 +1183,7 @@ gb_internal void add_debug_info_for_global_constant_from_entity(lbGenerator *gen
 	if (is_blank_ident(e->token)) {
 		return;
 	}
-	lbModule *m = &gen->default_module;
-	if (USE_SEPARATE_MODULES) {
-		m = lb_module_of_entity(gen, e);
-	}
+	lbModule *m = lb_module_of_entity(gen, e);
 
 	if (is_type_integer(e->type)) {
 		ExactValue const &value = e->Constant.value;

@@ -16,8 +16,9 @@ gb_global isize lb_global_type_info_member_usings_index  = 0;
 gb_global isize lb_global_type_info_member_tags_index    = 0;
 
 
-gb_internal void lb_init_module(lbModule *m, Checker *c) {
+gb_internal void lb_init_module(lbModule *m, Checker *c, i32 optimization_level) {
 	m->info = &c->info;
+	m->optimization_level = optimization_level;
 
 	gbString module_name = gb_string_make(heap_allocator(), "odin_package");
 	if (m->file) {
@@ -25,8 +26,28 @@ gb_internal void lb_init_module(lbModule *m, Checker *c) {
 	} else if (m->pkg) {
 		module_name = gb_string_appendc(module_name, "-");
 		module_name = gb_string_append_length(module_name, m->pkg->name.text, m->pkg->name.len);
-	} else if (USE_SEPARATE_MODULES) {
+	} else if (USE_SEPARATE_MODULES && m->optimization_level == build_context.optimization_level) {
 		module_name = gb_string_appendc(module_name, "-builtin");
+	}
+
+	if (m->optimization_level != build_context.optimization_level) {
+		switch (m->optimization_level) {
+		case 0:
+			module_name = gb_string_appendc(module_name, ".optimization_mode=minimal");
+			break;
+		case 1:
+			module_name = gb_string_appendc(module_name, ".optimization_mode=size");
+			break;
+		case 2:
+			module_name = gb_string_appendc(module_name, ".optimization_mode=speed");
+			break;
+		case 3:
+			module_name = gb_string_appendc(module_name, ".optimization_mode=aggressive");
+			break;
+		case -1:
+		default:
+			GB_PANIC("unhandled optimization mode");
+		}
 	}
 
 	m->ctx = LLVMContextCreate();
@@ -124,7 +145,7 @@ gb_internal bool lb_init_generator(lbGenerator *gen, Checker *c) {
 			m->pkg = pkg;
 			m->gen = gen;
 			map_set(&gen->modules, cast(void *)pkg, m);
-			lb_init_module(m, c);
+			lb_init_module(m, c, build_context.optimization_level);
 			if (build_context.module_per_file) {
 				// NOTE(bill): Probably per file is not a good idea, so leave this for later
 				for (AstFile *file : pkg->files) {
@@ -133,16 +154,57 @@ gb_internal bool lb_init_generator(lbGenerator *gen, Checker *c) {
 					m->pkg = pkg;
 					m->gen = gen;
 					map_set(&gen->modules, cast(void *)file, m);
-					lb_init_module(m, c);
+					lb_init_module(m, c, build_context.optimization_level);
 				}
 			}
 		}
 	}
 
-	gen->default_module.gen = gen;
-	map_set(&gen->modules, cast(void *)1, &gen->default_module);
-	lb_init_module(&gen->default_module, c);
+	lbModule *min_mod;
+	if (build_context.optimization_level == 0) {
+		min_mod = &gen->default_module;
+	} else {
+		min_mod = gb_alloc_item(permanent_allocator(), lbModule);
+	}
+	map_set(&gen->modules, cast(void *)(1 + ProcedureOptimizationMode_Minimal), min_mod);
+	min_mod->gen = gen;
+	lb_init_module(min_mod, c, 0);
 
+	lbModule *size_mod;
+	if (build_context.optimization_level == 1) {
+		size_mod = &gen->default_module;
+	} else {
+		size_mod = gb_alloc_item(permanent_allocator(), lbModule);
+	}
+	map_set(&gen->modules, cast(void *)(1 + ProcedureOptimizationMode_Size), size_mod);
+	size_mod->gen = gen;
+	lb_init_module(size_mod, c, 1);
+
+	lbModule *speed_mod;
+	if (build_context.optimization_level == 2) {
+		speed_mod = &gen->default_module;
+	} else {
+		speed_mod = gb_alloc_item(permanent_allocator(), lbModule);
+	}
+	map_set(&gen->modules, cast(void *)(1 + ProcedureOptimizationMode_Speed), speed_mod);
+	speed_mod->gen = gen;
+	lb_init_module(speed_mod, c, 2);
+
+	lbModule *aggressive_mod;
+	if (build_context.optimization_level == 3) {
+		aggressive_mod = &gen->default_module;
+	} else {
+		aggressive_mod = gb_alloc_item(permanent_allocator(), lbModule);
+	}
+	map_set(&gen->modules, cast(void *)(1 + ProcedureOptimizationMode_Aggressive), aggressive_mod);
+	aggressive_mod->gen = gen;
+	lb_init_module(aggressive_mod, c, 3);
+
+	if (build_context.optimization_level == -1) {
+		gen->default_module.gen = gen;
+		lb_init_module(&gen->default_module, c, -1);
+		map_set(&gen->modules, cast(void *)1, &gen->default_module);
+	}
 
 	for (auto const &entry : gen->modules) {
 		lbModule *m = entry.value;
@@ -383,6 +445,26 @@ gb_internal lbModule *lb_module_of_entity(lbGenerator *gen, Entity *e) {
 	    e->decl_info->code_gen_module) {
 		return e->decl_info->code_gen_module;
 	}
+
+	if (e->code_gen_module) {
+		return e->code_gen_module;
+	}
+
+	if (e->kind == Entity_Procedure) {
+		switch (e->Procedure.optimization_mode) {
+		case ProcedureOptimizationMode_Default:
+		case ProcedureOptimizationMode_None:
+		case ProcedureOptimizationMode_FavorSize:
+			// Use default module.
+			break;
+		default:
+			// Use module specific to this mode.
+			found = map_get(&gen->modules, cast(void *)(1 + cast(size_t)e->Procedure.optimization_mode));
+			GB_ASSERT(found);
+			return *found;
+		}
+	}
+
 	if (e->file) {
 		found = map_get(&gen->modules, cast(void *)e->file);
 		if (found) {
@@ -2827,22 +2909,21 @@ gb_internal lbValue lb_find_ident(lbProcedure *p, lbModule *m, Entity *e, Ast *e
 	if (e->kind == Entity_Procedure) {
 		return lb_find_procedure_value_from_entity(m, e);
 	}
-	if (USE_SEPARATE_MODULES) {
-		lbModule *other_module = lb_module_of_entity(m->gen, e);
-		if (other_module != m) {
-			String name = lb_get_entity_name(other_module, e);
 
-			lb_set_entity_from_other_modules_linkage_correctly(other_module, e, name);
+	lbModule *other_module = lb_module_of_entity(m->gen, e);
+	if (other_module != m) {
+		String name = lb_get_entity_name(other_module, e);
 
-			lbValue g = {};
-			g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
-			g.type = alloc_type_pointer(e->type);
-			LLVMSetLinkage(g.value, LLVMExternalLinkage);
+		lb_set_entity_from_other_modules_linkage_correctly(other_module, e, name);
 
-			lb_add_entity(m, e, g);
-			lb_add_member(m, name, g);
-			return lb_emit_load(p, g);
-		}
+		lbValue g = {};
+		g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
+		g.type = alloc_type_pointer(e->type);
+		LLVMSetLinkage(g.value, LLVMExternalLinkage);
+
+		lb_add_entity(m, e, g);
+		lb_add_member(m, name, g);
+		return lb_emit_load(p, g);
 	}
 
 	String pkg = {};
@@ -2873,10 +2954,7 @@ gb_internal lbValue lb_find_procedure_value_from_entity(lbModule *m, Entity *e) 
 
 	bool ignore_body = false;
 
-	lbModule *other_module = m;
-	if (USE_SEPARATE_MODULES) {
-		other_module = lb_module_of_entity(gen, e);
-	}
+	lbModule *other_module = lb_module_of_entity(gen, e);
 	if (other_module == m) {
 		debugf("Missing Procedure (lb_find_procedure_value_from_entity): %.*s module %p\n", LIT(e->token.string), m);
 	}
@@ -2904,6 +2982,11 @@ gb_internal lbValue lb_find_procedure_value_from_entity(lbModule *m, Entity *e) 
 	found = map_get(&m->values, e);
 	rw_mutex_shared_unlock(&m->values_mutex);
 	if (found) {
+		if (ignore_body) {
+			String link_name = lb_get_entity_name(other_module, e);
+			lb_set_entity_from_other_modules_linkage_correctly(other_module, e, link_name);
+		}
+
 		return *found;
 	}
 
@@ -3035,56 +3118,52 @@ gb_internal lbValue lb_find_value_from_entity(lbModule *m, Entity *e) {
 		return *found;
 	}
 
-	if (USE_SEPARATE_MODULES) {
-		lbModule *other_module = lb_module_of_entity(m->gen, e);
+	lbModule *other_module = lb_module_of_entity(m->gen, e);
 
-		bool is_external = other_module != m;
-		if (!is_external) {
-			if (e->code_gen_module != nullptr) {
-				other_module = e->code_gen_module;
+	bool is_external = other_module != m;
+	if (!is_external) {
+		if (e->code_gen_module != nullptr) {
+			other_module = e->code_gen_module;
+		} else {
+			other_module = nullptr;
+		}
+		is_external = other_module != m;
+	}
+
+	if (is_external) {
+		String name = lb_get_entity_name(other_module, e);
+
+		lbValue g = {};
+		g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
+		g.type = alloc_type_pointer(e->type);
+		lb_add_entity(m, e, g);
+		lb_add_member(m, name, g);
+
+		LLVMSetLinkage(g.value, LLVMExternalLinkage);
+
+		lb_set_entity_from_other_modules_linkage_correctly(other_module, e, name);
+
+		if (e->Variable.thread_local_model != "") {
+			LLVMSetThreadLocal(g.value, true);
+
+			String m = e->Variable.thread_local_model;
+			LLVMThreadLocalMode mode = LLVMGeneralDynamicTLSModel;
+			if (m == "default") {
+				mode = LLVMGeneralDynamicTLSModel;
+			} else if (m == "localdynamic") {
+				mode = LLVMLocalDynamicTLSModel;
+			} else if (m == "initialexec") {
+				mode = LLVMInitialExecTLSModel;
+			} else if (m == "localexec") {
+				mode = LLVMLocalExecTLSModel;
 			} else {
-				other_module = nullptr;
+				GB_PANIC("Unhandled thread local mode %.*s", LIT(m));
 			}
-			is_external = other_module != m;
+			LLVMSetThreadLocalMode(g.value, mode);
 		}
 
-		if (is_external) {
-			String name = lb_get_entity_name(other_module, e);
 
-			lbValue g = {};
-			g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
-			g.type = alloc_type_pointer(e->type);
-			lb_add_entity(m, e, g);
-			lb_add_member(m, name, g);
-
-			LLVMSetLinkage(g.value, LLVMExternalLinkage);
-
-			lb_set_entity_from_other_modules_linkage_correctly(other_module, e, name);
-
-			// LLVMSetLinkage(other_g.value, LLVMExternalLinkage);
-
-			if (e->Variable.thread_local_model != "") {
-				LLVMSetThreadLocal(g.value, true);
-
-				String m = e->Variable.thread_local_model;
-				LLVMThreadLocalMode mode = LLVMGeneralDynamicTLSModel;
-				if (m == "default") {
-					mode = LLVMGeneralDynamicTLSModel;
-				} else if (m == "localdynamic") {
-					mode = LLVMLocalDynamicTLSModel;
-				} else if (m == "initialexec") {
-					mode = LLVMInitialExecTLSModel;
-				} else if (m == "localexec") {
-					mode = LLVMLocalExecTLSModel;
-				} else {
-					GB_PANIC("Unhandled thread local mode %.*s", LIT(m));
-				}
-				LLVMSetThreadLocalMode(g.value, mode);
-			}
-
-
-			return g;
-		}
+		return g;
 	}
 	GB_PANIC("\n\tError in: %s, missing value '%.*s'\n", token_pos_to_string(e->token.pos), LIT(e->token.string));
 	return {};

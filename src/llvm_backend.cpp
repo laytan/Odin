@@ -134,20 +134,19 @@ gb_internal GB_COMPARE_PROC(foreign_library_cmp) {
 }
 
 gb_internal void lb_set_entity_from_other_modules_linkage_correctly(lbModule *other_module, Entity *e, String const &name) {
-	if (other_module == nullptr) {
-		return;
-	}
+	GB_ASSERT(other_module);
 	char const *cname = alloc_cstring(temporary_allocator(), name);
 
 	LLVMValueRef other_global = nullptr;
 	if (e->kind == Entity_Variable) {
 		other_global = LLVMGetNamedGlobal(other_module->mod, cname);
+		GB_ASSERT(other_global);
 	} else if (e->kind == Entity_Procedure) {
 		other_global = LLVMGetNamedFunction(other_module->mod, cname);
+		GB_ASSERT(other_global);
 	}
-	if (other_global) {
-		LLVMSetLinkage(other_global, LLVMExternalLinkage);
-	}
+
+	LLVMSetLinkage(other_global, LLVMExternalLinkage);
 }
 
 gb_internal void lb_emit_init_context(lbProcedure *p, lbAddr addr) {
@@ -1383,10 +1382,7 @@ gb_internal void lb_create_global_procedures_and_types(lbGenerator *gen, Checker
 			continue;
 		}
 
-		lbModule *m = &gen->default_module;
-		if (USE_SEPARATE_MODULES) {
-			m = lb_module_of_entity(gen, e);
-		}
+		lbModule *m = lb_module_of_entity(gen, e);
 
 		if (e->kind == Entity_Procedure) {
 			array_add(&m->global_procedures_to_create, e);
@@ -1483,8 +1479,8 @@ gb_internal WORKER_TASK_PROC(lb_llvm_function_pass_per_module) {
 			LLVMInitializeFunctionPassManager(m->function_pass_managers[i]);
 		}
 
-		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default],                false, build_context.optimization_level);
-		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default_without_memcpy], true,  build_context.optimization_level);
+		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default],                false, m->optimization_level);
+		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default_without_memcpy], true,  m->optimization_level);
 		lb_populate_function_pass_manager_specific(m, m->function_pass_managers[lbFunctionPassManager_none],      -1);
 
 		for (i32 i = 0; i < lbFunctionPassManager_COUNT; i++) {
@@ -1557,7 +1553,7 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	lb_run_remove_unused_globals_pass(wd->m);
 
 	LLVMPassManagerRef module_pass_manager = LLVMCreatePassManager();
-	lb_populate_module_pass_manager(wd->target_machine, module_pass_manager, build_context.optimization_level);
+	lb_populate_module_pass_manager(wd->target_machine, module_pass_manager, wd->m->optimization_level);
 	LLVMRunPassManager(module_pass_manager, wd->m->mod);
 
 
@@ -1568,7 +1564,7 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	LLVMPassBuilderOptionsRef pb_options = LLVMCreatePassBuilderOptions();
 	defer (LLVMDisposePassBuilderOptions(pb_options));
 
-	switch (build_context.optimization_level) {
+	switch (wd->m->optimization_level) {
 	case -1:
 		break;
 	case 0:
@@ -2529,25 +2525,44 @@ gb_internal void lb_llvm_module_passes(lbGenerator *gen, bool do_threading) {
 }
 
 gb_internal String lb_filepath_ll_for_module(lbModule *m) {
-	String path = concatenate3_strings(permanent_allocator(),
-		build_context.build_paths[BuildPath_Output].basename,
-		STR_LIT("/"),
-		build_context.build_paths[BuildPath_Output].name
-	);
+	String basename = build_context.build_paths[BuildPath_Output].basename;
+	String name = build_context.build_paths[BuildPath_Output].name;
+
+	gbString path = gb_string_make_length(permanent_allocator(), basename.text, basename.len);
+	path = gb_string_appendc(path, "/");
+	path = gb_string_append_length(path, name.text, name.len);
 
 	if (m->file) {
-		char buf[32] = {};
-		isize n = gb_snprintf(buf, gb_size_of(buf), "-%u", m->file->id);
-		String suffix = make_string((u8 *)buf, n-1);
-		path = concatenate_strings(permanent_allocator(), path, suffix);
+		path = gb_string_append_fmt(path, "-%u", m->file->id);
 	} else if (m->pkg) {
-		path = concatenate3_strings(permanent_allocator(), path, STR_LIT("-"), m->pkg->name);
-	} else if (USE_SEPARATE_MODULES) {
-		path = concatenate_strings(permanent_allocator(), path, STR_LIT("-builtin"));
+		path = gb_string_appendc(path, "-");
+		path = gb_string_append_length(path, m->pkg->name.text, m->pkg->name.len);
+	} else if (USE_SEPARATE_MODULES && m->optimization_level == build_context.optimization_level) {
+		path = gb_string_appendc(path, "-builtin");
 	}
-	path = concatenate_strings(permanent_allocator(), path, STR_LIT(".ll"));
 
-	return path;
+	if (m->optimization_level != build_context.optimization_level) {
+		switch (m->optimization_level) {
+		case 0:
+			path = gb_string_appendc(path, ".optimization_mode=minimal");
+			break;
+		case 1:
+			path = gb_string_appendc(path, ".optimization_mode=size");
+			break;
+		case 2:
+			path = gb_string_appendc(path, ".optimization_mode=speed");
+			break;
+		case 3:
+			path = gb_string_appendc(path, ".optimization_mode=aggressive");
+			break;
+		case -1:
+		default:
+			GB_PANIC("unhandled optimization mode");
+		}
+	}
+
+	path = gb_string_appendc(path, ".ll");
+	return make_string_c(path);
 }
 
 gb_internal String lb_filepath_obj_for_module(lbModule *m) {
@@ -2569,13 +2584,30 @@ gb_internal String lb_filepath_obj_for_module(lbModule *m) {
 	path = gb_string_append_length(path, name.text, name.len);
 
 	if (m->file) {
-		char buf[32] = {};
-		isize n = gb_snprintf(buf, gb_size_of(buf), "-%u", m->file->id);
-		String suffix = make_string((u8 *)buf, n-1);
-		path = gb_string_append_length(path, suffix.text, suffix.len);
+		gb_string_append_fmt(path, "-%u", m->file->id);
 	} else if (m->pkg) {
 		path = gb_string_appendc(path, "-");
 		path = gb_string_append_length(path, m->pkg->name.text, m->pkg->name.len);
+	}
+
+	if (m->optimization_level != build_context.optimization_level) {
+		switch (m->optimization_level) {
+		case 0:
+			path = gb_string_appendc(path, ".optimization_mode=minimal");
+			break;
+		case 1:
+			path = gb_string_appendc(path, ".optimization_mode=size");
+			break;
+		case 2:
+			path = gb_string_appendc(path, ".optimization_mode=speed");
+			break;
+		case 3:
+			path = gb_string_appendc(path, ".optimization_mode=aggressive");
+			break;
+		case -1:
+		default:
+			GB_PANIC("unhandled optimization mode");
+		}
 	}
 
 	if (use_temporary_directory) {
@@ -2722,7 +2754,7 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *startup_runtime, lbProcedure *cleanup_runtime) {
 	LLVMPassManagerRef default_function_pass_manager = LLVMCreateFunctionPassManagerForModule(m->mod);
-	lb_populate_function_pass_manager(m, default_function_pass_manager, false, build_context.optimization_level);
+	lb_populate_function_pass_manager(m, default_function_pass_manager, false, m->optimization_level);
 	LLVMFinalizeFunctionPassManager(default_function_pass_manager);
 
 	Type *params  = alloc_type_tuple();
@@ -2898,6 +2930,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	isize thread_count = gb_max(build_context.thread_count, 1);
 	isize worker_count = thread_count-1;
 
+	// TODO: look at this
 	bool do_threading = !!(LLVMIsMultithreaded() && USE_SEPARATE_MODULES && MULTITHREAD_OBJECT_GENERATION && worker_count > 0);
 
 	lbModule *default_module = &gen->default_module;
@@ -3066,7 +3099,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 			gbString split_name = gb_string_make(temporary_allocator(), "");
 
-			LLVMBool is_optimized = build_context.optimization_level > 0;
+			LLVMBool is_optimized = m->optimization_level > 0;
 			AstFile *init_file = m->info->init_package->files[0];
 
 			if (Entity *entry_point = m->info->entry_point) {
@@ -3112,7 +3145,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 
 			LLVMValueRef g = LLVMAddGlobal(m->mod, internal_llvm_type, LB_TYPE_INFO_DATA_NAME);
 			LLVMSetInitializer(g, LLVMConstNull(internal_llvm_type));
-			LLVMSetLinkage(g, USE_SEPARATE_MODULES ? LLVMExternalLinkage : LLVMInternalLinkage);
+			LLVMSetLinkage(g, LLVMInternalLinkage);
 			LLVMSetUnnamedAddress(g, LLVMGlobalUnnamedAddr);
 			LLVMSetGlobalConstant(g, true);
 
@@ -3121,6 +3154,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			value.type = alloc_type_pointer(t);
 
 			lb_global_type_info_data_entity = alloc_entity_variable(nullptr, make_token_ident(LB_TYPE_INFO_DATA_NAME), t, EntityState_Resolved);
+			lb_global_type_info_data_entity->code_gen_module = m;
 			lb_add_entity(m, lb_global_type_info_data_entity, value);
 
 		}
@@ -3227,6 +3261,8 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 		lbModule *m = &gen->default_module;
 		String name = lb_get_entity_name(m, e);
 
+		e->code_gen_module = m;
+
 		lbValue g = {};
 		g.value = LLVMAddGlobal(m->mod, lb_type(m, e->type), alloc_cstring(permanent_allocator(), name));
 		g.type = alloc_type_pointer(e->type);
@@ -3260,7 +3296,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			LLVMSetLinkage(g.value, LLVMDLLExportLinkage);
 			LLVMSetDLLStorageClass(g.value, LLVMDLLExportStorageClass);
 		} else if (!is_foreign) {
-			LLVMSetLinkage(g.value, USE_SEPARATE_MODULES ? LLVMExternalLinkage : LLVMInternalLinkage);
+			LLVMSetLinkage(g.value, LLVMInternalLinkage);
 		}
 		lb_set_linkage_from_entity_flags(m, g.value, e->flags);
 		

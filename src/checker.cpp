@@ -3547,11 +3547,16 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 			} else if (mode == "favor_size") {
 				ac->optimization_mode = ProcedureOptimizationMode_FavorSize;
 			} else if (mode == "minimal") {
-				error(elem, "Invalid optimization_mode 'minimal' for '%.*s', mode has been removed due to confusion, but 'none' has the same behaviour", LIT(name));
+				// error(elem, "Invalid optimization_mode 'minimal' for '%.*s', mode has been removed due to confusion, but 'none' has the same behaviour", LIT(name));
+				ac->optimization_mode = ProcedureOptimizationMode_Minimal;
 			} else if (mode == "size") {
-				error(elem, "Invalid optimization_mode 'size' for '%.*s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", LIT(name));
+				// error(elem, "Invalid optimization_mode 'size' for '%.*s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", LIT(name));
+				ac->optimization_mode = ProcedureOptimizationMode_Size;
 			} else if (mode == "speed") {
-				error(elem, "Invalid optimization_mode 'speed' for '%.*s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", LIT(name));
+				// error(elem, "Invalid optimization_mode 'speed' for '%.*s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", LIT(name));
+				ac->optimization_mode = ProcedureOptimizationMode_Speed;
+			} else if (mode == "aggressive") {
+				ac->optimization_mode = ProcedureOptimizationMode_Aggressive;
 			} else {
 				ERROR_BLOCK();
 				error(elem, "Invalid optimization_mode for '%.*s'. Valid modes:", LIT(name));
