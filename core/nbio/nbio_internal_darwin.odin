@@ -5,11 +5,10 @@ import "base:runtime"
 
 import "core:container/queue"
 import "core:mem"
+import "core:nbio/kqueue"
 import "core:net"
 import "core:os"
 import "core:time"
-
-import kqueue "_kqueue"
 
 MAX_EVENTS :: 256
 

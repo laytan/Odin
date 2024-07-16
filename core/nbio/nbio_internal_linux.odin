@@ -7,12 +7,11 @@ import "core:c"
 import "core:container/queue"
 import "core:fmt"
 import "core:mem"
+import "core:nbio/io_uring"
 import "core:net"
 import "core:os"
 import "core:sys/linux"
 import "core:sys/unix"
-
-import io_uring "_io_uring"
 
 NANOSECONDS_PER_SECOND :: 1e+9
 
