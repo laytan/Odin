@@ -10,14 +10,13 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:mem/virtual"
+import "core:nbio"
 import "core:net"
 import "core:os"
 import "core:slice"
 import "core:sync"
 import "core:thread"
 import "core:time"
-
-import "nbio"
 
 Server_Opts :: struct {
 	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.

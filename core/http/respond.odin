@@ -5,11 +5,10 @@ import "core:bytes"
 import "core:encoding/json"
 import "core:io"
 import "core:log"
+import "core:nbio"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
-
-import "nbio"
 
 // Sets the response to one that sends the given HTML.
 respond_html :: proc(r: ^Response, html: string, status: Status = .OK, loc := #caller_location) {
