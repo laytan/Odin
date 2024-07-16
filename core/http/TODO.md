@@ -1,6 +1,7 @@
 # TODO
 
 - [ ] Make sure everything runs under `-sanitize:thread` and `-sanitize:address`
+- [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
 
 ## HTTP Server
 

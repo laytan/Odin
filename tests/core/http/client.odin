@@ -1,17 +1,14 @@
 package tests_client
 
 import "core:fmt"
+import "core:http"
+import "core:http/nbio"
 import "core:log"
 import "core:net"
 import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:thread"
-
-import http ".."
-import      "../nbio"
-
-@(require) import _ "nbio"
 
 ev :: testing.expect_value
 

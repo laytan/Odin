@@ -1,10 +1,9 @@
 package tests_nbio
 
+import "core:http/nbio"
 import "core:net"
 import "core:os"
 import "core:testing"
-
-import "../../nbio"
 
 ev :: testing.expect_value
 e  :: testing.expect
