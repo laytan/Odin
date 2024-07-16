@@ -1,7 +1,7 @@
 // package client provides a HTTP/1.1 client.
 package http
 
-import "nbio"
+import "core:nbio"
 
 // TODO: timeouts
 
