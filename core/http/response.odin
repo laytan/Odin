@@ -4,11 +4,10 @@ package http
 import "core:bytes"
 import "core:io"
 import "core:log"
+import "core:nbio"
 import "core:net"
 import "core:slice"
 import "core:strconv"
-
-import "nbio"
 
 Response :: struct {
 	// Add your headers and cookies here directly.

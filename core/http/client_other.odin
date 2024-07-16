@@ -13,9 +13,8 @@ import      "core:strconv"
 import      "core:strings"
 import      "core:slice"
 import cio  "core:io"
-
-import      "dns"
-import      "nbio"
+import      "core:http/dns"
+import      "core:nbio"
 
 _client_init :: proc(c: ^Client, io: ^nbio.IO, allocator := context.allocator) -> bool {
 	c.allocator = allocator

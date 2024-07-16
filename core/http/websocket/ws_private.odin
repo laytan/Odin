@@ -2,19 +2,19 @@
 package websocket
 
 import "base:intrinsics"
+
 import "core:bufio"
 import "core:encoding/endian"
+import "core:http"
 import "core:io"
 import "core:log"
 import "core:mem"
+import "core:nbio"
 import "core:net"
+import "core:slice"
 import "core:sync"
 import "core:time"
 import "core:unicode/utf8"
-import "core:slice"
-
-import http ".."
-import      "../nbio"
 
 // GUID for the WebSocket protocol.
 @(rodata)
