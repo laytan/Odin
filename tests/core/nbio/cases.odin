@@ -1,7 +1,8 @@
 package tests_nbio
 
-import "core:http/nbio"
+import "core:log"
 import "core:mem"
+import "core:nbio"
 import "core:net"
 import "core:os"
 import "core:sync"
@@ -9,18 +10,30 @@ import "core:testing"
 import "core:thread"
 import "core:time"
 
-get_endpoint :: proc() -> net.Endpoint {
+open_next_available_local_port :: proc(t: ^testing.T, io: ^nbio.IO, loc := #caller_location) -> (sock: net.TCP_Socket, ep: net.Endpoint) {
 	@static mu: sync.Mutex
 	sync.guard(&mu)
 
-	PORT_START :: 3000
-	@static port: int
-	if port == 0 {
-		port = PORT_START
-	}
+	for {
+		PORT_START :: 1999
+		@static port := PORT_START
 
-	port += 1
-	return {net.IP4_Loopback, port}
+		port += 1
+		ep = {net.IP4_Loopback, port}
+
+		err: net.Network_Error
+		sock, err = nbio.open_and_listen_tcp(io, ep)
+		if err != nil {
+			if err == net.Dial_Error.Address_In_Use {
+				log.infof("endpoint %v in use, trying next port", ep, location=loc)
+				continue
+			}
+
+			log.panicf("nbio.open_and_listen_tcp failed: %v", err, location=loc)
+		}
+
+		return
+	}
 }
 
 @(test)
@@ -103,10 +116,7 @@ client_and_server_send_recv :: proc(t: ^testing.T) {
 	ev(t, nbio.init(&io), os.ERROR_NONE)
 	defer nbio.destroy(&io)
 
-	EP := get_endpoint()
-
-	server, err := nbio.open_and_listen_tcp(&io, EP)
-	ev(t, err, nil)
+	server, ep := open_next_available_local_port(t, &io)
 
 	CONTENT :: [20]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
 
@@ -144,7 +154,7 @@ client_and_server_send_recv :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(&io), os.ERROR_NONE)
 
-	nbio.connect(&io, EP, &io, t, &state, proc(io: ^nbio.IO, t: ^testing.T, state: ^State, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.connect(&io, ep, &io, t, &state, proc(io: ^nbio.IO, t: ^testing.T, state: ^State, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 
 		state.client = socket
@@ -166,8 +176,7 @@ close_and_remove_accept :: proc(t: ^testing.T) {
 	ev(t, nbio.init(&io), os.ERROR_NONE)
 	defer nbio.destroy(&io)
 
-	server, err := nbio.open_and_listen_tcp(&io, get_endpoint())
-	ev(t, err, nil)
+	server, _ := open_next_available_local_port(t, &io)
 
 	accept := nbio.accept(&io, server, t, proc(t: ^testing.T, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		testing.fail_now(t)
@@ -190,10 +199,7 @@ close_errors_recv :: proc(t: ^testing.T) {
 	ev(t, nbio.init(&io), os.ERROR_NONE)
 	defer nbio.destroy(&io)
 
-	EP := get_endpoint()
-
-	server, err := nbio.open_and_listen_tcp(&io, EP)
-	ev(t, err, nil)
+	server, ep := open_next_available_local_port(t, &io)
 
 	nbio.accept(&io, server, t, &io, proc(t: ^testing.T, io: ^nbio.IO, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ev(t, err, nil)
@@ -206,7 +212,7 @@ close_errors_recv :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(&io), os.ERROR_NONE)
 
-	nbio.connect(&io, EP, t, &io, proc(t: ^testing.T, io: ^nbio.IO, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.connect(&io, ep, t, &io, proc(t: ^testing.T, io: ^nbio.IO, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 		nbio.close(io, socket, t, proc(t: ^testing.T, ok: bool) {
 			ev(t, ok, true)
@@ -222,10 +228,7 @@ close_errors_send :: proc(t: ^testing.T) {
 	ev(t, nbio.init(&io), os.ERROR_NONE)
 	defer nbio.destroy(&io)
 
-	EP := get_endpoint()
-
-	server, err := nbio.open_and_listen_tcp(&io, EP)
-	ev(t, err, nil)
+	server, ep := open_next_available_local_port(t, &io)
 
 	nbio.accept(&io, server, t, &io, proc(t: ^testing.T, io: ^nbio.IO, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ev(t, err, nil)
@@ -238,7 +241,7 @@ close_errors_send :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(&io), os.ERROR_NONE)
 
-	nbio.connect(&io, EP, t, &io, proc(t: ^testing.T, io: ^nbio.IO, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.connect(&io, ep, t, &io, proc(t: ^testing.T, io: ^nbio.IO, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 		nbio.close(io, socket, t, proc(t: ^testing.T, ok: bool) {
 			ev(t, ok, true)
