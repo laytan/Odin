@@ -1,8 +1,7 @@
 package tests_client
 
-import "core:fmt"
 import "core:http"
-import "core:http/nbio"
+import "core:nbio"
 import "core:log"
 import "core:net"
 import "core:os"
@@ -20,18 +19,29 @@ require_value :: proc(t: ^testing.T, val: $T, test: T, format := "", args: ..any
 
 rv :: require_value
 
-get_endpoint :: proc() -> net.Endpoint {
+listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts := http.Default_Server_Opts, loc := #caller_location) -> (ep: net.Endpoint) {
 	@static mu: sync.Mutex
 	sync.guard(&mu)
 
-	PORT_START :: 4000
-	@static port: int
-	if port == 0 {
-		port = PORT_START
-	}
+	for {
+		PORT_START :: 1999
+		@static port := PORT_START
 
-	port += 1
-	return {net.IP4_Loopback, port}
+		port += 1
+		ep = {net.IP4_Loopback, port}
+
+		err := http.listen(s, ep, opts)
+		if err != nil {
+			if err == net.Dial_Error.Address_In_Use {
+				log.infof("endpoint %v in use, trying next port", ep, location=loc)
+				continue
+			}
+
+			log.panicf("http.listen failed: %v", err, location=loc)
+		}
+
+		return
+	}
 }
 
 // Send a simple request and expect OK.
@@ -44,10 +54,7 @@ test_ok :: proc(tt: ^testing.T) {
 	opts := http.Default_Server_Opts
 	opts.thread_count = 0
 
-	ep := get_endpoint()
-
-
-	rv(t, http.listen(&s, ep, opts), nil)
+	ep := listen_next_available_local_port(t, &s, opts)
 
 	///
 
@@ -87,10 +94,14 @@ test_ok :: proc(tt: ^testing.T) {
 // two connections are reused.
 @(test)
 connection_pool :: proc(t: ^testing.T) {
-	s: http.Server
-	ep := get_endpoint()
+	State :: struct {
+		s:         http.Server,
+		ep:        net.Endpoint,
+		listening: sync.One_Shot_Event,
+	}
+	s: State
 
-	server_thread := thread.create_and_start_with_poly_data3(t, &s, &ep, proc(t: ^testing.T, s: ^http.Server, ep: ^net.Endpoint) {
+	server_thread := thread.create_and_start_with_poly_data2(t, &s, proc(t: ^testing.T, s: ^State) {
 		opts := http.Default_Server_Opts
 		opts.thread_count = 0
 
@@ -99,7 +110,11 @@ connection_pool :: proc(t: ^testing.T) {
 			http.respond(res)
 		})
 
-		ev(t, http.listen_and_serve(s, handler, ep^, opts), nil)
+		s.ep = listen_next_available_local_port(t, &s.s, opts)
+
+		sync.one_shot_event_signal(&s.listening)
+
+		ev(t, http.serve(&s.s, handler), nil)
 	}, init_context=context)
 	defer thread.destroy(server_thread)
 
@@ -110,8 +125,10 @@ connection_pool :: proc(t: ^testing.T) {
 	@static client: http.Client
 	http.client_init(&client, &io)
 
+	sync.one_shot_event_wait(&s.listening)
+
 	req := http.Client_Request{
-		url = net.endpoint_to_string(ep),
+		url = net.endpoint_to_string(s.ep),
 	}
 
 	for _ in 0..<2 {
@@ -140,7 +157,7 @@ connection_pool :: proc(t: ^testing.T) {
 	http.client_destroy(&client)
 	ev(t, nbio.run(&io), os.ERROR_NONE)
 
-	http.server_shutdown(&s)
+	http.server_shutdown(&s.s)
 }
 
 // Send a request, server closes the connection after successfully responding, client sends another
@@ -162,9 +179,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 	opts := http.Default_Server_Opts
 	opts.thread_count = 0
 
-	ep := get_endpoint()
-
-	rv(t, http.listen(&state.s, ep, opts), nil)
+	ep := listen_next_available_local_port(t, &state.s, opts)
 
 	///
 
