@@ -1,14 +1,13 @@
 package tests_nbio
 
+import "core:http/nbio"
 import "core:mem"
 import "core:net"
 import "core:os"
 import "core:sync"
 import "core:testing"
-import "core:time"
 import "core:thread"
-
-import "../../nbio"
+import "core:time"
 
 get_endpoint :: proc() -> net.Endpoint {
 	@static mu: sync.Mutex
