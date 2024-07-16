@@ -1,11 +1,10 @@
 package nbio
 
 import "core:container/queue"
+import "core:nbio/kqueue"
 import "core:net"
 import "core:os"
 import "core:time"
-
-import kqueue "_kqueue"
 
 _init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
 	qerr: kqueue.Queue_Error

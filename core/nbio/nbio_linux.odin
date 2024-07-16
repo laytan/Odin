@@ -1,12 +1,11 @@
 package nbio
 
 import "core:container/queue"
+import "core:nbio/io_uring"
 import "core:net"
 import "core:os"
 import "core:sys/unix"
 import "core:time"
-
-import io_uring "_io_uring"
 
 _init :: proc(io: ^IO, alloc := context.allocator) -> (err: os.Errno) {
 	flags: u32 = 0
