@@ -5,15 +5,11 @@ import "core:c/libc"
 import "core:http"
 import "core:net"
 
-when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 {
+when ODIN_OS == .Windows {
+	// TODO: set up CI to build and PR new versions.
 	foreign import lib {
-		"./includes/darwin/libssl.a",
-		"./includes/darwin/libcrypto.a",
-	}
-} else when ODIN_OS == .Windows {
-	foreign import lib {
-		"./includes/windows/libssl.lib",
-		"./includes/windows/libcrypto.lib",
+		"./libssl.lib",
+		"./libcrypto.lib",
 	}
 } else {
 	foreign import lib {
