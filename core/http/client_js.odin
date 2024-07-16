@@ -3,9 +3,8 @@ package http
 
 import "base:runtime"
 
+import "core:nbio"
 import "core:slice"
-
-import "nbio"
 
 foreign import "odin_io"
 
