@@ -1,10 +1,9 @@
 package openssl
 
 import "core:c"
-import "core:net"
 import "core:c/libc"
-
-import http ".."
+import "core:http"
+import "core:net"
 
 when ODIN_OS == .Darwin && ODIN_ARCH == .arm64 {
 	foreign import lib {
