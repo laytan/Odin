@@ -32,8 +32,8 @@ headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) 
 		panic("these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 	}
 
-    l := sanitize_key(h^, k)
-    h._kv[l] = v
+	l := sanitize_key(h^, k)
+	h._kv[l] = v
 	return l
 }
 
@@ -134,7 +134,7 @@ headers_sanitize :: proc(headers: ^Headers) -> bool {
 // Escapes any newlines and converts ASCII to lowercase.
 @(private="file")
 sanitize_key :: proc(h: Headers, k: string) -> string {
-    allocator := h._kv.allocator
+	allocator := h._kv.allocator
 
 	// general +4 in rare case of newlines, so we might not need to reallocate.
 	b := strings.builder_make(0, len(k)+4, allocator)

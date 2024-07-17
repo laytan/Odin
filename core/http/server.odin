@@ -503,9 +503,9 @@ conn_handle_reqs :: proc(c: ^Connection) {
 
 	// allocator_init(&c.temp_allocator, c.server.conn_allocator)
 	// context.temp_allocator = allocator(&c.temp_allocator)
-    err := virtual.arena_init_growing(&c.temp_allocator)
-    assert(err == nil)
-    context.temp_allocator = virtual.arena_allocator(&c.temp_allocator)
+	err := virtual.arena_init_growing(&c.temp_allocator)
+	assert(err == nil)
+	context.temp_allocator = virtual.arena_allocator(&c.temp_allocator)
 
 	conn_handle_req(c, context.temp_allocator)
 }
@@ -634,7 +634,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 
 		// Automatically respond with a continue status when the client has the Expect: 100-continue header.
 		if expect, ok := headers_get_unsafe(l.req.headers, "expect");
-		   ok && expect == "100-continue" && l.conn.server.opts.auto_expect_continue {
+			ok && expect == "100-continue" && l.conn.server.opts.auto_expect_continue {
 
 			l.res.status = .Continue
 
