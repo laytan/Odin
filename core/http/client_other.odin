@@ -208,12 +208,12 @@ Client_Connection_State :: enum {
 
 _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Response) {
 	host := url_parse(req.url).host
-    host_or_endpoint, err := net.parse_hostname_or_endpoint(host)
-    if err != nil {
+	host_or_endpoint, err := net.parse_hostname_or_endpoint(host)
+	if err != nil {
 		log.warnf("Invalid request URL %q: %v", req.url, err)
-        cb({}, user, .Bad_URL)
-        return
-    }
+		cb({}, user, .Bad_URL)
+		return
+	}
 
 	r := new(In_Flight, c.allocator)
 	r.r = req
@@ -221,7 +221,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 	r.user = user
 	r.cb = cb
 
-    switch t in host_or_endpoint {
+	switch t in host_or_endpoint {
     case net.Endpoint:
 		r.ep.net = t
 		on_dns_resolve(r, { t.address, max(u32) }, nil)
@@ -229,7 +229,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 		r.ep.port = t.port
 		dns.resolve(&c.dnsc, t.hostname, r, on_dns_resolve)
     case:
-        unreachable()
+		unreachable()
     }
 
 	on_dns_resolve :: proc(r: rawptr, record: dns.Record, err: net.Network_Error) {

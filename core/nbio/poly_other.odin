@@ -140,10 +140,10 @@ connect1 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T,
 		p   := (^T)(rawptr(ptr + size_of(C)))^
 		cb(p, socket, err)
 	})
-    if err != nil {
-        callback(p, {}, err)
-        return completion
-    }
+	if err != nil {
+		callback(p, {}, err)
+		return completion
+	}
 
 	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
@@ -164,10 +164,10 @@ connect2 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/p
 		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
 		cb(p, p2, socket, err)
 	})
-    if err != nil {
-        callback(p, p2, {}, err)
-        return completion
-    }
+	if err != nil {
+		callback(p, p2, {}, err)
+		return completion
+	}
 
 	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
@@ -190,10 +190,10 @@ connect3 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callb
 		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
 		cb(p, p2, p3, socket, err)
 	})
-    if err != nil {
-        callback(p, p2, p3, {}, err)
-        return completion
-    }
+	if err != nil {
+		callback(p, p2, p3, {}, err)
+		return completion
+	}
 
 	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
