@@ -9,6 +9,8 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 
+import ssl_http "vendor:openssl/http"
+
 ev :: testing.expect_value
 
 require_value :: proc(t: ^testing.T, val: $T, test: T, format := "", args: ..any, loc := #caller_location) {
@@ -235,4 +237,40 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 		http.respond(res)
 	})
 	ev(t, http.serve(&state.s, handler), nil)
+}
+
+@(test)
+openssl :: proc(t: ^testing.T) {
+	http.set_client_ssl(ssl_http.http_client_ssl_implementation())
+
+	State :: struct {
+		t:      ^testing.T,
+		io:     nbio.IO,
+		client: http.Client,
+	}
+	s: State
+	s.t = t
+
+	ev(t, nbio.init(&s.io), os.ERROR_NONE)
+	defer nbio.destroy(&s.io)
+
+	http.client_init(&s.client, &s.io)
+
+	req := http.Client_Request{
+		url = "https://www.google.com/",
+	}
+
+	http.client_request(&s.client, req, &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+		s := (^State)(user)
+
+		ev(s.t, err, nil)
+		ev(s.t, res.status, http.Status.OK)
+
+		log.debug("cleaning up")
+
+		http.response_destroy(&s.client, res)
+		http.client_destroy(&s.client)
+	})
+
+	ev(t, nbio.run(&s.io), os.ERROR_NONE)
 }
