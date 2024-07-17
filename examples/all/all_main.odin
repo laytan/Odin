@@ -73,6 +73,10 @@ import fmt              "core:fmt"
 import hash             "core:hash"
 import xxhash           "core:hash/xxhash"
 
+import http             "core:http"
+import dns              "core:http/dns"
+import websocket        "core:http/websocket"
+
 import image            "core:image"
 import bmp              "core:image/bmp"
 import netpbm           "core:image/netpbm"
@@ -98,6 +102,8 @@ import cmplx            "core:math/cmplx"
 import mem              "core:mem"
 import tlsf             "core:mem/tlsf"
 import virtual          "core:mem/virtual"
+
+import nbio             "core:nbio"
 
 import ast              "core:odin/ast"
 import doc_format       "core:odin/doc-format"
@@ -208,6 +214,9 @@ _ :: cbor
 _ :: fmt
 _ :: hash
 _ :: xxhash
+_ :: http
+_ :: dns
+_ :: websocket
 _ :: image
 _ :: bmp
 _ :: netpbm
@@ -230,6 +239,7 @@ _ :: cmplx
 _ :: mem
 _ :: tlsf
 _ :: virtual
+_ :: nbio
 _ :: ast
 _ :: doc_format
 _ :: odin_parser
