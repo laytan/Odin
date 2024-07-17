@@ -338,14 +338,14 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		log.debug("got DNS record", rec)
 		nbio.close(req.client.io, req.socket)
 
-        expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
-        nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
-
 		free(req)
 
         entry := &req.client.cache[req.hostname]
         entry.resolving = false
         entry.record = rec
+
+        expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
+        entry.evictor = nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
 
         for cb in entry.callbacks {
 		    cb.cb(cb.ud, rec, nil)
