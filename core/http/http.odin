@@ -58,12 +58,15 @@ requestline_write :: proc(w: io.Writer, rline: Requestline) -> io.Error {
 	io.write_byte(w, ' ')                           or_return // <METHOD> <SP>
 
 	switch t in rline.target {
-	case string: io.write_string(w, t)              or_return // <METHOD> <SP> <TARGET>
-	case URL:    request_path_write(w, t)           or_return // <METHOD> <SP> <TARGET>
+	case string:
+		url := url_parse(t)              
+		request_path_write(w, url)                                    or_return // <METHOD> <SP> <TARGET>
+	case URL:
+		request_path_write(w, t)                                      or_return // <METHOD> <SP> <TARGET>
 	}
 
 	io.write_byte(w, ' ')                           or_return // <METHOD> <SP> <TARGET> <SP>
-	version_write(w, rline.version)                 or_return // <METHOD> <SP> <TARGET> <SP> <VERSION>
+	version_write(w, rline.version)                                   or_return // <METHOD> <SP> <TARGET> <SP> <VERSION>
 	io.write_string(w, "\r\n")                      or_return // <METHOD> <SP> <TARGET> <SP> <VERSION> <CRLF>
 
 	return nil

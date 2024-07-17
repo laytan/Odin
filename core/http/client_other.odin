@@ -482,6 +482,8 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 	send_https_request :: proc(r: ^In_Flight) {
 		ssl_write_req(r, nil)
 
+		log.debugf("Sending HTTPS request:\n%v%v", string(r.conn.buf.buf[:]), string(r.body))
+
 		ssl_write_req :: proc(r: ^In_Flight, _: nbio.Poll_Event) {
 			switch n, res := client_ssl.send(r.conn.ssl, r.conn.buf.buf[:]); res {
 			case .None:
