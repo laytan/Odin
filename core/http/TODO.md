@@ -2,7 +2,7 @@
 
 - [ ] Make sure everything runs under `-sanitize:thread` and `-sanitize:address`
 - [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
-- [ ] Build/update openssl using CI (on a cron?)
+- [x] Build/update openssl using CI (on a cron?)
 
 ## HTTP Server
 

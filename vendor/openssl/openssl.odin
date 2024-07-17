@@ -2,20 +2,52 @@ package openssl
 
 import "core:c"
 import "core:c/libc"
-import "core:http"
-import "core:net"
+
+SHARED :: #config(OPENSSL_SHARED, false)
 
 when ODIN_OS == .Windows {
-	// TODO: set up CI to build and PR new versions.
+	when SHARED {
+		foreign import lib {
+			"./windows/libssl.lib",
+			"./windows/libcrypto.lib",
+		}
+	} else {
+		@(extra_linker_flags="/nodefaultlib:libcmt")
+		foreign import lib {
+			"./windows/libssl_static.lib",
+			"./windows/libcrypto_static.lib",
+			"system:ws2_32.lib",
+			"system:gdi32.lib",
+			"system:advapi32.lib",
+			"system:crypt32.lib",
+			"system:user32.lib",
+		}
+	}
+} else when ODIN_OS == .Darwin {
 	foreign import lib {
-		"./libssl.lib",
-		"./libcrypto.lib",
+		"system:ssl.3",
+		"system:crypto.3",
 	}
 } else {
 	foreign import lib {
 		"system:ssl",
 		"system:crypto",
 	}
+}
+
+Version :: bit_field u32 {
+	pre_release: uint | 4,
+	patch:       uint | 16,
+	minor:       uint | 8,
+	major:       uint | 4,
+}
+
+VERSION: Version
+
+@(private, init)
+version_check :: proc() {
+    VERSION = Version(OpenSSL_version_num())
+    assert(VERSION.major == 3, "invalid OpenSSL library version, expected 3.x")
 }
 
 SSL_METHOD :: struct {}
@@ -42,6 +74,7 @@ foreign lib {
 	SSL_free :: proc(ssl: ^SSL) ---
 	SSL_CTX_free :: proc(ctx: ^SSL_CTX) ---
 	SSL_ctrl :: proc(ssl: ^SSL, cmd: c.int, larg: c.long, parg: rawptr) -> c.long ---
+    OpenSSL_version_num :: proc() -> c.ulong ---
 }
 
 // This is a macro in c land.
@@ -71,83 +104,5 @@ Error :: enum c.int {
 	Want_Async,
 	Want_Async_Job,
 	Want_Client_Hello_CB,
-}
-
-http_client_ssl_implementation :: proc() -> http.Client_SSL {
-	return {
-		implemented = true,
-		client_create = proc() -> http.SSL_Client {
-			method := TLS_client_method()
-			assert(method != nil)
-			ctx := SSL_CTX_new(method)
-			assert(ctx != nil)
-			return http.SSL_Client(ctx)
-		},
-		client_destroy = proc(c: http.SSL_Client) {
-			SSL_CTX_free((^SSL_CTX)(c))
-		},
-		connection_create = proc(c: http.SSL_Client, socket: net.TCP_Socket, host: cstring) -> http.SSL_Connection {
-			conn := SSL_new((^SSL_CTX)(c))
-			assert(conn != nil)
-			ret: i32
-			ret = SSL_set_tlsext_host_name(conn, host)
-			assert(ret == 1)
-			ret = SSL_set_fd(conn, i32(socket))
-			assert(ret == 1)
-			return http.SSL_Connection(conn)
-		},
-		connection_destroy = proc(c: http.SSL_Client, conn: http.SSL_Connection) {
-			SSL_free((^SSL)(conn))
-		},
-		connect = proc(c: http.SSL_Connection) -> http.SSL_Result {
-			ssl := (^SSL)(c)
-			switch ret := SSL_connect(ssl); ret {
-			case 1:
-				return nil
-			case 0:
-				return .Shutdown
-			case:
-				assert(ret < 0)
-				#partial switch SSL_get_error(ssl, ret) {
-				case .Want_Read:  return .Want_Read
-				case .Want_Write: return .Want_Write
-				case:             return .Fatal
-				}
-			}
-		},
-		send = proc(c: http.SSL_Connection, buf: []byte) -> (int, http.SSL_Result) {
-			ssl := (^SSL)(c)
-			assert(len(buf) > 0)
-			assert(len(buf) <= int(max(i32)))
-			switch ret := SSL_write(ssl, raw_data(buf), i32(len(buf))); {
-			case ret > 0:
-				assert(int(ret) == len(buf))
-				return int(ret), nil
-			case:
-				#partial switch SSL_get_error(ssl, ret) {
-				case .Want_Read:   return 0, .Want_Read
-				case .Want_Write:  return 0, .Want_Write
-				case .Zero_Return: return 0, .Shutdown
-				case:              return 0, .Fatal
-				}
-			}
-		},
-		recv = proc(c: http.SSL_Connection, buf: []byte) -> (int, http.SSL_Result) {
-			ssl := (^SSL)(c)
-			assert(len(buf) > 0)
-			assert(len(buf) <= int(max(i32)))
-			switch ret := SSL_read(ssl, raw_data(buf), i32(len(buf))); {
-			case ret > 0:
-				return int(ret), nil
-			case:
-				#partial switch SSL_get_error(ssl, ret) {
-				case .Want_Read:   return 0, .Want_Read
-				case .Want_Write:  return 0, .Want_Write
-				case .Zero_Return: return 0, .Shutdown
-				case:              return 0, .Fatal
-				}
-			}
-		},
-	}
 }
 

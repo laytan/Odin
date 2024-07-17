@@ -22,6 +22,7 @@ SSL_Result :: enum {
 
 Client_SSL :: struct {
 	implemented:        bool,
+	user_data:          rawptr,
 	client_create:      proc() -> SSL_Client,
 	client_destroy:     proc(client: SSL_Client),
 	connection_create:  proc(client: SSL_Client, socket: net.TCP_Socket, host: cstring) -> SSL_Connection,
