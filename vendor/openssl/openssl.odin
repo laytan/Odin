@@ -46,8 +46,8 @@ VERSION: Version
 
 @(private, init)
 version_check :: proc() {
-    VERSION = Version(OpenSSL_version_num())
-    assert(VERSION.major == 3, "invalid OpenSSL library version, expected 3.x")
+	VERSION = Version(OpenSSL_version_num())
+	assert(VERSION.major == 3, "invalid OpenSSL library version, expected 3.x")
 }
 
 SSL_METHOD :: struct {}
@@ -74,7 +74,7 @@ foreign lib {
 	SSL_free :: proc(ssl: ^SSL) ---
 	SSL_CTX_free :: proc(ctx: ^SSL_CTX) ---
 	SSL_ctrl :: proc(ssl: ^SSL, cmd: c.int, larg: c.long, parg: rawptr) -> c.long ---
-    OpenSSL_version_num :: proc() -> c.ulong ---
+	OpenSSL_version_num :: proc() -> c.ulong ---
 }
 
 // This is a macro in c land.
@@ -105,4 +105,3 @@ Error :: enum c.int {
 	Want_Async_Job,
 	Want_Client_Hello_CB,
 }
-
