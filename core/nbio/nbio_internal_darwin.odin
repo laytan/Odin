@@ -150,11 +150,11 @@ flush :: proc(io: ^IO) -> os.Errno {
 
 		if completed.timeout == (^Completion)(TIMED_OUT) {
 			time_out_op(io, completed)
-            pool_put(&io.completion_pool, completed)
+			pool_put(&io.completion_pool, completed)
 			continue
 		} else if completed.timeout == (^Completion)(REMOVED) {
-            pool_put(&io.completion_pool, completed)
-            continue
+			pool_put(&io.completion_pool, completed)
+			continue
         }
 
 		switch &op in completed.operation {
@@ -204,11 +204,11 @@ flush_io :: proc(io: ^IO, events: []kqueue.KEvent) -> (changed_events: int, comp
 
 		if completion.timeout == (^Completion)(TIMED_OUT) {
 			time_out_op(io, completion)
-            pool_put(&io.completion_pool, completion)
+			pool_put(&io.completion_pool, completion)
 			i -= 1
 			continue
 		} else if completion.timeout == (^Completion)(REMOVED) {
-            pool_put(&io.completion_pool, completion)
+			pool_put(&io.completion_pool, completion)
 			i -= 1
 			continue
         }

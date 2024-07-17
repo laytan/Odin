@@ -29,11 +29,11 @@ On_Init :: #type proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, ho
 
 // WARNING: Consider all these fields private.
 Client :: struct {
-    allocator: mem.Allocator,
+	allocator: mem.Allocator,
 
 	io: ^nbio.IO,
 
-    // Hosts/Name servers configuration.
+	// Hosts/Name servers configuration.
 	name_servers:     []net.Endpoint,
 	name_servers_err: Init_Error,
 
@@ -43,7 +43,7 @@ Client :: struct {
 	init_cb: On_Init,
 	init_ud: rawptr,
 
-    cache: map[string]Cache_Entry,
+	cache: map[string]Cache_Entry,
 }
 
 Record :: struct {
@@ -53,22 +53,22 @@ Record :: struct {
 
 @(private)
 Cache_Entry :: struct {
-    record:    Record,
-    resolving: bool,
-    err:       net.Network_Error,
-    callbacks: [dynamic]Callback,
-    evictor:   ^nbio.Completion,
+	record:    Record,
+	resolving: bool,
+	err:       net.Network_Error,
+	callbacks: [dynamic]Callback,
+	evictor:   ^nbio.Completion,
 }
 
 @(private)
 Callback :: struct {
-    cb: On_Resolve,
-    ud: rawptr,
+	cb: On_Resolve,
+	ud: rawptr,
 }
 
 init :: proc(c: ^Client, io: ^nbio.IO, user_data: rawptr, on_init: On_Init, allocator := context.allocator) {
-    c.allocator = allocator
-    c.cache.allocator = allocator
+	c.allocator = allocator
+	c.cache.allocator = allocator
 
 	c.io = io
 
@@ -132,24 +132,24 @@ destroy_cb :: proc(c: ^Client, user: rawptr, cb: proc(user: rawptr)) {
 
 // Removes any cache entries that aren't currently being resolved.
 cache_clear :: proc(c: ^Client) {
-    for hostname, entry in c.cache {
-        if entry.resolving { continue }
-        log.debugf("DNS of %q has been evicted", hostname)
+	for hostname, entry in c.cache {
+		if entry.resolving { continue }
+		log.debugf("DNS of %q has been evicted", hostname)
 
-        delete(hostname, c.allocator)
-        delete_key(&c.cache, hostname)
-        nbio.remove(c.io, entry.evictor)
-    }
+		delete(hostname, c.allocator)
+		delete_key(&c.cache, hostname)
+		nbio.remove(c.io, entry.evictor)
+	}
 }
 
 // Removes the entry (if it exists) for the given hostname from the DNS cache.
 cache_evict :: proc(c: ^Client, hostname: string) {
-    if entry, ok := c.cache[hostname]; ok {
-        log.debugf("DNS of %q has been evicted", hostname)
-        delete_key(&c.cache, hostname)
-        delete(hostname, c.allocator)
-        nbio.remove(c.io, entry.evictor)
-    }
+	if entry, ok := c.cache[hostname]; ok {
+		log.debugf("DNS of %q has been evicted", hostname)
+		delete_key(&c.cache, hostname)
+		delete(hostname, c.allocator)
+		nbio.remove(c.io, entry.evictor)
+	}
 }
 
 // Removes entries so that the cache has at most `max_entries` in it.
@@ -172,7 +172,7 @@ On_Resolve :: #type proc(user: rawptr, record: Record, err: net.Network_Error)
 @(private)
 Request :: struct {
 	client:      ^Client,
-    hostname:    string,
+	hostname:    string,
 	name_server: int,
 	packet:      [net.DNS_PACKET_MIN_LEN]byte,
 	packet_len:  int,
@@ -216,16 +216,16 @@ Address_Family :: enum {
 resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	log.debugf("resolving DNS for %q", hostname)
 
-    if cached, ok := &c.cache[hostname]; ok {
-        if cached.resolving {
-            log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
-            append(&cached.callbacks, Callback{cb, user})
-        } else {
-            log.debugf("got DNS of %q from cache", hostname)
-            cb(user, cached.record, cached.err)
-        }
-        return
-    }
+	if cached, ok := &c.cache[hostname]; ok {
+		if cached.resolving {
+			log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
+			append(&cached.callbacks, Callback{cb, user})
+		} else {
+			log.debugf("got DNS of %q from cache", hostname)
+			cb(user, cached.record, cached.err)
+		}
+		return
+	}
 
 	log.debugf("%q not in cache", hostname)
 
@@ -254,14 +254,14 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 	log.debug("querying name servers for IP4 records")
 
-    host  := strings.clone(hostname, c.allocator)
+	host  := strings.clone(hostname, c.allocator)
 
-    entry := map_insert(&c.cache, host, Cache_Entry{ resolving = true })
-    entry.callbacks = make([dynamic]Callback, 1, c.allocator)
-    entry.callbacks[0] = {cb, user}
+	entry := map_insert(&c.cache, host, Cache_Entry{ resolving = true })
+	entry.callbacks = make([dynamic]Callback, 1, c.allocator)
+	entry.callbacks[0] = {cb, user}
 
-    req := new(Request, c.allocator)
-    req.hostname = host
+	req := new(Request, c.allocator)
+	req.hostname = host
 	req.family   = .IP4
 
 	packet, err := net.make_dns_packet(req.packet[:], hostname, .IP4)
@@ -298,20 +298,20 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 				change_dns_packet_family(req.packet[:req.packet_len], .DNS_TYPE_NS)
 				next(req, nil)
 			case .IP6:
-                entry := &req.client.cache[req.hostname]
-                entry.err = .Unable_To_Resolve if req.err == nil else req.err
-                entry.resolving = false
+				entry := &req.client.cache[req.hostname]
+				entry.err = .Unable_To_Resolve if req.err == nil else req.err
+				entry.resolving = false
 				log.warn("no DNS results gotten from IP6 either, calling callbacks with error:", entry.err)
 
-                // Evict the cached error after a minute.
-                nbio.timeout(req.client.io, time.Minute, req.client, req.hostname, evict_record)
+				// Evict the cached error after a minute.
+				nbio.timeout(req.client.io, time.Minute, req.client, req.hostname, evict_record)
 
 				free(req)
 
-                for cb in entry.callbacks {
-                    cb.cb(cb.ud, {}, entry.err)
-                }
-                delete(entry.callbacks)
+				for cb in entry.callbacks {
+					cb.cb(cb.ud, {}, entry.err)
+				}
+				delete(entry.callbacks)
 			case:
 				unreachable()
 			}
@@ -340,26 +340,26 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 		free(req)
 
-        entry := &req.client.cache[req.hostname]
-        entry.resolving = false
-        entry.record = rec
+		entry := &req.client.cache[req.hostname]
+		entry.resolving = false
+		entry.record = rec
 
-        expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
-        entry.evictor = nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
+		expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
+		entry.evictor = nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
 
-        for cb in entry.callbacks {
-		    cb.cb(cb.ud, rec, nil)
-        }
-        delete(entry.callbacks)
+		for cb in entry.callbacks {
+			cb.cb(cb.ud, rec, nil)
+		}
+		delete(entry.callbacks)
 	}
 
-    evict_record :: proc(c: ^Client, hostname: string) {
-        if entry, ok := c.cache[hostname]; ok {
-            log.debugf("DNS TTL of %vs from %q has expired", entry.record.ttl_secs, hostname)
-            delete_key(&c.cache, hostname)
-            delete(hostname, c.allocator)
-        }
-    }
+	evict_record :: proc(c: ^Client, hostname: string) {
+		if entry, ok := c.cache[hostname]; ok {
+			log.debugf("DNS TTL of %vs from %q has expired", entry.record.ttl_secs, hostname)
+			delete_key(&c.cache, hostname)
+			delete(hostname, c.allocator)
+		}
+	}
 
 	on_sent :: proc(req: ^Request, n: int, err: net.Network_Error) {
 		log.debugf("sent a %m packet with %v err, receiving response", n, err)
@@ -592,4 +592,3 @@ parse_record :: proc(packet: []byte, cur_off: ^int) -> (family: Address_Family, 
 		return nil, {}, true
 	}
 }
-

@@ -105,7 +105,7 @@ scanner_scan1 :: proc(s: ^Scanner, p: $T, cb: $C/proc(p: T, token: string, err: 
 
 	cb, p := cb, p
 	n := copy(s.user_data[:],  mem.ptr_to_bytes(&cb))
-	     copy(s.user_data[n:], mem.ptr_to_bytes(&p))
+	_  = copy(s.user_data[n:], mem.ptr_to_bytes(&p))
 
 	_scanner_scan(s)
 }
@@ -123,7 +123,7 @@ scanner_scan2 :: proc(s: ^Scanner, p: $T, p2: $T2, cb: $C/proc(p: T, p2: T2, tok
 	cb, p, p2 := cb, p, p2
 	n := copy(s.user_data[:],  mem.ptr_to_bytes(&cb))
 	n += copy(s.user_data[n:], mem.ptr_to_bytes(&p))
-	     copy(s.user_data[n:], mem.ptr_to_bytes(&p2))
+	_  = copy(s.user_data[n:], mem.ptr_to_bytes(&p2))
 
 	_scanner_scan(s)
 }

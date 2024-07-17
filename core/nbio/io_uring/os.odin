@@ -96,7 +96,7 @@ io_uring_init :: proc(ring: ^IO_Uring, entries: u32, params: ^io_uring_params) -
 	assert((params.flags & IORING_SETUP_SQE128) == 0)
 
 	sq, ok := submission_queue_make(fd, params)
-	if !ok { return .System_Resources }
+	if !ok do return .System_Resources
 
 	ring.fd = fd
 	ring.sq = sq
@@ -241,7 +241,7 @@ flush_sq :: proc(ring: ^IO_Uring) -> (n_pending: u32) {
 // Matches the implementation of sq_ring_needs_enter() in liburing.
 sq_ring_needs_enter :: proc(ring: ^IO_Uring, flags: ^u32) -> bool {
 	assert(flags^ == 0)
-	if ring.flags & IORING_SETUP_SQPOLL == 0 { return true }
+	if ring.flags & IORING_SETUP_SQPOLL == 0 do return true
 	if sync.atomic_load_explicit(ring.sq.flags, .Relaxed) & IORING_SQ_NEED_WAKEUP != 0 {
 		flags^ |= IORING_ENTER_SQ_WAKEUP
 		return true
@@ -267,7 +267,7 @@ cq_ready :: proc(ring: ^IO_Uring) -> (n_ready: u32) {
 // Provides all the wait/peek methods found in liburing, but with batching and a single method.
 copy_cqes :: proc(ring: ^IO_Uring, cqes: []io_uring_cqe, wait_nr: u32) -> (n_copied: u32, err: IO_Uring_Error) {
 	n_copied = copy_cqes_ready(ring, cqes)
-	if n_copied > 0 { return }
+	if n_copied > 0 do return
 	if wait_nr > 0 || cq_ring_needs_flush(ring) {
 		_ = enter(ring, 0, wait_nr, IORING_ENTER_GETEVENTS) or_return
 		n_copied = copy_cqes_ready(ring, cqes)
@@ -307,7 +307,7 @@ cqe_seen :: proc(ring: ^IO_Uring) {
 // For advanced use cases only that implement custom completion queue methods.
 // Matches the implementation of cq_advance() in liburing.
 cq_advance :: proc(ring: ^IO_Uring, count: u32) {
-	if count == 0 { return }
+	if count == 0 do return
 	sync.atomic_store_explicit(ring.cq.head, ring.cq.head^ + count, .Release)
 }
 
@@ -485,7 +485,7 @@ openat :: proc(
 	sqe.opcode = IORING_OP.OPENAT
 	sqe.fd = i32(fd)
 	sqe.addr = cast(u64)transmute(uintptr)path
-	sqe.len = cast(u32)mode
+	sqe.len = mode
 	sqe.rw_flags = i32(flags)
 	sqe.user_data = user_data
 	return
@@ -527,7 +527,7 @@ timeout :: proc(
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = IORING_OP.TIMEOUT
 	sqe.fd = -1
-	sqe.addr = transmute(u64)uintptr(ts)
+	sqe.addr = cast(u64)uintptr(ts)
 	sqe.len = 1
 	sqe.off = u64(count)
 	sqe.rw_flags = i32(flags)
@@ -589,7 +589,7 @@ link_timeout :: proc(
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = IORING_OP.LINK_TIMEOUT
 	sqe.fd = -1
-	sqe.addr = transmute(u64)uintptr(ts)
+	sqe.addr = cast(u64)uintptr(ts)
 	sqe.len = 1
 	sqe.rw_flags = i32(flags)
 	sqe.user_data = user_data
@@ -669,8 +669,8 @@ submission_queue_make :: proc(fd: os.Handle, params: ^io_uring_params) -> (sq: S
 		int(fd),
 		IORING_OFF_SQ_RING,
 	)
-	if mmap_result < 0 { return }
-	defer if !ok { unix.sys_munmap(rawptr(uintptr(mmap_result)), uint(size)) }
+	if mmap_result < 0 do return
+	defer if !ok do unix.sys_munmap(rawptr(uintptr(mmap_result)), uint(size))
 
 	mmap := transmute([^]u8)uintptr(mmap_result)
 
@@ -684,18 +684,18 @@ submission_queue_make :: proc(fd: os.Handle, params: ^io_uring_params) -> (sq: S
 		int(fd),
 		IORING_OFF_SQES,
 	)
-	if mmap_sqes_result < 0 { return }
+	if mmap_sqes_result < 0 do return
 
-	array := transmute([^]u32)&mmap[params.sq_off.array]
-	sqes := transmute([^]io_uring_sqe)uintptr(mmap_sqes_result)
-	mmap_sqes := transmute([^]u8)uintptr(mmap_sqes_result)
+	array := cast([^]u32)&mmap[params.sq_off.array]
+	sqes := cast([^]io_uring_sqe)uintptr(mmap_sqes_result)
+	mmap_sqes := cast([^]u8)uintptr(mmap_sqes_result)
 
 
-	sq.head = transmute(^u32)&mmap[params.sq_off.head]
-	sq.tail = transmute(^u32)&mmap[params.sq_off.tail]
-	sq.mask = (transmute(^u32)&mmap[params.sq_off.ring_mask])^
-	sq.flags = transmute(^u32)&mmap[params.sq_off.flags]
-	sq.dropped = transmute(^u32)&mmap[params.sq_off.dropped]
+	sq.head = cast(^u32)&mmap[params.sq_off.head]
+	sq.tail = cast(^u32)&mmap[params.sq_off.tail]
+	sq.mask = (cast(^u32)&mmap[params.sq_off.ring_mask])^
+	sq.flags = cast(^u32)&mmap[params.sq_off.flags]
+	sq.dropped = cast(^u32)&mmap[params.sq_off.dropped]
 	sq.array = array[:params.sq_entries]
 	sq.sqes = sqes[:params.sq_entries]
 	sq.mmap = mmap[:size]
@@ -724,14 +724,14 @@ completion_queue_make :: proc(fd: os.Handle, params: ^io_uring_params, sq: ^Subm
 	assert((params.features & IORING_FEAT_SINGLE_MMAP) != 0)
 
 	mmap := sq.mmap
-	cqes := transmute([^]io_uring_cqe)&mmap[params.cq_off.cqes]
+	cqes := cast([^]io_uring_cqe)&mmap[params.cq_off.cqes]
 
 	return(
 		{
-			head = transmute(^u32)&mmap[params.cq_off.head],
-			tail = transmute(^u32)&mmap[params.cq_off.tail],
-			mask = (transmute(^u32)&mmap[params.cq_off.ring_mask])^,
-			overflow = transmute(^u32)&mmap[params.cq_off.overflow],
+			head = cast(^u32)&mmap[params.cq_off.head],
+			tail = cast(^u32)&mmap[params.cq_off.tail],
+			mask = (cast(^u32)&mmap[params.cq_off.ring_mask])^,
+			overflow = cast(^u32)&mmap[params.cq_off.overflow],
 			cqes = cqes[:params.cq_entries],
 		} \
 	)
