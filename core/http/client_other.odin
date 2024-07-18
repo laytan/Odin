@@ -330,7 +330,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				on_connected(r, nil)
 			case .HTTPS:
 				if !client_ssl.implemented || r.c.ssl == nil {
-					panic("HTTP client can't serve HTTPS request without an SSL implementation, set it using `set_client_ssl`")
+					panic("HTTP client can't make HTTPS request without an SSL implementation, set it using `set_client_ssl`")
 				}
 
 				host := url_parse(r.url).host

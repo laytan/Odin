@@ -5,7 +5,7 @@ import      "core:net"
 
 import ossl "vendor:openssl"
 
-http_client_ssl_implementation :: proc() -> http.Client_SSL {
+client_implementation :: proc() -> http.Client_SSL {
 	return {
 		implemented = true,
 		client_create = proc() -> http.SSL_Client {
