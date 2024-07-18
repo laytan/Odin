@@ -241,7 +241,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 
 @(test)
 openssl :: proc(t: ^testing.T) {
-	http.set_client_ssl(ssl_http.http_client_ssl_implementation())
+	http.set_client_ssl(ssl_http.client_implementation())
 
 	State :: struct {
 		t:      ^testing.T,
