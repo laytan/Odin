@@ -73,14 +73,6 @@ send_all_udp_raw :: proc(
 
 On_Read :: #type proc(user: rawptr, read: int, err: os.Errno)
 
-read_raw :: proc(io: ^IO, fd: os.Handle, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
-	return _read(io, fd, nil, buf, user, callback)
-}
-
-read_all_raw :: proc(io: ^IO, fd: os.Handle, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
-	return _read(io, fd, nil, buf, user, callback, all = true)
-}
-
 read_at_raw :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
 	return _read(io, fd, offset, buf, user, callback)
 }
@@ -90,14 +82,6 @@ read_at_all_raw :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, user: 
 }
 
 On_Write :: #type proc(user: rawptr, written: int, err: os.Errno)
-
-write_raw :: proc(io: ^IO, fd: os.Handle, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
-	return _write(io, fd, nil, buf, user, callback)
-}
-
-write_all_raw :: proc(io: ^IO, fd: os.Handle, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
-	return _write(io, fd, nil, buf, user, callback, true)
-}
 
 write_at_raw :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
 	return _write(io, fd, offset, buf, user, callback)
