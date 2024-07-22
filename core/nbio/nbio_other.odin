@@ -255,42 +255,6 @@ send_all :: proc {
 	send_all_udp3,
 }
 
-// TODO: remove.
-/*
-Reads from the given handle, at the handle's internal offset, at most `len(buf)` bytes, increases the file offset, and calls the given callback
-
-*Due to platform limitations, you must pass a `os.Handle` that was opened/returned using/by this package*
-
-Inputs:
-- io:       The IO instance to use
-- fd:       The file handle (created using/by this package) to read from
-- buf:      The buffer to put read bytes into
-*/
-read :: proc {
-	read_raw,
-	read1,
-	read2,
-	read3,
-}
-
-// TODO: remove.
-/*
-Reads from the given handle, at the handle's internal offset, until the given buf is full or an error occurred, increases the file offset, and calls the given callback
-
-*Due to platform limitations, you must pass a `os.Handle` that was opened/returned using/by this package*
-
-Inputs:
-- io:       The IO instance to use
-- fd:       The file handle (created using/by this package) to read from
-- buf:      The buffer to put read bytes into
-*/
-read_all :: proc {
-	read_all_raw,
-	read_all1,
-	read_all2,
-	read_all3,
-}
-
 /*
 Reads from the given handle, at the given offset, at most `len(buf)` bytes, and calls the given callback
 
@@ -325,42 +289,6 @@ read_at_all :: proc {
 	read_at_all1,
 	read_at_all2,
 	read_at_all3,
-}
-
-/*
-Writes to the given handle, at the handle's internal offset, at most `len(buf)` bytes, increases the file offset, and calls the given callback
-
-*Due to platform limitations, you must pass a `os.Handle` that was opened/returned using/by this package*
-
-Inputs:
-- io:       The IO instance to use
-- fd:       The file handle (created using/by this package) to write to
-- buf:      The buffer to write to the file
-*/
-write :: proc {
-	write_raw,
-	write1,
-	write2,
-	write3,
-}
-
-/*
-Writes the given buffer to the given handle, at the handle's internal offset, increases the file offset, and calls the given callback
-
-This keeps writing until either an error or the full buffer being written
-
-*Due to platform limitations, you must pass a `os.Handle` that was opened/returned using/by this package*
-
-Inputs:
-- io:       The IO instance to use
-- fd:       The file handle (created using/by this package) to write to
-- buf:      The buffer to write to the file
-*/
-write_all :: proc {
-	write_all_raw,
-	write_all1,
-	write_all2,
-	write_all3,
 }
 
 /*

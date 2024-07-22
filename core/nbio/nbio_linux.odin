@@ -157,12 +157,14 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 _read :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Read,
 	all := false,
 ) -> ^Completion {
+	assert(offset >= 0)
+
 	completion := pool_get(&io.completion_pool)
 
 	completion.ctx = context
@@ -171,7 +173,7 @@ _read :: proc(
 		callback = callback,
 		fd       = fd,
 		buf      = buf,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		all      = all,
 		len      = len(buf),
 	}
@@ -225,12 +227,14 @@ _send :: proc(
 _write :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Write,
 	all := false,
 ) -> ^Completion {
+	assert(offset >= 0)
+
 	completion := pool_get(&io.completion_pool)
 
 	completion.ctx = context
@@ -239,7 +243,7 @@ _write :: proc(
 		callback = callback,
 		fd       = fd,
 		buf      = buf,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		all      = all,
 		len      = len(buf),
 	}

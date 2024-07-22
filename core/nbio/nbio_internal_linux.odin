@@ -310,10 +310,7 @@ connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 }
 
 read_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
-	// Max tells linux to use the file cursor as the offset.
-	offset := max(u64) if op.offset < 0 else u64(op.offset)
-
-	_, err := io_uring.read(&io.ring, u64(uintptr(completion)), op.fd, op.buf, offset)
+	_, err := io_uring.read(&io.ring, u64(uintptr(completion)), op.fd, op.buf, u64(op.offset))
 	if err == .Submission_Queue_Full {
 		queue.push_back(&io.unqueued, completion)
 		return
@@ -339,6 +336,7 @@ read_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 
 	if op.all && op.read < op.len {
 		op.buf = op.buf[completion.result:]
+		op.offset += int(completion.result)
 		read_enqueue(io, completion, op)
 		return
 	}
@@ -431,10 +429,7 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 }
 
 write_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
-	// Max tells linux to use the file cursor as the offset.
-	offset := max(u64) if op.offset < 0 else u64(op.offset)
-
-	_, err := io_uring.write(&io.ring, u64(uintptr(completion)), op.fd, op.buf, offset)
+	_, err := io_uring.write(&io.ring, u64(uintptr(completion)), op.fd, op.buf, u64(offset))
 	if err == .Submission_Queue_Full {
 		queue.push_back(&io.unqueued, completion)
 		return
@@ -460,11 +455,7 @@ write_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
 
 	if op.all && op.written < op.len {
 		op.buf = op.buf[completion.result:]
-
-		if op.offset >= 0 {
-			op.offset += int(completion.result)
-		}
-
+		op.offset += int(completion.result)
 		write_enqueue(io, completion, op)
 		return
 	}
