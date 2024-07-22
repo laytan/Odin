@@ -60,8 +60,8 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 		return
 	}
 
-	size, err := nbio.seek(io, handle, 0, .End)
-	if err != os.ERROR_NONE {
+	size, err := nbio.file_size(io, handle)
+	if err != os.ERROR_NONE || int(size) < 0 {
 		log.errorf("Could not seek the file size of file at %q, error number: %i", path, err)
 		respond(r, Status.Internal_Server_Error)
 		nbio.close(io, handle)
@@ -72,9 +72,9 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 	content_type := mime_to_content_type(mime)
 	headers_set_content_type(&r.headers, content_type)
 
-	_response_write_heading(r, size)
+	_response_write_heading(r, int(size))
 
-	bytes.buffer_grow(&r._buf, size)
+	bytes.buffer_grow(&r._buf, int(size))
 	buf := dynamic_unwritten(r._buf.buf)[:size]
 
 	on_read :: proc(user: rawptr, read: int, err: os.Errno) {
