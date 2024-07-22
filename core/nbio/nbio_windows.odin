@@ -189,24 +189,14 @@ _open :: proc(io: ^IO, path: string, mode, perm: int) -> (os.Handle, os.Errno) {
 	return handle, os.ERROR_NONE
 }
 
-// TODO: remove seek, add a "file_size" proc.
-_seek :: proc(io: ^IO, fd: os.Handle, offset: int, whence: Whence) -> (int, os.Errno) {
-	switch whence {
-	case .Set:
-		io.offsets[fd] = u32(offset)
-	case .Curr:
-		io.offsets[fd] += u32(offset)
-	case .End:
-		size: win.LARGE_INTEGER
-		ok := win.GetFileSizeEx(win.HANDLE(fd), &size)
-		if !ok {
-			return 0, os.Errno(win.GetLastError())
-		}
-
-		io.offsets[fd] = u32(size) + u32(offset)
+_file_size :: proc(_: ^IO, fd: os.Handle) -> (i64, os.Errno) {
+	size: win.LARGE_INTEGER
+	ok := win.GetFileSizeEx(win.HANDLE(fd), &size)
+	if !ok {
+		return 0, os.Errno(win.GetLastError())
 	}
 
-	return int(io.offsets[fd]), os.ERROR_NONE
+	return i64(size), 0
 }
 
 _open_socket :: proc(

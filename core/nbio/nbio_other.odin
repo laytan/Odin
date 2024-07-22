@@ -87,37 +87,15 @@ open :: proc(io: ^IO, path: string, mode: int = os.O_RDONLY, perm: int = 0) -> (
 	return _open(io, path, mode, perm)
 }
 
-// TODO: remove
 /*
-Where to seek from
-
-Options:
-- Set:  sets the offset to the given value
-- Curr: adds the given offset to the current offset
-- End:  adds the given offset to the end of the file
-*/
-Whence :: enum {
-	Set,
-	Curr,
-	End,
-}
-
-/*
-Seeks the given handle according to the given offset and whence, so that subsequent read and writes *USING THIS PACKAGE* will do so at that offset
-
-*Some platforms require this package to handle offsets while others have state in the kernel, for this reason you should assume that seeking only affects this package*
-
-Inputs:
-- io:     The IO instance to seek on
-- fd:     The file handle to seek
-- whence: The seek mode/where to seek from (default: Whence.Set)
+Returns the current file size of the handle in bytes.
 
 Returns:
-- new_offset: The offset that the file is at when the operation completed
-- err:        The error when an error occured, 0 otherwise
+- size: The size of the file in bytes
+- err:  The error when an error occured, 0 otherwise
 */
-seek :: proc(io: ^IO, fd: os.Handle, offset: int, whence: Whence = .Set) -> (new_offset: int, err: os.Errno) {
-	return _seek(io, fd, offset, whence)
+file_size :: proc(io: ^IO, fd: os.Handle) -> (size: i64, err: os.Errno) {
+	return _file_size(io, fd)
 }
 
 /*
