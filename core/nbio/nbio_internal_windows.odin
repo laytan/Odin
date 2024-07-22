@@ -19,8 +19,6 @@ _IO :: struct #no_copy {
 	completed:       queue.Queue(^Completion),
 	completion_pool: Pool(Completion),
 	io_pending:      int,
-	// The asynchronous Windows API's don't support reading at the current offset of a file, so we keep track ourselves.
-	offsets:         map[os.Handle]u32,
 }
 
 _Completion :: struct {
@@ -211,10 +209,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			op.callback(completion.user_data, op.read, os.Errno(err))
 		} else if op.all && op.read < op.len {
 			op.buf = op.buf[read:]
-
-			if op.offset >= 0 {
-				op.offset += int(read)
-			}
+			op.offset += int(read)
 
 			op.pending = false
 
@@ -238,10 +233,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			op.callback(completion.user_data, op.written, oerr)
 		} else if op.all && op.written < op.len {
 			op.buf = op.buf[written:]
-
-			if op.offset >= 0 {
-				op.offset += int(written)
-			}
+			op.offset += int(written)
 
 			op.pending = false
 
@@ -414,7 +406,8 @@ read_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Read) -> (read: win.DW
 	if op.pending {
 		ok = win.GetOverlappedResult(win.HANDLE(op.fd), &comp.over, &read, win.FALSE)
 	} else {
-		comp.over.Offset = u32(op.offset) if op.offset >= 0 else io.offsets[op.fd]
+		comp.over.Offset = u32(op.offset)
+		// TODO: this is wrong.
 		comp.over.OffsetHigh = comp.over.Offset >> 32
 
 		ok = win.ReadFile(win.HANDLE(op.fd), raw_data(op.buf), win.DWORD(len(op.buf)), &read, &comp.over)
@@ -429,11 +422,6 @@ read_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Read) -> (read: win.DW
 
 	if !ok { err = win.GetLastError() }
 
-	// Increment offset if this was not a call with an offset set.
-	if op.offset >= 0 {
-		io.offsets[op.fd] += read
-	}
-
 	return
 }
 
@@ -442,7 +430,8 @@ write_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Write) -> (written: w
 	if op.pending {
 		ok = win.GetOverlappedResult(win.HANDLE(op.fd), &comp.over, &written, win.FALSE)
 	} else {
-		comp.over.Offset = u32(op.offset) if op.offset >= 0 else io.offsets[op.fd]
+		comp.over.Offset = u32(op.offset)
+		// TODO: this is wrong.
 		comp.over.OffsetHigh = comp.over.Offset >> 32
 		ok = win.WriteFile(win.HANDLE(op.fd), raw_data(op.buf), win.DWORD(len(op.buf)), &written, &comp.over)
 
@@ -455,11 +444,6 @@ write_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Write) -> (written: w
 	}
 
 	if !ok { err = win.GetLastError() }
-
-	// Increment offset if this was not a call with an offset set.
-	if op.offset >= 0 {
-		io.offsets[op.fd] += written
-	}
 
 	return
 }

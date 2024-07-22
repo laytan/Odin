@@ -14,7 +14,6 @@ _init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
 	pool_init(&io.completion_pool, allocator = allocator)
 	queue.init(&io.completed, allocator = allocator)
 	io.timeouts = make([dynamic]^Completion, allocator)
-	io.offsets = make(map[os.Handle]u32, allocator = allocator)
 
 	win.ensure_winsock_initialized()
 	defer if err != win.NO_ERROR {
@@ -37,7 +36,6 @@ _destroy :: proc(io: ^IO) {
 	delete(io.timeouts)
 	queue.destroy(&io.completed)
 	pool_destroy(&io.completion_pool)
-	delete(io.offsets)
 
 	// TODO: error handling.
 	win.CloseHandle(io.iocp)
@@ -191,6 +189,7 @@ _open :: proc(io: ^IO, path: string, mode, perm: int) -> (os.Handle, os.Errno) {
 	return handle, os.ERROR_NONE
 }
 
+// TODO: remove seek, add a "file_size" proc.
 _seek :: proc(io: ^IO, fd: os.Handle, offset: int, whence: Whence) -> (int, os.Errno) {
 	switch whence {
 	case .Set:
@@ -256,16 +255,17 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 _read :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Read,
 	all := false,
 ) -> ^Completion {
+	assert(offset >= 0)
 	return submit(io, user, Op_Read{
 		callback = callback,
 		fd       = fd,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		buf      = buf,
 		all      = all,
 		len      = len(buf),
@@ -275,18 +275,18 @@ _read :: proc(
 _write :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Write,
 	all := false,
 ) -> ^Completion {
+	assert(offset >= 0)
 	return submit(io, user, Op_Write{
 		callback = callback,
 		fd       = fd,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		buf      = buf,
-
 		all      = all,
 		len      = len(buf),
 	})
