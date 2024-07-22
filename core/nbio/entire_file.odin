@@ -1,7 +1,35 @@
 //+build !js
 package nbio
 
+import "base:runtime"
+
 import "core:os"
+
+@(private="file")
+read_entire_file_alloc :: proc(io: ^IO, fd: os.Handle, allocator: runtime.Allocator) -> (buf: []byte, err: os.Errno) {
+	size: i64
+	if size, err = file_size(io, fd); err != os.ERROR_NONE {
+		return
+	}
+
+	if size <= 0 {
+		return
+	}
+
+	isize := int(size)
+	if isize <= 0 {
+		err = os.ERROR_BUFFER_OVERFLOW when ODIN_OS == .Windows else os.EFBIG
+		return
+	}
+
+	mem: runtime.Allocator_Error
+	buf, mem = make([]byte, isize, allocator)
+	if mem != nil {
+		err = os.ERROR_NOT_ENOUGH_MEMORY when ODIN_OS == .Windows else os.ENOMEM
+	}
+
+	return
+}
 
 read_entire_file :: proc {
 	read_entire_file1,
@@ -11,18 +39,12 @@ read_entire_file :: proc {
 
 read_entire_file1 :: proc(io: ^IO, fd: os.Handle, p: $T, callback: $C/proc(p: T, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of([]byte) <= MAX_USER_ARGUMENTS {
-	size, err := seek(io, fd, 0, .End)
+
+	buf, err := read_entire_file_alloc(io, fd, allocator)
 	if err != os.ERROR_NONE {
 		callback(p, nil, err)
 		return nil
 	}
-
-	if size <= 0 {
-		callback(p, nil, os.ERROR_NONE)
-		return nil
-	}
-
-	buf := make([]byte, size, allocator)
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -45,18 +67,12 @@ read_entire_file1 :: proc(io: ^IO, fd: os.Handle, p: $T, callback: $C/proc(p: T,
 
 read_entire_file2 :: proc(io: ^IO, fd: os.Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of([]byte) <= MAX_USER_ARGUMENTS {
-	size, err := seek(io, fd, 0, .End)
+
+	buf, err := read_entire_file_alloc(io, fd, allocator)
 	if err != os.ERROR_NONE {
 		callback(p, p2, nil, err)
 		return nil
 	}
-
-	if size <= 0 {
-		callback(p, p2, nil, os.ERROR_NONE)
-		return nil
-	}
-
-	buf := make([]byte, size, allocator)
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -81,18 +97,12 @@ read_entire_file2 :: proc(io: ^IO, fd: os.Handle, p: $T, p2: $T2, callback: $C/p
 
 read_entire_file3 :: proc(io: ^IO, fd: os.Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) + size_of([]byte) <= MAX_USER_ARGUMENTS {
-	size, err := seek(io, fd, 0, .End)
+
+	buf, err := read_entire_file_alloc(io, fd, allocator)
 	if err != os.ERROR_NONE {
 		callback(p, p2, p3, nil, err)
 		return nil
 	}
-
-	if size <= 0 {
-		callback(p, p2, p3, nil, os.ERROR_NONE)
-		return nil
-	}
-
-	buf := make([]byte, size, allocator)
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)

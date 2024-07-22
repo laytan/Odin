@@ -14,9 +14,8 @@ _open :: proc(_: ^IO, path: string, mode, perm: int) -> (handle: os.Handle, errn
 	return
 }
 
-_seek :: proc(_: ^IO, fd: os.Handle, offset: int, whence: Whence) -> (int, os.Errno) {
-	r, err := os.seek(fd, i64(offset), int(whence))
-	return int(r), err
+_file_size :: proc(_: ^IO, fd: os.Handle) -> (i64, os.Errno) {
+	return os.file_size(fd)
 }
 
 _prepare_handle :: proc(fd: os.Handle) -> os.Errno {
