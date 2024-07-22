@@ -120,7 +120,7 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 _read :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Read,
@@ -133,7 +133,7 @@ _read :: proc(
 		callback = callback,
 		fd       = fd,
 		buf      = buf,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		all      = all,
 		len      = len(buf),
 	}
@@ -190,7 +190,7 @@ _send :: proc(
 _write :: proc(
 	io: ^IO,
 	fd: os.Handle,
-	offset: Maybe(int),
+	offset: int,
 	buf: []byte,
 	user: rawptr,
 	callback: On_Write,
@@ -203,7 +203,7 @@ _write :: proc(
 		callback = callback,
 		fd       = fd,
 		buf      = buf,
-		offset   = offset.? or_else -1,
+		offset   = offset,
 		all      = all,
 		len      = len(buf),
 	}

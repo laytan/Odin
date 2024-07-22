@@ -425,7 +425,7 @@ send_all_udp3 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net
 
 /// Read Internal
 
-_read1 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno), all := false) -> ^Completion
+_read1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -444,7 +444,7 @@ _read1 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, c
 	return completion
 }
 
-_read2 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno), all := false) -> ^Completion
+_read2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -465,7 +465,7 @@ _read2 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p
 	return completion
 }
 
-_read3 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno), all := false) -> ^Completion
+_read3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -486,36 +486,6 @@ _read3 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p
 
 	completion.user_data = completion
 	return completion
-}
-
-read1 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _read1(io, fd, nil, buf, p, callback)
-}
-
-read2 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _read2(io, fd, nil, buf, p, p2, callback)
-}
-
-read3 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _read3(io, fd, nil, buf, p, p2, p3, callback)
-}
-
-read_all1 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _read1(io, fd, nil, buf, p, callback, all = true)
-}
-
-read_all2 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _read2(io, fd, nil, buf, p, p2, callback, all = true)
-}
-
-read_all3 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _read3(io, fd, nil, buf, p, p2, p3, callback, all = true)
 }
 
 read_at1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
@@ -548,7 +518,7 @@ read_at_all3 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []b
 	return _read3(io, fd, offset, buf, p, p2, p3, callback, all = true)
 }
 
-_write1 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno), all := false) -> ^Completion
+_write1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -567,7 +537,7 @@ _write1 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, 
 	return completion
 }
 
-_write2 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno), all := false) -> ^Completion
+_write2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -588,7 +558,7 @@ _write2 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, 
 	return completion
 }
 
-_write3 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno), all := false) -> ^Completion
+_write3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -609,36 +579,6 @@ _write3 :: proc(io: ^IO, fd: os.Handle, offset: Maybe(int), buf: []byte, p: $T, 
 
 	completion.user_data = completion
 	return completion
-}
-
-write1 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _write1(io, fd, nil, buf, p, callback)
-}
-
-write2 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _write2(io, fd, nil, buf, p, p2, callback)
-}
-
-write3 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _write3(io, fd, nil, buf, p, p2, p3, callback)
-}
-
-write_all1 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _write1(io, fd, nil, buf, p, callback, all = true)
-}
-
-write_all2 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _write2(io, fd, nil, buf, p, p2, callback, all = true)
-}
-
-write_all3 :: #force_inline proc(io: ^IO, fd: os.Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _write3(io, fd, nil, buf, p, p2, p3, callback, all = true)
 }
 
 write_at1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion

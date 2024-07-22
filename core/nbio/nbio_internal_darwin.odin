@@ -384,13 +384,7 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 }
 
 do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
-	read: int
-	err: os.Errno
-	switch {
-	case op.offset >= 0: read, err = os.read_at(op.fd, op.buf, i64(op.offset))
-	case:                read, err = os.read(op.fd, op.buf)
-	}
-
+	read, err := os.read_at(op.fd, op.buf, i64(op.offset))
 	op.read += read
 
 	if err != os.ERROR_NONE {
@@ -406,10 +400,7 @@ do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 
 	if op.all && op.read < op.len {
 		op.buf = op.buf[read:]
-
-		if op.offset >= 0 {
-			op.offset += read
-		}
+		op.offset += read
 
 		do_read(io, completion, op)
 		return
@@ -509,13 +500,7 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 }
 
 do_write :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
-	written: int
-	err: os.Errno
-	switch {
-	case op.offset >= 0: written, err = os.write_at(op.fd, op.buf, i64(op.offset))
-	case:                written, err = os.write(op.fd, op.buf)
-	}
-
+	written, err := os.write_at(op.fd, op.buf, i64(op.offset))
 	op.written += written
 
 	if err != os.ERROR_NONE {
@@ -532,11 +517,7 @@ do_write :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
 	// The write did not write the whole buffer, need to write more.
 	if op.all && op.written < op.len {
 		op.buf = op.buf[written:]
-
-		// Increase offset so we don't overwrite what we just wrote.
-		if op.offset >= 0 {
-			op.offset += written
-		}
+		op.offset += written
 
 		do_write(io, completion, op)
 		return
