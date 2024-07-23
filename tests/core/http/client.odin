@@ -274,3 +274,48 @@ openssl :: proc(t: ^testing.T) {
 
 	ev(t, nbio.run(&s.io), os.ERROR_NONE)
 }
+
+@(test)
+sync :: proc(t: ^testing.T) {
+	http.set_client_ssl(ssl_http.client_implementation())
+
+	// TODO: will be thread local in nbio / removed.
+	io: nbio.IO
+	ev(t, nbio.init(&io), os.ERROR_NONE)
+	defer nbio.destroy(&io)
+
+	c: http.Client
+	http.client_init(&c, &io)
+	defer http.client_destroy(&c)
+
+	res, err := http.get(&c, "https://odin-lang.org")
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, res.status, http.Status.OK)
+	testing.expect(t, len(res.body) > 0)
+
+	http.response_destroy(&c, res)
+}
+
+@(test)
+multi_sync :: proc(t: ^testing.T) {
+	http.set_client_ssl(ssl_http.client_implementation())
+
+	// TODO: will be thread local in nbio / removed.
+	io: nbio.IO
+	ev(t, nbio.init(&io), os.ERROR_NONE)
+	defer nbio.destroy(&io)
+	defer nbio.run(&io)
+
+	c: http.Client
+	http.client_init(&c, &io)
+	defer http.client_destroy(&c)
+
+	responses, err := http.multi_sync(&c, {url="https://odin-lang.org"}, {url="https://odin-lang.org/docs/overview/"}, {url="https://odin-lang.org/docs/faq/"})
+	testing.expect_value(t, err, nil)
+	defer http.responses_destroy(&c, responses)
+
+	for response in responses {
+		testing.expect_value(t, response.err, nil)
+		testing.expect_value(t, response.res.status, http.Status.OK)
+	}
+}

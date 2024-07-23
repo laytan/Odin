@@ -1,7 +1,10 @@
 // package client provides a HTTP/1.1 client.
 package http
 
+import "base:runtime"
+
 import "core:nbio"
+import "core:slice"
 
 // TODO: timeouts
 
@@ -16,7 +19,7 @@ Client_Request :: struct {
 	body:    []byte,
 	headers: Headers,
 
-	// TODO: implement on native.
+	// TODO: implement following redirects on native.
 	ignore_redirects: bool,
 
 	js_cors:        JS_CORS_Mode,
@@ -77,4 +80,97 @@ client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Res
 
 response_destroy :: proc(c: ^Client, res: Client_Response) {
 	_response_destroy(c, res)
+}
+
+// TODO: sync can only be done in non-js :(.
+
+get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
+	State :: struct {
+		res:  Client_Response,
+		err:  Request_Error,
+		done: bool,
+	}
+	s: State
+
+	_client_request(c, {url = url}, &s, proc(r: Client_Response, s: rawptr, err: Request_Error) {
+		s := (^State)(s)
+		s.res = r
+		s.err = err
+		s.done = true
+	})
+
+	for {
+		if s.done {
+			return s.res, s.err
+		}
+
+		if err := nbio.tick(c.io); err != 0 {
+			return {}, .Unknown
+		}
+	}
+}
+
+Multi_Res :: struct {
+	res: Client_Response,
+	err: Request_Error,
+}
+
+responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
+	for res in s {
+		if res.err == nil {
+			response_destroy(c, res.res)
+		}
+	}
+	delete(s)
+}
+
+/*
+Sends out all requests given asynchronously in chunks of 64.
+*/
+multi_sync :: proc(c: ^Client, reqs: ..Client_Request) -> (res: []Multi_Res, err: runtime.Allocator_Error) {
+	res = make([]Multi_Res, len(reqs)) or_return
+	multi_sync_buf(c, reqs, res)
+	return
+}
+
+/*
+Sends out all requests given asynchronously in chunks of 64.
+*/
+multi_sync_buf :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no_bounds_check {
+	assert(len(res) >= len(reqs))
+
+	Done :: bit_set[0..<64; u64]
+
+	i: int
+	for chunk in slice.iter_chunks(reqs, 64, &i) {
+		done: Done
+		context.user_ptr = &done
+
+		for req, j in chunk {
+			context.user_index = j
+			_client_request(c, req, &res[((i-1)*64)+j], proc(r: Client_Response, mr: rawptr, err: Request_Error) {
+				mr := (^Multi_Res)(mr)
+				mr.res = r
+				mr.err = err
+
+				done  := (^Done)(context.user_ptr)
+				done^ += { context.user_index }
+			})
+		}
+
+		for {
+			if card(done) == len(chunk) {
+				break
+			}
+
+			if err := nbio.tick(c.io); err != 0 {
+				for &r in res[(i-1)*64:] {
+					r.err = .Unknown
+				}
+				return
+			}
+		}
+	}
+
+	return
 }
