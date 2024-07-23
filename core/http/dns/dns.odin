@@ -1,6 +1,8 @@
 // A fully non-blocking DNS client with TTL caching.
 package dns
 
+import "base:runtime"
+
 import "core:log"
 import "core:mem"
 import "core:nbio"
@@ -62,8 +64,9 @@ Cache_Entry :: struct {
 
 @(private)
 Callback :: struct {
-	cb: On_Resolve,
-	ud: rawptr,
+	cb:  On_Resolve,
+	ud:  rawptr,
+	ctx: runtime.Context,
 }
 
 init :: proc(c: ^Client, io: ^nbio.IO, user_data: rawptr, on_init: On_Init, allocator := context.allocator) {
@@ -219,7 +222,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	if cached, ok := &c.cache[hostname]; ok {
 		if cached.resolving {
 			log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
-			append(&cached.callbacks, Callback{cb, user})
+			append(&cached.callbacks, Callback{cb, user, context})
 		} else {
 			log.debugf("got DNS of %q from cache", hostname)
 			cb(user, cached.record, cached.err)
@@ -258,7 +261,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 	entry := map_insert(&c.cache, host, Cache_Entry{ resolving = true })
 	entry.callbacks = make([dynamic]Callback, 1, c.allocator)
-	entry.callbacks[0] = {cb, user}
+	entry.callbacks[0] = {cb, user, context}
 
 	req := new(Request, c.allocator)
 	req.hostname = host
@@ -309,6 +312,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 				free(req)
 
 				for cb in entry.callbacks {
+					context = cb.ctx
 					cb.cb(cb.ud, {}, entry.err)
 				}
 				delete(entry.callbacks)
@@ -348,6 +352,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		entry.evictor = nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
 
 		for cb in entry.callbacks {
+			context = cb.ctx
 			cb.cb(cb.ud, rec, nil)
 		}
 		delete(entry.callbacks)
