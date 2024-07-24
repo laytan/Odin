@@ -276,7 +276,7 @@ _send_udp :: proc(udp_sock: UDP_Socket, buf: []byte, to: Endpoint) -> (int, Netw
 	to_addr := _unwrap_os_addr(to)
 	bytes_written, errno := linux.sendto(linux.Fd(udp_sock), buf, {.NOSIGNAL}, &to_addr)
 	if errno == .EPIPE {
-		return 0, UDP_Send_Error.Connection_Closed
+		return 0, UDP_Send_Error.Not_Socket
 	} else if errno != .NONE {
 		return bytes_written, UDP_Send_Error(errno)
 	}
