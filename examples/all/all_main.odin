@@ -78,7 +78,6 @@ import xxhash           "core:hash/xxhash"
 
 import http             "core:http"
 import dns              "core:http/dns"
-import websocket        "core:http/websocket"
 
 import image            "core:image"
 import bmp              "core:image/bmp"
@@ -223,7 +222,6 @@ _ :: hash
 _ :: xxhash
 _ :: http
 _ :: dns
-_ :: websocket
 _ :: image
 _ :: bmp
 _ :: netpbm
