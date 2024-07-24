@@ -467,13 +467,21 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		sent, errno = os.send(os.Socket(sock), op.buf, 0)
-		err = net.TCP_Send_Error(errno)
+		sent, errno = os.send(os.Socket(sock), op.buf, os.MSG_NOSIGNAL)
+		if errno == os.EPIPE {
+			err = net.TCP_Send_Error.Connection_Closed
+		} else {
+			err = net.TCP_Send_Error(errno)
+		}
 
 	case net.UDP_Socket:
 		toaddr := _endpoint_to_sockaddr(op.endpoint.(net.Endpoint))
-		sent, errno = os.sendto(os.Socket(sock), op.buf, 0, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
-		err = net.UDP_Send_Error(errno)
+		sent, errno = os.sendto(os.Socket(sock), op.buf, os.MSG_NOSIGNAL, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
+		if errno == os.EPIPE {
+			err = net.TCP_Send_Error.Connection_Closed
+		} else {
+			err = net.TCP_Send_Error(errno)
+		}
 	}
 
 	op.sent += int(sent)

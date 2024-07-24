@@ -270,6 +270,8 @@ SHUT_RDWR :: 2
 F_GETFL: int : 3 /* Get file flags */
 F_SETFL: int : 4 /* Set file flags */
 
+MSG_NOSIGNAL :: 0x80000 /* do not generate SIGPIPE on EOF */
+
 // "Argv" arguments converted to Odin strings
 args := _alloc_command_line_arguments()
 
@@ -1126,7 +1128,7 @@ sendto :: proc(sd: Socket, data: []u8, flags: int, addr: ^SOCKADDR, addrlen: soc
 }
 
 send :: proc(sd: Socket, data: []byte, flags: int) -> (u32, Errno) {
-	result := _unix_send(int(sd), raw_data(data), len(data), 0)
+	result := _unix_send(int(sd), raw_data(data), len(data), flags)
 	if result < 0 {
 		return 0, Errno(get_last_error())
 	}

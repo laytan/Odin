@@ -394,7 +394,7 @@ send_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		unimplemented("UDP send is unimplemented for linux nbio")
 	}
 
-	_, err := io_uring.send(&io.ring, u64(uintptr(completion)), os.Socket(tcpsock), op.buf, 0)
+	_, err := io_uring.send(&io.ring, u64(uintptr(completion)), os.Socket(tcpsock), op.buf, {.NOSIGNAL})
 	if err == .Submission_Queue_Full {
 		queue.push_back(&io.unqueued, completion)
 		return
@@ -409,6 +409,9 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		switch errno {
 		case os.EINTR, os.EWOULDBLOCK:
 			send_enqueue(io, completion, op)
+		case os.EPIPE:
+			errno = os.ECONNRESET
+			fallthrough
 		case:
 			op.callback(completion.user_data, op.sent, net.TCP_Send_Error(errno))
 			pool_put(&io.completion_pool, completion)
