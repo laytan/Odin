@@ -413,6 +413,7 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 			errno = os.ECONNRESET
 			fallthrough
 		case:
+			// TODO: could be a DNS socket / error.
 			op.callback(completion.user_data, op.sent, net.TCP_Send_Error(errno))
 			pool_put(&io.completion_pool, completion)
 		}

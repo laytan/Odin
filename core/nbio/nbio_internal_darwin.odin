@@ -478,9 +478,9 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		toaddr := _endpoint_to_sockaddr(op.endpoint.(net.Endpoint))
 		sent, errno = os.sendto(os.Socket(sock), op.buf, os.MSG_NOSIGNAL, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
 		if errno == os.EPIPE {
-			err = net.TCP_Send_Error.Connection_Closed
+			err = net.UDP_Send_Error.Not_Socket
 		} else {
-			err = net.TCP_Send_Error(errno)
+			err = net.UDP_Send_Error(errno)
 		}
 	}
 
