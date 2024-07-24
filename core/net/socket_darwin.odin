@@ -194,9 +194,12 @@ _send_tcp :: proc(skt: TCP_Socket, buf: []byte) -> (bytes_written: int, err: Net
 	for bytes_written < len(buf) {
 		limit := min(int(max(i32)), len(buf) - bytes_written)
 		remaining := buf[bytes_written:][:limit]
-		res, ok := os.send(os.Socket(skt), remaining, 0)
-		if ok != os.ERROR_NONE {
-			err = TCP_Send_Error(ok)
+		res, errno := os.send(os.Socket(skt), remaining, os.MSG_NOSIGNAL)
+		if errno == os.EPIPE {
+			err = TCP_Send_Error.Connection_Closed
+			return
+		} else if errno != os.ERROR_NONE {
+			err = TCP_Send_Error(errno)
 			return
 		}
 		bytes_written += int(res)
@@ -210,9 +213,12 @@ _send_udp :: proc(skt: UDP_Socket, buf: []byte, to: Endpoint) -> (bytes_written:
 	for bytes_written < len(buf) {
 		limit := min(1<<31, len(buf) - bytes_written)
 		remaining := buf[bytes_written:][:limit]
-		res, ok := os.sendto(os.Socket(skt), remaining, 0, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
-		if ok != os.ERROR_NONE {
-			err = UDP_Send_Error(ok)
+		res, errno := os.sendto(os.Socket(skt), remaining, os.MSG_NOSIGNAL, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
+		if errno == os.EPIPE {
+			err = UDP_Send_Error.Not_Socket
+			return
+		} else if errno != os.ERROR_NONE {
+			err = UDP_Send_Error(errno)
 			return
 		}
 		bytes_written += int(res)
