@@ -298,8 +298,10 @@ _send_tcp :: proc(tcp_sock: TCP_Socket, buf: []byte) -> (int, Network_Error) {
 @(private)
 _send_udp :: proc(udp_sock: UDP_Socket, buf: []byte, to: Endpoint) -> (int, Network_Error) {
 	to_addr := _unwrap_os_addr(to)
-	bytes_written, errno := linux.sendto(linux.Fd(udp_sock), buf, {}, &to_addr)
-	if errno != .NONE {
+	bytes_written, errno := linux.sendto(linux.Fd(udp_sock), buf, {.NOSIGNAL}, &to_addr)
+	if errno == .EPIPE {
+		return 0, UDP_Send_Error.Connection_Closed
+	} else if errno != .NONE {
 		return bytes_written, UDP_Send_Error(errno)
 	}
 	return int(bytes_written), nil
