@@ -47,17 +47,6 @@
 - [ ] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
 
-## WebSocket Server
-
-- [ ] Make sending to a connection fully thread-safe (so you can send to a connection from a different thread)
-- [ ] Destroy procs
-- [ ] Actually use given allocator
-
-## WebSocket Client
-
-- [ ] Implement
-- [ ] Reuse code between server and client
-
 # Non critical wants
 
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
@@ -79,4 +68,3 @@
 ## WASM
 
 - [x] HTTP Client backed by JS/WASM (This may have to be an additional, even higher level API, or, have the HTTP API be full of opaque structs and have getters)
-- [ ] WebSocket Client backed by JS/WASM
