@@ -149,14 +149,6 @@ all_poly_work :: proc(tt: ^testing.T) {
 		ev(t, three, 3)
 	}
 
-	nbio.read(&io, os.INVALID_HANDLE, nil, 1, on_read1)
-	nbio.read(&io, os.INVALID_HANDLE, nil, 1, 2, on_read2)
-	nbio.read(&io, os.INVALID_HANDLE, nil, 1, 2, 3, on_read3)
-
-	nbio.read_all(&io, os.INVALID_HANDLE, nil, 1, on_read1)
-	nbio.read_all(&io, os.INVALID_HANDLE, nil, 1, 2, on_read2)
-	nbio.read_all(&io, os.INVALID_HANDLE, nil, 1, 2, 3, on_read3)
-
 	nbio.read_at(&io, os.INVALID_HANDLE, 0, nil, 1, on_read1)
 	nbio.read_at(&io, os.INVALID_HANDLE, 0, nil, 1, 2, on_read2)
 	nbio.read_at(&io, os.INVALID_HANDLE, 0, nil, 1, 2, 3, on_read3)
@@ -177,14 +169,6 @@ all_poly_work :: proc(tt: ^testing.T) {
 		ev(t, two, 2)
 		ev(t, three, 3)
 	}
-
-	nbio.write(&io, os.INVALID_HANDLE, nil, 1, on_write1)
-	nbio.write(&io, os.INVALID_HANDLE, nil, 1, 2, on_write2)
-	nbio.write(&io, os.INVALID_HANDLE, nil, 1, 2, 3, on_write3)
-
-	nbio.write_all(&io, os.INVALID_HANDLE, nil, 1, on_write1)
-	nbio.write_all(&io, os.INVALID_HANDLE, nil, 1, 2, on_write2)
-	nbio.write_all(&io, os.INVALID_HANDLE, nil, 1, 2, 3, on_write3)
 
 	nbio.write_at(&io, os.INVALID_HANDLE, 0, nil, 1, on_write1)
 	nbio.write_at(&io, os.INVALID_HANDLE, 0, nil, 1, 2, on_write2)
