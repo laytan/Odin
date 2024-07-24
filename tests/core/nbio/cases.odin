@@ -277,7 +277,7 @@ usage_across_threads :: proc(t: ^testing.T) {
 	defer nbio.destroy(&io)
 
 	buf: [128]byte
-	nbio.read(&io, handle, buf[:], t, proc(t: ^testing.T, read: int, errno: os.Errno) {
+	nbio.read_at(&io, handle, 0, buf[:], t, proc(t: ^testing.T, read: int, errno: os.Errno) {
 		ev(t, errno, os.ERROR_NONE)
 		e(t, read > 0)
 	})
