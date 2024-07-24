@@ -8,6 +8,7 @@ import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:thread"
+import "core:time"
 
 import ssl_http "vendor:openssl/http"
 
@@ -49,6 +50,8 @@ listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts :=
 // Send a simple request and expect OK.
 @(test)
 test_ok :: proc(tt: ^testing.T) {
+	testing.set_fail_timeout(tt, time.Second * 10)
+
 	@static s: http.Server
 	@static t: ^testing.T
 	t = tt
@@ -96,6 +99,8 @@ test_ok :: proc(tt: ^testing.T) {
 // two connections are reused.
 @(test)
 connection_pool :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	State :: struct {
 		s:         http.Server,
 		ep:        net.Endpoint,
@@ -166,6 +171,8 @@ connection_pool :: proc(t: ^testing.T) {
 // request, make sure that all goes well.
 @(test)
 test_server_closes_after_ok :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	State :: struct {
 		s: http.Server,
 		t: ^testing.T,
@@ -241,6 +248,8 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 
 @(test)
 openssl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	http.set_client_ssl(ssl_http.client_implementation())
 
 	State :: struct {
@@ -277,6 +286,8 @@ openssl :: proc(t: ^testing.T) {
 
 @(test)
 sync :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	http.set_client_ssl(ssl_http.client_implementation())
 
 	// TODO: will be thread local in nbio / removed.
@@ -298,6 +309,8 @@ sync :: proc(t: ^testing.T) {
 
 @(test)
 multi_sync :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	http.set_client_ssl(ssl_http.client_implementation())
 
 	// TODO: will be thread local in nbio / removed.

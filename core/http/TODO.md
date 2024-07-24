@@ -34,6 +34,7 @@
 ## DNS Client
 
 - [ ] Windows
+- [ ] Should this really be it's own package?
 
 ## nbio
 
@@ -44,8 +45,9 @@
 - [x] Remove toggling the poly API
 - [x] JS implementation
 - [x] nbio.run that loops a tick, and returns when the event loop has nothing going on
-- [ ] remove `read` and `write` and force the offset, document why (Windows)
+- [x] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
+- [ ] check if some of the calls need to take a flags bitset.
 
 # Non critical wants
 
