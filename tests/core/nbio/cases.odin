@@ -253,6 +253,8 @@ close_errors_send :: proc(t: ^testing.T) {
 
 @(test)
 usage_across_threads :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second * 10)
+
 	handle: os.Handle
 	thread_done: sync.One_Shot_Event
 
