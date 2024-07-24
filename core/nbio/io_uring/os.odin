@@ -454,7 +454,7 @@ send :: proc(
 	user_data: u64,
 	sockfd: os.Socket,
 	buf: []byte,
-	flags: u32,
+	flags: linux.Socket_Msg,
 ) -> (
 	sqe: ^io_uring_sqe,
 	err: IO_Uring_Error,
