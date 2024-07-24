@@ -464,7 +464,7 @@ send :: proc(
 	sqe.fd = i32(sockfd)
 	sqe.addr = cast(u64)uintptr(raw_data(buf))
 	sqe.len = u32(len(buf))
-	sqe.rw_flags = i32(flags)
+	sqe.rw_flags = transmute(i32)flags
 	sqe.user_data = user_data
 	return
 }
