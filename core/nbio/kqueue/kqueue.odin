@@ -20,7 +20,7 @@ Queue_Error :: enum {
 kqueue :: proc() -> (kq: os.Handle, err: Queue_Error) {
 	kq = os.Handle(_kqueue())
 	if kq == -1 {
-		err = Queue_Error(os.get_last_error())
+		err = Queue_Error(os.get_last_error().(os.Platform_Error))
 	}
 	return
 }
@@ -57,7 +57,7 @@ kevent :: proc(
 		),
 	)
 	if n_events == -1 {
-		err = Event_Error(os.get_last_error())
+		err = Event_Error(os.get_last_error().(os.Platform_Error))
 	}
 	return
 }

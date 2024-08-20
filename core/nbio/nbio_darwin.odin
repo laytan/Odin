@@ -10,7 +10,7 @@ _init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
 	qerr: kqueue.Queue_Error
 	io.kq, qerr = kqueue.kqueue()
 	if qerr != .None {
-		return os.Errno(qerr)
+		return os.Platform_Error(qerr)
 	}
 
 	pool_init(&io.completion_pool, allocator = allocator)
@@ -46,8 +46,10 @@ _tick :: proc(io: ^IO) -> os.Errno {
 }
 
 _listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Network_Error {
-	errno := os.listen(os.Socket(socket), backlog)
-	return net.Listen_Error(errno)
+	if errno := os.listen(os.Socket(socket), backlog); errno != nil {
+		return net.Listen_Error(errno.(os.Platform_Error))
+	}
+	return nil
 }
 
 _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {

@@ -104,7 +104,7 @@ get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
 			return s.res, s.err
 		}
 
-		if err := nbio.tick(c.io); err != 0 {
+		if err := nbio.tick(c.io); err != nil {
 			return {}, .Unknown
 		}
 	}
@@ -163,7 +163,7 @@ multi_sync_buf :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no
 				break
 			}
 
-			if err := nbio.tick(c.io); err != 0 {
+			if err := nbio.tick(c.io); err != nil {
 				for &r in res[(i-1)*64:] {
 					r.err = .Unknown
 				}
