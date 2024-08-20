@@ -40,11 +40,11 @@ tick :: proc(io: ^IO) -> os.Errno {
 
 run :: proc(io: ^IO) -> os.Errno {
 	for num_waiting(io) > 0 {
-		if errno := tick(io); errno != 0 {
+		if errno := tick(io); errno != nil {
 			return errno
 		}
 	}
-	return 0
+	return nil
 }
 
 /*

@@ -122,7 +122,7 @@ flush :: proc(io: ^IO) -> os.Errno {
 		ts: os.Unix_File_Time
 		new_events, err := kqueue.kevent(io.kq, events[:change_events], events[:], &ts)
 		if err != .None {
-			return os.Errno(err)
+			return os.Platform_Error(err)
 		}
 
 		// PERF: this is ordered and O(N), can this be made unordered?
@@ -375,7 +375,7 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 
 	if err != os.ERROR_NONE {
 		net.close(op.socket)
-		op.callback(completion.user_data, {}, net.Dial_Error(err))
+		op.callback(completion.user_data, {}, net.Dial_Error(err.(os.Platform_Error)))
 	} else {
 		op.callback(completion.user_data, op.socket, nil)
 	}
@@ -470,8 +470,8 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		sent, errno = os.send(os.Socket(sock), op.buf, os.MSG_NOSIGNAL)
 		if errno == os.EPIPE {
 			err = net.TCP_Send_Error.Connection_Closed
-		} else {
-			err = net.TCP_Send_Error(errno)
+		} else if errno != nil {
+			err = net.TCP_Send_Error(errno.(os.Platform_Error))
 		}
 
 	case net.UDP_Socket:
@@ -479,8 +479,8 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		sent, errno = os.sendto(os.Socket(sock), op.buf, os.MSG_NOSIGNAL, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
 		if errno == os.EPIPE {
 			err = net.UDP_Send_Error.Not_Socket
-		} else {
-			err = net.UDP_Send_Error(errno)
+		} else if errno != nil {
+			err = net.UDP_Send_Error(errno.(os.Platform_Error))
 		}
 	}
 
