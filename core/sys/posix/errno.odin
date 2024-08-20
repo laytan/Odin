@@ -1,3 +1,4 @@
+//+build darwin, freebsd, netbsd, openbsd, linux
 package posix
 
 import "core:c"

@@ -1,3 +1,4 @@
+//+build darwin, freebsd, netbsd, openbsd, linux
 package posix
 
 // netinet/tcp.h - definitions for the Internet Transmission Control Protocol (TCP)
