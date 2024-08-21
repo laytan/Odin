@@ -116,7 +116,7 @@ version_string :: proc(v: Version, allocator := context.allocator) -> string {
 	return strings.to_string(b)
 }
 
-Method :: enum {
+Method :: enum u8 {
 	Get,
 	Post,
 	Delete,
