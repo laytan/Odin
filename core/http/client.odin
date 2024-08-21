@@ -13,17 +13,19 @@ Client :: _Client
 On_Response :: #type proc(r: Client_Response, user_data: rawptr, err: Request_Error)
 
 Client_Request :: struct {
-	method:  Method,
+	headers: Headers,
+
 	url:     string,
 	cookies: []Cookie,
 	body:    []byte,
-	headers: Headers,
 
-	// TODO: implement following redirects on native.
-	ignore_redirects: bool,
+	method:  Method,
 
 	js_cors:        JS_CORS_Mode,
 	js_credentials: JS_Credentials,
+
+	// TODO: implement following redirects on native.
+	ignore_redirects: bool,
 }
 
 // WARN: DO NOT change the layout of this enum or the following struct without at least make sure you didn't break the JS implementation!
@@ -51,14 +53,14 @@ Client_Response :: struct {
 	cookies: [dynamic]Cookie,
 }
 
-JS_CORS_Mode :: enum {
+JS_CORS_Mode :: enum u8 {
 	CORS,
 	No_CORS,
 	Same_Origin,
 }
 
 // Policy for including and taking credentials (cookies, etc.) from responses and adding them to requests.
-JS_Credentials :: enum {
+JS_Credentials :: enum u8 {
 	Same_Origin, // Include credentials only when requesting to the same origin.
 	Include,     // Always include credentials.
 	Omit,        // Never include credentials.
