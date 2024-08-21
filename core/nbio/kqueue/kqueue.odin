@@ -62,7 +62,7 @@ kevent :: proc(
 	return
 }
 
-KEvent :: struct {
+KEvent :: struct #align(4) {
 	// Value used to identify this event.  The exact interpretation
 	// is determined by the attached filter, but often is a file
 	// descriptor.
