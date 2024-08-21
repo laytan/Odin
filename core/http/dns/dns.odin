@@ -269,7 +269,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 	packet, err := net.make_dns_packet(req.packet[:], hostname, .IP4)
 	if err != nil {
-		free(req)
+		free(req, req.client.allocator)
 		cb(user, {}, err)
 		return
 	}
@@ -309,7 +309,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 				// Evict the cached error after a minute.
 				nbio.timeout(req.client.io, time.Minute, req.client, req.hostname, evict_record)
 
-				free(req)
+				free(req, req.client.allocator)
 
 				for cb in entry.callbacks {
 					context = cb.ctx
@@ -342,7 +342,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		log.debug("got DNS record", rec)
 		nbio.close(req.client.io, req.socket)
 
-		free(req)
+		free(req, req.client.allocator)
 
 		entry := &req.client.cache[req.hostname]
 		entry.resolving = false
