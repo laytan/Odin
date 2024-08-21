@@ -18,7 +18,7 @@ REMOVED   :: rawptr(max(uintptr)-1)
 _IO :: struct #no_copy {
 	kq:              os.Handle,
 	io_inflight:     int,
-	completion_pool: Pool(Completion),
+	completion_pool: Pool,
 	timeouts:        [dynamic]^Completion,
 	completed:       queue.Queue(^Completion),
 	io_pending:      [dynamic]^Completion,
@@ -109,6 +109,8 @@ Op_Remove :: struct {
 }
 
 flush :: proc(io: ^IO) -> os.Errno {
+	defer assert(io.io_inflight >= 0)
+
 	events: [MAX_EVENTS]kqueue.KEvent
 
 	_ = flush_timeouts(io)
@@ -157,14 +159,12 @@ flush :: proc(io: ^IO) -> os.Errno {
 		completed := queue.pop_front(&io.completed)
 		context = completed.ctx
 
-		if completed.timeout == (^Completion)(TIMED_OUT) {
-			time_out_op(io, completed)
-			pool_put(&io.completion_pool, completed)
-			continue
-		} else if completed.timeout == (^Completion)(REMOVED) {
+		if completed.timeout == (^Completion)(REMOVED) {
 			pool_put(&io.completion_pool, completed)
 			continue
         }
+
+		assert(completed.timeout != (^Completion)(TIMED_OUT))
 
 		switch &op in completed.operation {
 		case Op_Accept:      do_accept     (io, completed, &op)
@@ -174,15 +174,15 @@ flush :: proc(io: ^IO) -> os.Errno {
 		case Op_Recv:        do_recv       (io, completed, &op)
 		case Op_Send:        do_send       (io, completed, &op)
 		case Op_Write:       do_write      (io, completed, &op)
-		case Op_Timeout:     do_timeout    (io, completed, &op)
 		case Op_Next_Tick:   do_next_tick  (io, completed, &op)
 		case Op_Poll:        do_poll       (io, completed, &op)
-		case Op_Remove:      unreachable()
+		case Op_Remove,
+		     Op_Timeout:     unreachable()
 		case:                unreachable()
 		}
 	}
 
-	return os.ERROR_NONE
+	return nil
 }
 
 time_out_op :: proc(io: ^IO, completed: ^Completion) {
@@ -199,7 +199,6 @@ time_out_op :: proc(io: ^IO, completed: ^Completion) {
 	case Op_Timeout, Op_Next_Tick, Op_Remove: panic("timed out untimeoutable")
 	case: unreachable()
 	}
-	pool_put(&io.completion_pool, completed)
 }
 
 flush_io :: proc(io: ^IO, events: []kqueue.KEvent) -> (changed_events: int, completions: int) {
@@ -362,7 +361,7 @@ do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 do_close :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
 	ok := os.close(op.handle)
 
-	op.callback(completion.user_data, ok == os.ERROR_NONE)
+	op.callback(completion.user_data, ok == nil)
 
 	pool_put(&io.completion_pool, completion)
 }
