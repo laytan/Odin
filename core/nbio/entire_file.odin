@@ -48,18 +48,17 @@ read_entire_file1 :: proc(io: ^IO, fd: os.Handle, p: $T, callback: $C/proc(p: T,
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)     (rawptr(ptr))^
-		buf := (^[]byte)(rawptr(ptr + size_of(C)))^
-		p   := (^T)     (rawptr(ptr + size_of(C) + size_of([]byte)))^
+		cb  := unall((^C)     (rawptr(ptr)))
+		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
+		p   := unall((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))))
 		cb(p, buf, err)
 	}, all = true)
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                    &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                &buf,      size_of(buf))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf)), &p,        size_of(p))
+	unals((^C)     (rawptr(ptr)),                                callback)
+	unals((^[]byte)(rawptr(ptr + size_of(C))),                   buf)
+	unals((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))), p)
 
 	completion.user_data = completion
 	return completion
@@ -76,20 +75,19 @@ read_entire_file2 :: proc(io: ^IO, fd: os.Handle, p: $T, p2: $T2, callback: $C/p
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)     (rawptr(ptr))^
-		buf := (^[]byte)(rawptr(ptr + size_of(C)))^
-		p   := (^T)     (rawptr(ptr + size_of(C) + size_of([]byte)))^
-		p2  := (^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T)))^
+		cb  := unall((^C)     (rawptr(ptr)))
+		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
+		p   := unall((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))))
+		p2  := unall((^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T))))
 		cb(p, p2, buf, err)
 	}, all = true)
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                 &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                             &buf,      size_of(buf))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf) + size_of(p)), &p2,       size_of(p2))
+	unals((^C)     (rawptr(ptr)),                                             callback)
+	unals((^[]byte)(rawptr(ptr + size_of(C))),                                buf)
+	unals((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))),              p)
+	unals((^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -106,22 +104,21 @@ read_entire_file3 :: proc(io: ^IO, fd: os.Handle, p: $T, p2: $T2, p3: $T3, callb
 
 	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)     (rawptr(ptr))^
-		buf := (^[]byte)(rawptr(ptr + size_of(C)))^
-		p   := (^T)     (rawptr(ptr + size_of(C) + size_of([]byte)))^
-		p2  := (^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T)))^
-		p3  := (^T3)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C)     (rawptr(ptr)))
+		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
+		p   := unall((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))))
+		p2  := unall((^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T))))
+		p3  := unall((^T3)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, buf, err)
 	}, all = true)
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                               &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                                           &buf,      size_of(buf))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(buf) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C)     (rawptr(ptr)),                                                           callback)
+	unals((^[]byte)(rawptr(ptr + size_of(C))),                                              buf)
+	unals((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))),                            p)
+	unals((^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T))),               p2)
+	unals((^T3)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T) + size_of(T2))), p3)
 
 	completion.user_data = completion
 	return completion

@@ -10,16 +10,15 @@ close1 :: proc(io: ^IO, fd: Closable, p: $T, callback: $C/proc(p: T, ok: bool)) 
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, ok)
 	})
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -29,18 +28,17 @@ close2 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, callback: $C/proc(p: T, p2
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, ok)
 	})
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -50,20 +48,19 @@ close3 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, p3: $T3, callback: $C/proc
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, ok)
 	})
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -73,16 +70,15 @@ accept1 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, callback: $C/proc(p: T, 
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, client, source, err)
 	})
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -92,18 +88,17 @@ accept2 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, callback: $C/pr
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, client, source, err)
 	})
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -113,20 +108,19 @@ accept3 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, p3: $T3, callba
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, client, source, err)
 	})
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -136,8 +130,8 @@ connect1 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T,
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, socket, err)
 	})
 	if err != nil {
@@ -145,11 +139,10 @@ connect1 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T,
 		return completion
 	}
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -159,9 +152,9 @@ connect2 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/p
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, socket, err)
 	})
 	if err != nil {
@@ -169,12 +162,11 @@ connect2 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/p
 		return completion
 	}
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -184,10 +176,10 @@ connect3 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callb
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS  {
 	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, socket, err)
 	})
 	if err != nil {
@@ -195,13 +187,12 @@ connect3 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callb
 		return completion
 	}
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -211,16 +202,15 @@ _recv1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, c
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, received, udp_client, err)
 	})
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -230,18 +220,17 @@ _recv2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, received, udp_client, err)
 	})
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -251,20 +240,19 @@ _recv3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, received, udp_client, err)
 	})
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -304,16 +292,15 @@ _send1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, callback: $C
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, sent, err)
 	}, endpoint, all)
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -323,18 +310,17 @@ _send2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, cal
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, sent, err)
 	}, endpoint, all)
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -344,20 +330,19 @@ _send3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3:
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, sent, err)
 	}, endpoint, all)
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -429,16 +414,15 @@ _read1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, read, err)
 	}, all)
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -448,18 +432,17 @@ _read2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2,
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, read, err)
 	}, all)
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -469,20 +452,19 @@ _read3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2,
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, read, err)
 	}, all)
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -522,16 +504,15 @@ _write1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callbac
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, written, err)
 	}, all)
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -541,18 +522,17 @@ _write2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, written, err)
 	}, all)
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -562,20 +542,19 @@ _write3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, written, err)
 	}, all)
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
@@ -615,16 +594,15 @@ poll1 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, cal
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C)(rawptr(ptr))^
-		p   := (^T)(rawptr(ptr + size_of(C)))^
+		cb  := unall((^C)(rawptr(ptr)))
+		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, event)
 	})
 
-	callback, p := callback, p
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                     &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)), &p,        size_of(p))
+	unals((^C)(rawptr(ptr)),                     callback)
+	unals((^T)(rawptr(ptr + size_of(callback))), p)
 
 	completion.user_data = completion
 	return completion
@@ -634,18 +612,17 @@ poll2 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2:
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, event)
 	})
 
-	callback, p, p2 := callback, p, p2
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                  &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),              &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)), &p2,       size_of(p2))
+	unals((^C) (rawptr(ptr)),                                  callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),              p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))), p2)
 
 	completion.user_data = completion
 	return completion
@@ -655,20 +632,19 @@ poll3 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2:
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
-		cb  := (^C) (rawptr(ptr))^
-		p   := (^T) (rawptr(ptr + size_of(C)))^
-		p2  := (^T2)(rawptr(ptr + size_of(C) + size_of(T)))^
-		p3  := (^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2)))^
+		cb  := unall((^C) (rawptr(ptr)))
+		p   := unall((^T) (rawptr(ptr + size_of(C))))
+		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
+		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, event)
 	})
 
-	callback, p, p2, p3 := callback, p, p2, p3
 	ptr := uintptr(&completion.user_args)
 
-	memcpy(rawptr(ptr),                                                &callback, size_of(callback))
-	memcpy(rawptr(ptr + size_of(callback)),                            &p,        size_of(p))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p)),               &p2,       size_of(p2))
-	memcpy(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2)), &p3,       size_of(p3))
+	unals((^C) (rawptr(ptr)),                                                callback)
+	unals((^T) (rawptr(ptr + size_of(callback))),                            p)
+	unals((^T2)(rawptr(ptr + size_of(callback) + size_of(p))),               p2)
+	unals((^T3)(rawptr(ptr + size_of(callback) + size_of(p) + size_of(p2))), p3)
 
 	completion.user_data = completion
 	return completion
