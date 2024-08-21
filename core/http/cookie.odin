@@ -5,7 +5,7 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 
-Cookie_Same_Site :: enum {
+Cookie_Same_Site :: enum u8 {
 	Unspecified,
 	None,
 	Strict,
@@ -13,15 +13,15 @@ Cookie_Same_Site :: enum {
 }
 
 Cookie :: struct {
+	domain:       Maybe(string),
+	path:         Maybe(string),
+	expires_gmt:  Maybe(time.Time),
 	name:         string,
 	value:        string,
-	domain:       Maybe(string),
-	expires_gmt:  Maybe(time.Time),
-	http_only:    bool,
 	max_age_secs: Maybe(int),
-	partitioned:  bool,
-	path:         Maybe(string),
 	same_site:    Cookie_Same_Site,
+	http_only:    bool,
+	partitioned:  bool,
 	secure:       bool,
 }
 
