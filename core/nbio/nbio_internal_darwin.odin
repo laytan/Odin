@@ -119,10 +119,19 @@ flush :: proc(io: ^IO) -> os.Errno {
 			return os.ERROR_NONE
 		}
 
-		ts: os.Unix_File_Time
-		new_events, err := kqueue.kevent(io.kq, events[:change_events], events[:], &ts)
-		if err != .None {
-			return os.Platform_Error(err)
+		new_events: int
+		for {
+			ts: os.Unix_File_Time
+			err: kqueue.Event_Error
+			new_events, err = kqueue.kevent(io.kq, events[:change_events], events[:], &ts)
+			if err == .Signal {
+				assert(new_events == 0)
+				continue
+			} else if err != nil {
+				return os.Platform_Error(err)
+			} else {
+				break
+			}
 		}
 
 		// PERF: this is ordered and O(N), can this be made unordered?
