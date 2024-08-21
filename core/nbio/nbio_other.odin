@@ -331,7 +331,7 @@ poll :: proc {
 }
 
 @(private)
-Operation :: union #no_nil {
+Operation :: union {
 	Op_Accept,
 	Op_Close,
 	Op_Connect,
