@@ -298,7 +298,7 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 		}
 
 		err := nbio.tick(&td.io)
-		fmt.assertf(err == os.ERROR_NONE, "IO tick error during shutdown: %v")
+		fmt.assertf(err == os.ERROR_NONE, "IO tick error during shutdown: %v", err)
 	}
 
 	td.state = .Cleaning

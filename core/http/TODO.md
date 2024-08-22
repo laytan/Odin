@@ -1,6 +1,20 @@
+- Odin
+	- core
+		- net
+			- http         | HTTP client and server
+			- dns          | DNS client built on asyncio
+		- io
+			- asyncio      | "Low" level asynchronous IO event loop
+		- sys
+			- linux
+				- io_uring | IO Uring API
+			- kqueue       | Kqueue bindings
+	 - vendor
+	 	- openssl          | Minimal OpenSSL bindings enabling (plug-in) HTTPS in the HTTP client
+
 # TODO
 
-- [ ] Make sure everything runs under `-sanitize:thread` and `-sanitize:address`
+- [ ] Make sure everything runs under `-sanitize:address`
 - [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
 - [x] Build/update openssl using CI (on a cron?)
 
@@ -40,7 +54,6 @@
 
 - [ ] Implement `with_timeout` everywhere
 - [ ] Make sure all procs are implemented everywhere (UDP & TCP, all platforms)
-- [ ] Make `with_timeout` more efficient
 - [x] Move the sub /poly package into the main one
 - [x] Remove toggling the poly API
 - [x] JS implementation
@@ -48,11 +61,14 @@
 - [x] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
 - [ ] check if some of the calls need to take a flags bitset.
+- [ ] don't use os.Errno or os package at all
+- [ ] consider making the `IO` a thread local global
 
 # Non critical wants
 
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
 - [ ] Support the BSDs
+	- [ ] verify kqueue against bsd headers
 
 ## HTTP Server
 

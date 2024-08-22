@@ -323,7 +323,11 @@ multi_sync :: proc(t: ^testing.T) {
 	http.client_init(&c, &io)
 	defer http.client_destroy(&c)
 
-	responses, err := http.multi_sync(&c, {url="https://odin-lang.org"}, {url="https://odin-lang.org/docs/overview/"}, {url="https://odin-lang.org/docs/faq/"})
+	responses, err := http.multi_sync(&c, 
+		{url="https://odin-lang.org"},
+		{url="https://odin-lang.org/docs/overview/"},
+		{url="https://odin-lang.org/docs/faq/"},
+	)
 	testing.expect_value(t, err, nil)
 	defer http.responses_destroy(&c, responses)
 
