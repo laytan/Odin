@@ -33,6 +33,8 @@ On_Init :: #type proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, ho
 Client :: struct {
 	allocator: mem.Allocator,
 
+	cache: map[string]Cache_Entry,
+
 	io: ^nbio.IO,
 
 	// Hosts/Name servers configuration.
@@ -44,8 +46,6 @@ Client :: struct {
 
 	init_cb: On_Init,
 	init_ud: rawptr,
-
-	cache: map[string]Cache_Entry,
 }
 
 Record :: struct {
