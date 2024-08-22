@@ -5,7 +5,8 @@ import "base:runtime"
 
 import "core:container/queue"
 import "core:mem"
-import "core:nbio/kqueue"
+import kq "core:sys/kqueue"
+import "core:sys/posix"
 import "core:net"
 import "core:os"
 import "core:time"
@@ -16,7 +17,7 @@ TIMED_OUT :: rawptr(max(uintptr))
 REMOVED   :: rawptr(max(uintptr)-1)
 
 _IO :: struct #no_copy {
-	kq:              os.Handle,
+	kq:              kq.KQ,
 	io_inflight:     int,
 	completion_pool: Pool,
 	timeouts:        [dynamic]^Completion,
@@ -111,7 +112,7 @@ Op_Remove :: struct {
 flush :: proc(io: ^IO) -> os.Errno {
 	defer assert(io.io_inflight >= 0)
 
-	events: [MAX_EVENTS]kqueue.KEvent
+	events: [MAX_EVENTS]kq.KEvent
 
 	_ = flush_timeouts(io)
 	change_events, completions_flushed := flush_io(io, events[:])
@@ -121,12 +122,11 @@ flush :: proc(io: ^IO) -> os.Errno {
 			return os.ERROR_NONE
 		}
 
-		new_events: int
+		new_events: i32
 		for {
-			ts: os.Unix_File_Time
-			err: kqueue.Event_Error
-			new_events, err = kqueue.kevent(io.kq, events[:change_events], events[:], &ts)
-			if err == .Signal {
+			err: posix.Errno
+			new_events, err = kq.kevent(io.kq, events[:change_events], events[:], &{})
+			if err == .EINTR {
 				assert(new_events == 0)
 				continue
 			} else if err != nil {
@@ -141,10 +141,10 @@ flush :: proc(io: ^IO) -> os.Errno {
 
 		// TODO: does removal return a response, because this would be wrong otherwise?
 		io.io_inflight += change_events
-		io.io_inflight -= new_events
+		io.io_inflight -= int(new_events)
 
 		if new_events > 0 {
-			queue.reserve(&io.completed, new_events)
+			queue.reserve(&io.completed, int(new_events))
 			for event in events[:new_events] {
 				completion := cast(^Completion)event.udata
 				completion.in_kernel = false
@@ -201,7 +201,7 @@ time_out_op :: proc(io: ^IO, completed: ^Completion) {
 	}
 }
 
-flush_io :: proc(io: ^IO, events: []kqueue.KEvent) -> (changed_events: int, completions: int) {
+flush_io :: proc(io: ^IO, events: []kq.KEvent) -> (changed_events: int, completions: int) {
 	events := events
 	j: int
 	events_loop: for i := 0; i < len(events); i += 1 {
