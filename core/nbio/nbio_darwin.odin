@@ -1,15 +1,16 @@
 package nbio
 
 import "core:container/queue"
-import "core:nbio/kqueue"
+import "core:sys/posix"
+import kq "core:sys/kqueue"
 import "core:net"
 import "core:os"
 import "core:time"
 
 _init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
-	qerr: kqueue.Queue_Error
-	io.kq, qerr = kqueue.kqueue()
-	if qerr != .None {
+	qerr: posix.Errno
+	io.kq, qerr = kq.kqueue()
+	if qerr != .NONE {
 		return os.Platform_Error(qerr)
 	}
 
@@ -36,7 +37,7 @@ _destroy :: proc(io: ^IO) {
 
 	queue.destroy(&io.completed)
 
-	os.close(io.kq)
+	posix.close(io.kq)
 
 	pool_destroy(&io.completion_pool)
 }
