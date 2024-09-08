@@ -57,6 +57,13 @@ num_waiting :: #force_inline proc(io: ^IO) -> int {
 }
 
 /*
+Returns the current time (of the last tick).
+*/
+now :: proc(io: ^IO) -> time.Time {
+	return _now(io)
+}
+
+/*
 Deallocates anything that was allocated when calling init()
 
 Inputs:

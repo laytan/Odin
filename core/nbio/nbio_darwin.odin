@@ -42,6 +42,10 @@ _destroy :: proc(io: ^IO) {
 	pool_destroy(&io.completion_pool)
 }
 
+_now :: proc(io: ^IO) -> time.Time {
+	return io.now
+}
+
 _tick :: proc(io: ^IO) -> os.Errno {
 	return flush(io)
 }
@@ -222,7 +226,7 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 	completion.user_data = user
 	completion.operation = Op_Timeout {
 		callback = callback,
-		expires  = time.time_add(time.now(), dur), // TODO: store the current time in the IO struct, this is costly.
+		expires  = time.time_add(io.now, dur),
 	}
 
 	append(&io.timeouts, completion)
@@ -243,7 +247,7 @@ _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) ->
 	completion.user_data = target
 	completion.operation = Op_Timeout {
 		callback = cast(On_Timeout)INTERNAL_TIMEOUT,
-		expires = time.time_add(time.now(), dur), // TODO: store the current time in the IO struct, this is costly.
+		expires = time.time_add(io.now, dur),
 	}
 	target.timeout = completion
 	append(&io.timeouts, completion)

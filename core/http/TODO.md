@@ -49,7 +49,7 @@
 ## DNS Client
 
 - [ ] Windows
-- [ ] Should this really be it's own package?
+- [x] Should this really be it's own package?
 
 ## nbio
 
@@ -61,6 +61,9 @@
 - [x] nbio.run that loops a tick, and returns when the event loop has nothing going on
 - [x] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
+    - [x] Darwin
+    - [ ] Linux
+    - [ ] Windows
 - [ ] check if some of the calls need to take a flags bitset.
 - [ ] don't use os.Errno or os package at all
 - [ ] consider making the `IO` a thread local global
@@ -74,7 +77,7 @@
 
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
 - [ ] Support the BSDs
-	- [ ] verify kqueue against bsd headers
+	- [x] verify kqueue against bsd headers
 
 ## HTTP Server
 

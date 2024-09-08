@@ -24,6 +24,7 @@ _IO :: struct #no_copy {
 	completed:       queue.Queue(^Completion),
 	io_pending:      [dynamic]^Completion,
 	allocator:       mem.Allocator,
+	now:             time.Time,
 }
 
 _Completion :: struct {
@@ -309,9 +310,7 @@ flush_io :: proc(io: ^IO, events: []kq.KEvent) -> (changed_events: int, completi
 }
 
 flush_timeouts :: proc(io: ^IO) -> (min_timeout: Maybe(i64)) {
-	now: time.Time
-	// PERF: is there a faster way to compare time? Or time since program start and compare that?
-	if len(io.timeouts) > 0 { now = time.now() }
+	io.now = time.now()
 
 	for i := len(io.timeouts) - 1; i >= 0; i -= 1 {
 		completion := io.timeouts[i]
@@ -319,7 +318,7 @@ flush_timeouts :: proc(io: ^IO) -> (min_timeout: Maybe(i64)) {
 		timeout, ok := &completion.operation.(Op_Timeout)
 		if !ok { panic("non-timeout operation found in the timeouts queue") }
 
-		unow := time.to_unix_nanoseconds(now)
+		unow := time.to_unix_nanoseconds(io.now)
 		expires := time.to_unix_nanoseconds(timeout.expires)
 		if unow >= expires {
 			ordered_remove(&io.timeouts, i)

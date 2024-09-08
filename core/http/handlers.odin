@@ -1,6 +1,7 @@
 //+build !js
 package http
 
+import "core:nbio"
 import "core:net"
 import "core:strconv"
 import "core:sync"
@@ -78,18 +79,20 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 
 	data.opts = opts
 	data.hits = make(map[net.Address]int, 16, allocator)
-	data.next_sweep = time.time_add(time.now(), opts.window)
+	data.next_sweep = time.time_add(nbio.now(io()), opts.window)
 	h.user_data = data
 
 	h.handle = proc(h: ^Handler, req: ^Request, res: ^Response) {
 		data := (^Rate_Limit_Data)(h.user_data)
+
+		now := nbio.now(io())
 
 		sync.lock(&data.mu)
 
 		// PERF: if this is not performing, we could run a thread that sweeps on a regular basis.
 		if time.since(data.next_sweep) > 0 {
 			clear(&data.hits)
-			data.next_sweep = time.time_add(time.now(), data.opts.window)
+			data.next_sweep = time.time_add(now, data.opts.window)
 		}
 
 		hits := data.hits[req.client.address]
@@ -99,7 +102,7 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 		if hits > data.opts.max {
 			res.status = .Too_Many_Requests
 
-			retry_dur := int(time.diff(time.now(), data.next_sweep) / time.Second)
+			retry_dur := int(time.diff(now, data.next_sweep) / time.Second)
 			buf := make([]byte, 32, context.temp_allocator)
 			retry_str := strconv.itoa(buf, retry_dur)
 			headers_set_unsafe(&res.headers, "retry-after", retry_str)
