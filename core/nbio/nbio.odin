@@ -26,7 +26,9 @@ init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
 
 /*
 The place where the magic happens, each time you call this the IO implementation checks its state
-and calls any callbacks which are ready. You would typically call this in a loop
+and calls any callbacks which are ready. You would typically call this in a loop.
+
+Blocks for up-to 10ms waiting for events if there is nothing to do.
 
 Inputs:
 - io: The IO instance to tick
