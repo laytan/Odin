@@ -674,7 +674,6 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 Server_Date :: struct {
 	buf_backing: [DATE_LENGTH]byte,
 	buf:         bytes.Buffer,
-	// TODO: load from future `nbio.now()`.
 	now:         time.Time,
 }
 
@@ -695,7 +694,7 @@ server_date_update :: proc(s: rawptr) {
 	nbio.timeout(&td.io, time.Second, s, server_date_update)
 
 	bytes.buffer_reset(&s.date.buf)
-	s.date.now = time.now()
+	s.date.now = nbio.now(&td.io)
 	date_write(bytes.buffer_to_stream(&s.date.buf), s.date.now)
 }
 
