@@ -114,7 +114,7 @@ flush :: proc(io: ^IO) -> os.Errno {
 
 	events: [MAX_EVENTS]kq.KEvent
 
-	_ = flush_timeouts(io)
+	min_timeout := flush_timeouts(io)
 	change_events, completions_flushed := flush_io(io, events[:])
 
 	if (change_events > 0 || queue.len(io.completed) == 0) {
@@ -122,10 +122,13 @@ flush :: proc(io: ^IO) -> os.Errno {
 			return os.ERROR_NONE
 		}
 
+		max_timeout := time.Millisecond * 10
+		timeout: posix.timespec
+		timeout.tv_nsec = min(min_timeout.? or_else i64(max_timeout), i64(max_timeout))
 		new_events: i32
 		for {
 			err: posix.Errno
-			new_events, err = kq.kevent(io.kq, events[:change_events], events[:], &{})
+			new_events, err = kq.kevent(io.kq, events[:change_events], events[:], &timeout)
 			if err == .EINTR {
 				assert(new_events == 0)
 				continue
