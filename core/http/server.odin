@@ -660,6 +660,10 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 				rline.method = .Get
 			}
 
+			when !ODIN_DISABLE_ASSERT {
+				context.temp_allocator = no_free_all_allocator(l.conn)
+			}
+
 			l.conn.server.handler.handle(&l.conn.server.handler, &l.req, &l.res)
 		}
 	}
@@ -698,4 +702,18 @@ server_date_update :: proc(s: rawptr) {
 @(private)
 server_date :: proc(s: ^Server) -> string {
 	return string(s.date.buf_backing[:])
+}
+
+@(private)
+no_free_all_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+	return {
+		data      = c,
+		procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+			if mode == .Free_All {
+				panic("'free_all' called on connection's temporary allocator", location)
+			}
+
+			return virtual.arena_allocator_proc(&((^Connection)(allocator_data).temp_allocator), mode, size, alignment, old_memory, old_size, location)
+		},
+	}
 }
