@@ -4,6 +4,7 @@ package http
 import "core:bytes"
 import "core:io"
 import "core:log"
+import "core:mem/virtual"
 import "core:nbio"
 import "core:net"
 import "core:slice"
@@ -290,6 +291,7 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 @(private)
 response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
+	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 	r.sent = true
 
 	check_body :: proc(res: rawptr, body: Body, err: Body_Error) {
