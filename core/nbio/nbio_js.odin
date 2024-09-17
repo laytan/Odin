@@ -7,6 +7,8 @@ import "core:time"
 
 foreign import "odin_io"
 
+// TODO: update with thread local stuff.
+
 _IO :: struct #no_copy {
 	// NOTE: num_waiting is also changed in JS.
 	num_waiting: int,

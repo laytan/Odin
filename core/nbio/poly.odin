@@ -9,10 +9,10 @@ unall :: intrinsics.unaligned_load
 @(private)
 unals :: intrinsics.unaligned_store
 
-timeout1 :: proc(io: ^IO, dur: time.Duration, p: $T, callback: $C/proc(p: T)) -> ^Completion
+timeout_poly :: proc(dur: time.Duration, p: $T, callback: $C/proc(p: T)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 
-	completion := _timeout(io, dur, nil, proc(completion: rawptr) {
+	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -28,10 +28,10 @@ timeout1 :: proc(io: ^IO, dur: time.Duration, p: $T, callback: $C/proc(p: T)) ->
 	return completion
 }
 
-timeout2 :: proc(io: ^IO, dur: time.Duration, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
+timeout_poly2 :: proc(dur: time.Duration, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 
-	completion := _timeout(io, dur, nil, proc(completion: rawptr) {
+	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -49,10 +49,10 @@ timeout2 :: proc(io: ^IO, dur: time.Duration, p: $T, p2: $T2, callback: $C/proc(
 	return completion
 }
 
-timeout3 :: proc(io: ^IO, dur: time.Duration, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
+timeout_poly3 :: proc(dur: time.Duration, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 
-	completion := _timeout(io, dur, nil, proc(completion: rawptr) {
+	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -72,9 +72,9 @@ timeout3 :: proc(io: ^IO, dur: time.Duration, p: $T, p2: $T2, p3: $T3, callback:
 	return completion
 }
 
-next_tick1 :: proc(io: ^IO, p: $T, callback: $C/proc(p: T)) -> ^Completion
+next_tick_poly :: proc(p: $T, callback: $C/proc(p: T)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _next_tick(io, nil, proc(completion: rawptr) {
+	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -90,9 +90,9 @@ next_tick1 :: proc(io: ^IO, p: $T, callback: $C/proc(p: T)) -> ^Completion
 	return completion
 }
 
-next_tick2 :: proc(io: ^IO, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
+next_tick_poly2 :: proc(p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _next_tick(io, nil, proc(completion: rawptr) {
+	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -110,9 +110,9 @@ next_tick2 :: proc(io: ^IO, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> 
 	return completion
 }
 
-next_tick3 :: proc(io: ^IO, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
+next_tick_poly3 :: proc(p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _next_tick(io, nil, proc(completion: rawptr) {
+	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))

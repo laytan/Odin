@@ -1,4 +1,7 @@
 /*
+
+// TODO: this is outdated.
+
 package nbio implements a non blocking IO abstraction layer over several platform specific APIs.
 
 You can also have a look at the tests for more general usages.
