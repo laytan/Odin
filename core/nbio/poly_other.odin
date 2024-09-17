@@ -6,9 +6,9 @@ import "base:intrinsics"
 import "core:net"
 import "core:os"
 
-close1 :: proc(io: ^IO, fd: Closable, p: $T, callback: $C/proc(p: T, ok: bool)) -> ^Completion
+close_poly :: proc(fd: Closable, p: $T, callback: $C/proc(p: T, ok: bool)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
+	completion := _close(io(), fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -24,9 +24,9 @@ close1 :: proc(io: ^IO, fd: Closable, p: $T, callback: $C/proc(p: T, ok: bool)) 
 	return completion
 }
 
-close2 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, ok: bool)) -> ^Completion
+close_poly2 :: proc(fd: Closable, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, ok: bool)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
+	completion := _close(io(), fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -44,9 +44,9 @@ close2 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, callback: $C/proc(p: T, p2
 	return completion
 }
 
-close3 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, ok: bool)) -> ^Completion
+close_poly3 :: proc(fd: Closable, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, ok: bool)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _close(io, fd, nil, proc(completion: rawptr, ok: bool) {
+	completion := _close(io(), fd, nil, proc(completion: rawptr, ok: bool) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -66,9 +66,9 @@ close3 :: proc(io: ^IO, fd: Closable, p: $T, p2: $T2, p3: $T3, callback: $C/proc
 	return completion
 }
 
-accept1 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, callback: $C/proc(p: T, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
+accept_poly :: proc(socket: net.TCP_Socket, p: $T, callback: $C/proc(p: T, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
+	completion := _accept(io(), socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -84,9 +84,9 @@ accept1 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, callback: $C/proc(p: T, 
 	return completion
 }
 
-accept2 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
+accept_poly2 :: proc(socket: net.TCP_Socket, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
+	completion := _accept(io(), socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -104,9 +104,9 @@ accept2 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, callback: $C/pr
 	return completion
 }
 
-accept3 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
+accept_poly3 :: proc(socket: net.TCP_Socket, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _accept(io, socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
+	completion := _accept(io(), socket, nil, proc(completion: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -126,9 +126,9 @@ accept3 :: proc(io: ^IO, socket: net.TCP_Socket, p: $T, p2: $T2, p3: $T3, callba
 	return completion
 }
 
-connect1 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+connect_poly :: proc(endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -148,9 +148,9 @@ connect1 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T,
 	return completion
 }
 
-connect2 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+connect_poly2 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -172,9 +172,9 @@ connect2 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/p
 	return completion
 }
 
-connect3 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+connect_poly3 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS  {
-	completion, err := _connect(io, endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -198,9 +198,9 @@ connect3 :: proc(io: ^IO, endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callb
 	return completion
 }
 
-_recv1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+_recv_poly :: proc(socket: net.Any_Socket, buf: []byte, all: bool, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
+	completion := _recv(io(), socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -216,9 +216,9 @@ _recv1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, c
 	return completion
 }
 
-_recv2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+_recv_poly2 :: proc(socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
+	completion := _recv(io(), socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -236,9 +236,9 @@ _recv2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p
 	return completion
 }
 
-_recv3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+_recv_poly3 :: proc(socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _recv(io, socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
+	completion := _recv(io(), socket, buf, nil, proc(completion: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -258,39 +258,39 @@ _recv3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, all: bool, p: $T, p
 	return completion
 }
 
-recv1 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_poly :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _recv1(io, socket, buf, false, p, callback)
+	return _recv_poly(socket, buf, false, p, callback)
 }
 
-recv2 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_poly2 :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _recv2(io, socket, buf, false, p, p2, callback)
+	return _recv_poly2(socket, buf, false, p, p2, callback)
 }
 
-recv3 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_poly3 :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _recv3(io, socket, buf, false, p, p2, p3, callback)
+	return _recv_poly3(socket, buf, false, p, p2, p3, callback)
 }
 
-recv_all1 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_all_poly :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _recv1(io, socket, buf, true, p, callback)
+	return _recv_poly(socket, buf, true, p, callback)
 }
 
-recv_all2 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_all_poly2 :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _recv2(io, socket, buf, true, p, p2, callback)
+	return _recv_poly2(socket, buf, true, p, p2, callback)
 }
 
-recv_all3 :: #force_inline proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
+recv_all_poly3 :: #force_inline proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _recv3(io, socket, buf, true, p, p2, p3, callback)
+	return _recv_poly3(socket, buf, true, p, p2, p3, callback)
 }
 
-_send1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
+_send_poly :: proc(socket: net.Any_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
+	completion := _send(io(), socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -306,9 +306,9 @@ _send1 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, callback: $C
 	return completion
 }
 
-_send2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
+_send_poly2 :: proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
+	completion := _send(io(), socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -326,9 +326,9 @@ _send2 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, cal
 	return completion
 }
 
-_send3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
+_send_poly3 :: proc(socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error), endpoint: Maybe(net.Endpoint) = nil, all := false) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _send(io, socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
+	completion := _send(io(), socket, buf, nil, proc(completion: rawptr, sent: int, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -348,71 +348,71 @@ _send3 :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, p: $T, p2: $T2, p3:
 	return completion
 }
 
-send_tcp1 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
+send_tcp_poly :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _send1(io, socket, buf, p, callback)
+	return _send_poly(socket, buf, p, callback)
 }
 
-send_tcp2 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
+send_tcp_poly2 :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _send2(io, socket, buf, p, p2, callback)
+	return _send_poly2(socket, buf, p, p2, callback)
 }
 
-send_tcp3 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
+send_tcp_poly3 :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _send3(io, socket, buf, p, p2, p3, callback)
+	return _send_poly3(socket, buf, p, p2, p3, callback)
 }
 
-send_udp1 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
+send_udp_poly :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _send1(io, socket, buf, p, callback, endpoint)
+	return _send_poly(socket, buf, p, callback, endpoint)
 }
 
-send_udp2 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
+send_udp_poly2 :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _send2(io, socket, buf, p, p2, callback, endpoint)
+	return _send_poly2(socket, buf, p, p2, callback, endpoint)
 }
 
-send_udp3 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
+send_udp_poly3 :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _send3(io, socket, buf, p, p2, p3, callback, endpoint)
+	return _send_poly3(socket, buf, p, p2, p3, callback, endpoint)
 }
 
-send_all_tcp1 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_tcp_poly :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _send1(io, socket, buf, p, callback, all = true)
+	return _send_poly(socket, buf, p, callback, all = true)
 }
 
-send_all_tcp2 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_tcp_poly2 :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _send2(io, socket, buf, p, p2, callback, all = true)
+	return _send_poly2(socket, buf, p, p2, callback, all = true)
 }
 
-send_all_tcp3 :: #force_inline proc(io: ^IO, socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_tcp_poly3 :: #force_inline proc(socket: net.TCP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _send3(io, socket, buf, p, p2, p3, callback, all = true)
+	return _send_poly3(socket, buf, p, p2, p3, callback, all = true)
 }
 
-send_all_udp1 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_udp_poly :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, callback: $C/proc(p: T, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _send1(io, socket, buf, p, callback, endpoint, all = true)
+	return _send_poly(socket, buf, p, callback, endpoint, all = true)
 }
 
-send_all_udp2 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_udp_poly2 :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _send2(io, socket, buf, p, p2, callback, endpoint, all = true)
+	return _send_poly2(socket, buf, p, p2, callback, endpoint, all = true)
 }
 
-send_all_udp3 :: #force_inline proc(io: ^IO, endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
+send_all_udp_poly3 :: #force_inline proc(endpoint: net.Endpoint, socket: net.UDP_Socket, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, sent: int, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _send3(io, socket, buf, p, p2, p3, callback, endpoint, all = true)
+	return _send_poly3(socket, buf, p, p2, p3, callback, endpoint, all = true)
 }
 
 /// Read Internal
 
-_read1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno), all := false) -> ^Completion
+_read_poly :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io(), fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -428,9 +428,9 @@ _read1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback
 	return completion
 }
 
-_read2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno), all := false) -> ^Completion
+_read_poly2 :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io(), fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -448,9 +448,9 @@ _read2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2,
 	return completion
 }
 
-_read3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno), all := false) -> ^Completion
+_read_poly3 :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _read(io, fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io(), fd, offset, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -470,39 +470,39 @@ _read3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2,
 	return completion
 }
 
-read_at1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
+read_at_poly :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _read1(io, fd, offset, buf, p, callback)
+	return _read_poly(fd, offset, buf, p, callback)
 }
 
-read_at2 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
+read_at_poly2 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _read2(io, fd, offset, buf, p, p2, callback)
+	return _read_poly2(fd, offset, buf, p, p2, callback)
 }
 
-read_at3 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
+read_at_poly3 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _read3(io, fd, offset, buf, p, p2, p3, callback)
+	return _read_poly3(fd, offset, buf, p, p2, p3, callback)
 }
 
-read_at_all1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
+read_at_all_poly :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _read1(io, fd, offset, buf, p, callback, all = true)
+	return _read_poly(fd, offset, buf, p, callback, all = true)
 }
 
-read_at_all2 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
+read_at_all_poly2 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _read2(io, fd, offset, buf, p, p2, callback, all = true)
+	return _read_poly2(fd, offset, buf, p, p2, callback, all = true)
 }
 
-read_at_all3 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
+read_at_all_poly3 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, read: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _read3(io, fd, offset, buf, p, p2, p3, callback, all = true)
+	return _read_poly3(fd, offset, buf, p, p2, p3, callback, all = true)
 }
 
-_write1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno), all := false) -> ^Completion
+_write_poly :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
+	completion := _write(io(), fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -518,9 +518,9 @@ _write1 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callbac
 	return completion
 }
 
-_write2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno), all := false) -> ^Completion
+_write_poly2 :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
+	completion := _write(io(), fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -538,9 +538,9 @@ _write2 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2
 	return completion
 }
 
-_write3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno), all := false) -> ^Completion
+_write_poly3 :: proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno), all := false) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _write(io, fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
+	completion := _write(io(), fd, offset, buf, nil, proc(completion: rawptr, written: int, err: os.Errno) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -560,39 +560,39 @@ _write3 :: proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2
 	return completion
 }
 
-write_at1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
+write_at_poly :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _write1(io, fd, offset, buf, p, callback)
+	return _write_poly(fd, offset, buf, p, callback)
 }
 
-write_at2 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
+write_at_poly2 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _write2(io, fd, offset, buf, p, p2, callback)
+	return _write_poly2(fd, offset, buf, p, p2, callback)
 }
 
-write_at3 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
+write_at_poly3 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _write3(io, fd, offset, buf, p, p2, p3, callback)
+	return _write_poly3(fd, offset, buf, p, p2, p3, callback)
 }
 
-write_at_all1 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
+write_at_all_poly :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	return _write1(io, fd, offset, buf, p, callback, all = true)
+	return _write_poly(fd, offset, buf, p, callback, all = true)
 }
 
-write_at_all2 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
+write_at_all_poly2 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	return _write2(io, fd, offset, buf, p, p2, callback, all = true)
+	return _write_poly2(fd, offset, buf, p, p2, callback, all = true)
 }
 
-write_at_all3 :: #force_inline proc(io: ^IO, fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
+write_at_all_poly3 :: #force_inline proc(fd: os.Handle, offset: int, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	return _write3(io, fd, offset, buf, p, p2, p3, callback, all = true)
+	return _write_poly3(fd, offset, buf, p, p2, p3, callback, all = true)
 }
 
-poll1 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, callback: $C/proc(p: T, event: Poll_Event)) -> ^Completion
+poll_poly :: proc(fd: os.Handle, event: Poll_Event, multi: bool, p: $T, callback: $C/proc(p: T, event: Poll_Event)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
-	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -608,9 +608,9 @@ poll1 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, cal
 	return completion
 }
 
-poll2 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, event: Poll_Event)) -> ^Completion
+poll_poly2 :: proc(fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, event: Poll_Event)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
-	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -628,9 +628,9 @@ poll2 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2:
 	return completion
 }
 
-poll3 :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, event: Poll_Event)) -> ^Completion
+poll_poly3 :: proc(fd: os.Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, event: Poll_Event)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
-	completion := _poll(io, fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))

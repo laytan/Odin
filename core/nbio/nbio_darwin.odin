@@ -25,7 +25,7 @@ _init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
 	return
 }
 
-_num_waiting :: #force_inline proc(io: ^IO) -> int {
+_num_waiting :: proc(io: ^IO) -> int {
 	return io.completion_pool.num_waiting
 }
 
@@ -107,7 +107,7 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 	}
 
 	if err = _prepare_socket(sock); err != nil {
-		close(io, net.any_socket_to_socket(sock))
+		_close(io, net.any_socket_to_socket(sock), nil, empty_on_close)
 		return nil, err
 	}
 
