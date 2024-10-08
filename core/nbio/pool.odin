@@ -1,5 +1,5 @@
-//+build !js
-//+private
+#+build !js
+#+private
 package nbio
 
 import "core:container/queue"

@@ -1,4 +1,4 @@
-//+build !js
+#+build !js
 package http
 
 // TODO: this should ideally be private or at least in another package.

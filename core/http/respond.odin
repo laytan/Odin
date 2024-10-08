@@ -1,4 +1,4 @@
-//+build !js
+#+build !js
 package http
 
 import "core:bytes"

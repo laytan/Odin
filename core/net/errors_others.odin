@@ -1,6 +1,6 @@
-//+build !darwin
-//+build !windows
-//+build !linux
+#+build !darwin
+#+build !windows
+#+build !linux
 package net
 
 import "core:c"
