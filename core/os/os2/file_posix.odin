@@ -338,6 +338,21 @@ _exists :: proc(path: string) -> bool {
 	return posix.access(cpath) == .OK
 }
 
+_is_executable_path :: proc(path: string) -> bool {
+	TEMP_ALLOCATOR_GUARD()
+	cpath := temp_cstring(path)
+	return posix.access(cpath, {.X_OK}) == .OK
+}
+
+_is_executable_file :: proc(file: ^File) -> bool {
+	if file == nil || file.impl == nil {
+		return false
+	}
+
+	cpath := (^File_Impl)(file.impl).cname
+	return posix.access(cpath, {.X_OK}) == .OK
+}
+
 _file_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
 	f  := (^File_Impl)(stream_data)
 	fd := f.fd

@@ -285,7 +285,7 @@ exists :: proc(path: string) -> bool {
 }
 
 @(require_results)
-is_file :: proc(path: string) -> bool {
+is_file_by_path :: proc(path: string) -> bool {
 	TEMP_ALLOCATOR_GUARD()
 	fi, err := stat(path, temp_allocator())
 	if err != nil {
@@ -294,10 +294,25 @@ is_file :: proc(path: string) -> bool {
 	return fi.type == .Regular
 }
 
+@(require_results)
+is_file_by_file :: proc(file: ^File) -> bool {
+	TEMP_ALLOCATOR_GUARD()
+	fi, err := fstat(file, temp_allocator())
+	if err != nil {
+		return false
+	}
+	return fi.type == .Regular
+}
+
+is_file :: proc {
+	is_file_by_path,
+	is_file_by_file,
+}
+
 is_dir :: is_directory
 
 @(require_results)
-is_directory :: proc(path: string) -> bool {
+is_directory_by_path :: proc(path: string) -> bool {
 	TEMP_ALLOCATOR_GUARD()
 	fi, err := stat(path, temp_allocator())
 	if err != nil {
@@ -306,6 +321,35 @@ is_directory :: proc(path: string) -> bool {
 	return fi.type == .Directory
 }
 
+@(require_results)
+is_directory_by_file :: proc(file: ^File) -> bool {
+	TEMP_ALLOCATOR_GUARD()
+	fi, err := fstat(file, temp_allocator())
+	if err != nil {
+		return false
+	}
+	return fi.type == .Directory
+}
+
+is_directory :: proc {
+	is_directory_by_path,
+	is_directory_by_file,
+}
+
+@(require_results)
+is_executable_by_path :: proc(path: string) -> bool {
+	return _is_executable_path(path)
+}
+
+@(require_results)
+is_executable_by_file :: proc(file: ^File) -> bool {
+	return _is_executable_file(file)
+}
+
+is_executable :: proc {
+	is_executable_by_path,
+	is_executable_by_file,
+}
 
 copy_file :: proc(dst_path, src_path: string) -> Error {
 	src := open(src_path) or_return

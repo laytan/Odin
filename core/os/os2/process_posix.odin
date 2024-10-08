@@ -57,58 +57,8 @@ _process_start :: proc(desc: Process_Desc) -> (process: Process, err: Error) {
 
 	TEMP_ALLOCATOR_GUARD()
 
-	// search PATH if just a plain name is provided.
-	exe_builder := strings.builder_make(temp_allocator())
-	exe_name    := desc.command[0]
-	if strings.index_byte(exe_name, '/') < 0 {
-		path_env  := get_env("PATH", temp_allocator())
-		path_dirs := filepath.split_list(path_env, temp_allocator())
-
-		found: bool
-		for dir in path_dirs {
-			strings.builder_reset(&exe_builder)
-			strings.write_string(&exe_builder, dir)
-			strings.write_byte(&exe_builder, '/')
-			strings.write_string(&exe_builder, exe_name)
-
-			if exe_fd := posix.open(strings.to_cstring(&exe_builder), {.CLOEXEC, .EXEC}); exe_fd == -1 {
-				continue
-			} else {
-				posix.close(exe_fd)
-				found = true
-				break
-			}
-		}
-		if !found {
-			// check in cwd to match windows behavior
-			strings.builder_reset(&exe_builder)
-			strings.write_string(&exe_builder, desc.working_dir)
-			if len(desc.working_dir) > 0 && desc.working_dir[len(desc.working_dir)-1] != '/' {
-			strings.write_byte(&exe_builder, '/')
-			}
-			strings.write_string(&exe_builder, "./")
-			strings.write_string(&exe_builder, exe_name)
-
-			// "hello/./world" is fine right?
-
-			if exe_fd := posix.open(strings.to_cstring(&exe_builder), {.CLOEXEC, .EXEC}); exe_fd == -1 {
-				err = .Not_Exist
-				return
-			} else {
-				posix.close(exe_fd)
-			}
-		}
-	} else {
-		strings.builder_reset(&exe_builder)
-		strings.write_string(&exe_builder, exe_name)
-
-		if exe_fd := posix.open(strings.to_cstring(&exe_builder), {.CLOEXEC, .EXEC}); exe_fd == -1 {
-			err = .Not_Exist
-			return
-		} else {
-			posix.close(exe_fd)
-		}
-	}
+	exe_fd := lookup_executable(desc.command[0], desc.working_dir) or_return
+	defer close(exe_fd)
 
 	cwd: cstring; if desc.working_dir != "" {
 		cwd = temp_cstring(desc.working_dir)
@@ -181,7 +131,7 @@ _process_start :: proc(desc: Process_Desc) -> (process: Process, err: Error) {
 			if posix.chdir(cwd) != .OK { abort(pipe[WRITE]) }
 		}
 
-		res := posix.execve(strings.to_cstring(&exe_builder), raw_data(cmd), env)
+		res := posix.execve((^File_Impl)(exe_fd.impl).cname, raw_data(cmd), env)
 		assert(res == -1)
 		abort(pipe[WRITE])
 

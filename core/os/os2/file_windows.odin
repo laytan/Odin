@@ -785,6 +785,22 @@ _exists :: proc(path: string) -> bool {
 	return attribs != win32.INVALID_FILE_ATTRIBUTES
 }
 
+_is_executable_path :: proc(path: string) -> bool {
+	TEMP_ALLOCATOR_GUARD()
+	wpath, _ := _fix_long_path(path, temp_allocator())
+	type: win32.DWORD
+	return bool(win32.GetBinaryTypeW(wpath, &type))
+}
+
+_is_executable_file :: proc(file: ^File) -> bool {
+	if file == nil || file.impl == nil {
+		return false
+	}
+
+	type: win32.DWORD
+	return bool(win32.GetBinaryTypeW((^File_Impl)(file.impl).wname, &type))
+}
+
 @(private="package")
 _file_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
 	f := (^File_Impl)(stream_data)

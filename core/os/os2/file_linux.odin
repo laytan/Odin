@@ -2,10 +2,12 @@
 package os2
 
 import "base:runtime"
+
 import "core:io"
-import "core:time"
+import "core:strings"
 import "core:sync"
 import "core:sys/linux"
+import "core:time"
 
 File_Impl :: struct {
 	file: File,
@@ -423,6 +425,24 @@ _exists :: proc(name: string) -> bool {
 	TEMP_ALLOCATOR_GUARD()
 	name_cstr, _ := temp_cstring(name)
 	return linux.access(name_cstr, linux.F_OK) == .NONE
+}
+
+_is_executable_path :: proc(path: string) -> bool {
+	TEMP_ALLOCATOR_GUARD()
+	cpath := temp_cstring(path)
+	return linux.access(cpath, linux.X_OK) == .NONE
+}
+
+_is_executable_file :: proc(file: ^File) -> bool {
+	if file == nil || file.impl == nil {
+		return false
+	}
+
+	backing: [48]u8
+	b := strings.builder_from_bytes(backing[:])
+	strings.write_string(&b, "/proc/self/fd/")
+	strings.write_uint(&b, uint(_fd(file)))
+	return linux.access(strings.to_cstring(&b), linux.X_OK) == .NONE
 }
 
 /* For reading Linux system files that stat to size 0 */

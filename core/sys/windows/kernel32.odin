@@ -263,6 +263,7 @@ foreign kernel32 {
 		lpSecurityAttributes: LPSECURITY_ATTRIBUTES,
 	) -> BOOL ---
 	DeleteFileW :: proc(lpPathName: LPCWSTR) -> BOOL ---
+	GetBinaryTypeW :: proc(lpApplicationName: LPCWSTR, lpBinaryType: LPDWORD) -> BOOL ---
 	GetCurrentDirectoryW :: proc(nBufferLength: DWORD, lpBuffer: LPWSTR) -> DWORD ---
 	SetCurrentDirectoryW :: proc(lpPathName: LPCWSTR) -> BOOL ---
 	WideCharToMultiByte :: proc(
