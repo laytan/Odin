@@ -1,48 +1,41 @@
-#+build !js
 package nbio
 
 import "base:runtime"
 
-import "core:os"
-
 @(private="file")
-read_entire_file_alloc :: proc(io: ^IO, fd: os.Handle, allocator: runtime.Allocator) -> (buf: []byte, err: os.Errno) {
-	size: i64
-	if size, err = _file_size(io, fd); err != os.ERROR_NONE {
-		return
-	}
-
+read_entire_file_alloc :: proc(io: ^IO, fd: Handle, allocator: runtime.Allocator) -> (buf: []byte, err: FS_Error) {
+	size := _file_size(io, fd) or_return
 	if size <= 0 {
 		return
 	}
 
 	isize := int(size)
 	if isize <= 0 {
-		err = os.ERROR_BUFFER_OVERFLOW when ODIN_OS == .Windows else os.EFBIG
+		err = .Overflow
 		return
 	}
 
 	mem: runtime.Allocator_Error
 	buf, mem = make([]byte, isize, allocator)
 	if mem != nil {
-		err = os.ERROR_NOT_ENOUGH_MEMORY when ODIN_OS == .Windows else os.ENOMEM
+		err = .Allocation_Failed
 	}
 
 	return
 }
 
-read_entire_file :: proc(fd: os.Handle, p: $T, callback: $C/proc(p: T, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
+read_entire_file :: proc(fd: Handle, p: $T, callback: $C/proc(p: T, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of([]byte) <= MAX_USER_ARGUMENTS {
 
 	io := io()
 
 	buf, err := read_entire_file_alloc(io, fd, allocator)
-	if err != os.ERROR_NONE {
+	if err != nil {
 		callback(p, nil, err)
 		return nil
 	}
 
-	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: FS_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)     (rawptr(ptr)))
 		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
@@ -60,18 +53,18 @@ read_entire_file :: proc(fd: os.Handle, p: $T, callback: $C/proc(p: T, buf: []by
 	return completion
 }
 
-read_entire_file2 :: proc(fd: os.Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
+read_entire_file2 :: proc(fd: Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of([]byte) <= MAX_USER_ARGUMENTS {
 
 	io := io()
 
 	buf, err := read_entire_file_alloc(io, fd, allocator)
-	if err != os.ERROR_NONE {
+	if err != nil {
 		callback(p, p2, nil, err)
 		return nil
 	}
 
-	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: FS_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)     (rawptr(ptr)))
 		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
@@ -91,18 +84,18 @@ read_entire_file2 :: proc(fd: os.Handle, p: $T, p2: $T2, callback: $C/proc(p: T,
 	return completion
 }
 
-read_entire_file3 :: proc(fd: os.Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, buf: []byte, err: os.Errno), allocator := context.allocator) -> ^Completion
+read_entire_file3 :: proc(fd: Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) + size_of([]byte) <= MAX_USER_ARGUMENTS {
 
 	io := io()
 
 	buf, err := read_entire_file_alloc(io, fd, allocator)
-	if err != os.ERROR_NONE {
+	if err != nil {
 		callback(p, p2, p3, nil, err)
 		return nil
 	}
 
-	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: os.Errno) {
+	completion := _read(io, fd, 0, buf, nil, proc(completion: rawptr, read: int, err: FS_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)     (rawptr(ptr)))
 		buf := unall((^[]byte)(rawptr(ptr + size_of(C))))
@@ -124,17 +117,17 @@ read_entire_file3 :: proc(fd: os.Handle, p: $T, p2: $T2, p3: $T3, callback: $C/p
 	return completion
 }
 
-write_entire_file :: #force_inline proc(fd: os.Handle, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: os.Errno)) -> ^Completion
+write_entire_file :: #force_inline proc(fd: Handle, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: FS_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {
 	return write_at_all_poly(fd, 0, buf, p, callback)
 }
 
-write_entire_file2 :: #force_inline proc(fd: os.Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: os.Errno)) -> ^Completion
+write_entire_file2 :: #force_inline proc(fd: Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: FS_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
 	return write_at_all_poly2(fd, 0, buf, p, p2, callback)
 }
 
-write_entire_file3 :: #force_inline proc(fd: os.Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: os.Errno)) -> ^Completion
+write_entire_file3 :: #force_inline proc(fd: Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: FS_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
 	return write_at_all_poly3(fd, 0, buf, p, p2, p3, callback)
 }

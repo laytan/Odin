@@ -1,6 +1,5 @@
 package nbio
 
-import "core:os"
 import "core:time"
 
 /*
@@ -15,12 +14,12 @@ Inputs:
 Returns:
 - err: An error code when something went when retrieving events, 0 otherwise
 */
-tick :: proc() -> os.Errno {
+tick :: proc() -> General_Error {
 	if !g_io.initialized { return nil }
 	return _tick(&g_io)
 }
 
-run :: proc() -> os.Errno {
+run :: proc() -> General_Error {
 	if !g_io.initialized { return nil }
 	for _num_waiting(&g_io) > 0 {
 		if errno := _tick(&g_io); errno != nil {
@@ -97,6 +96,8 @@ with_timeout :: proc(io: ^IO, dur: time.Duration, target: ^Completion, loc := #c
 	if target == nil || dur == 0 { return nil }
 	return _timeout_completion(io, dur, target)
 }
+
+Handle :: _Handle
 
 // TODO: should this be configurable, with a minimum of course for the use of core?
 MAX_USER_ARGUMENTS :: size_of(rawptr) * 5

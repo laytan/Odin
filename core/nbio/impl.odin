@@ -4,8 +4,6 @@ package nbio
 import "base:runtime"
 import "base:intrinsics"
 
-import "core:os"
-
 IO :: struct {
 	using impl:  _IO,
 	initialized: bool,
@@ -43,7 +41,7 @@ destroy_thread :: proc() {
 	destroy(&g_io)
 }
 
-init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
+init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	return _init(io, allocator)
 }
 

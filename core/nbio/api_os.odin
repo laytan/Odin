@@ -1,7 +1,6 @@
 #+build !js
 package nbio
 
-import "core:os"
 import "core:net"
 
 /*
@@ -64,8 +63,20 @@ Inputs:
 Returns:
 - err: A network error that happened when starting listening
 */
-listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> (err: net.Network_Error) {
+listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> (err: net.Listen_Error) {
 	return _listen(socket, backlog)
+}
+
+File_Flags :: distinct bit_set[File_Flag; int]
+File_Flag :: enum {
+	Read,
+	Write,
+	Append,
+	Create,
+	Excl,
+	Sync,
+	Trunc,
+	Inheritable,
 }
 
 /*
@@ -83,7 +94,7 @@ Returns:
 - handle: The file handle
 - err:    The error code when an error occured, 0 otherwise
 */
-open :: proc(path: string, mode: int = os.O_RDONLY, perm: int = 0) -> (handle: os.Handle, err: os.Errno) {
+open :: proc(path: string, mode: File_Flags = {.Read}, perm: int = 0o777) -> (handle: Handle, err: FS_Error) {
 	return _open(io(), path, mode, perm)
 }
 
@@ -94,7 +105,7 @@ Returns:
 - size: The size of the file in bytes
 - err:  The error when an error occured, 0 otherwise
 */
-file_size :: proc(fd: os.Handle) -> (size: i64, err: os.Errno) {
+file_size :: proc(fd: Handle) -> (size: i64, err: FS_Error) {
 	return _file_size(io(), fd)
 }
 
@@ -105,13 +116,13 @@ Closable :: union #no_nil {
 	net.TCP_Socket,
 	net.UDP_Socket,
 	net.Socket,
-	os.Handle,
+	Handle,
 }
 
-On_Close :: #type proc(user: rawptr, ok: bool)
+On_Close :: #type proc(user: rawptr, err: FS_Error)
 
 @private
-empty_on_close :: proc(_: rawptr, _: bool) {}
+empty_on_close :: proc(_: rawptr, _: FS_Error) {}
 
 /*
 Closes the given `Closable` socket or file handle that was originally created by this package.
@@ -126,7 +137,7 @@ close :: proc(fd: Closable, user: rawptr = nil, callback: On_Close = empty_on_cl
 	return _close(io(), fd, user, callback)
 }
 
-On_Accept :: #type proc(user: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error)
+On_Accept :: #type proc(user: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error)
 
 /*
 Using the given socket, accepts the next incoming connection, calling the callback when that happens
@@ -163,7 +174,12 @@ connect :: proc(endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> ^
 	return completion
 }
 
-On_Recv :: #type proc(user: rawptr, received: int, udp_client: Maybe(net.Endpoint), err: net.Network_Error)
+On_Recv_TCP :: #type proc(user: rawptr, received: int, err: net.TCP_Recv_Error)
+On_Recv_UDP :: #type proc(user: rawptr, received: int, udp_client: net.Endpoint, err: net.UDP_Recv_Error)
+On_Recv :: union {
+	On_Recv_TCP,
+	On_Recv_UDP,
+}
 
 /*
 Receives from the given socket, at most `len(buf)` bytes, and calls the given callback
@@ -175,7 +191,11 @@ Inputs:
 - socket: Either a `net.TCP_Socket` or a `net.UDP_Socket` (that was opened/returned by this package) to receive from
 - buf:    The buffer to put received bytes into
 */
-recv :: proc(socket: net.Any_Socket, buf: []byte, user: rawptr, callback: On_Recv) -> ^Completion {
+recv_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Recv_TCP) -> ^Completion {
+	return _recv(io(), socket, buf, user, callback)
+}
+
+recv_udp :: proc(socket: net.UDP_Socket, buf: []byte, user: rawptr, callback: On_Recv_UDP) -> ^Completion {
 	return _recv(io(), socket, buf, user, callback)
 }
 
@@ -189,11 +209,20 @@ Inputs:
 - socket: Either a `net.TCP_Socket` or a `net.UDP_Socket` (that was opened/returned by this package) to receive from
 - buf:    The buffer to put received bytes into
 */
-recv_all :: proc(socket: net.Any_Socket, buf: []byte, user: rawptr, callback: On_Recv) -> ^Completion {
+recv_all_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Recv_TCP) -> ^Completion {
 	return _recv(io(), socket, buf, user, callback, all = true)
 }
 
-On_Sent :: #type proc(user: rawptr, sent: int, err: net.Network_Error)
+recv_all_udp :: proc(socket: net.UDP_Socket, buf: []byte, user: rawptr, callback: On_Recv_UDP) -> ^Completion {
+	return _recv(io(), socket, buf, user, callback, all = true)
+}
+
+On_Sent_TCP :: #type proc(user: rawptr, sent: int, err: net.TCP_Send_Error)
+On_Sent_UDP :: #type proc(user: rawptr, sent: int, err: net.UDP_Send_Error)
+On_Sent :: union {
+	On_Sent_TCP,
+	On_Sent_UDP,
+}
 
 /*
 Sends at most `len(buf)` bytes from the given buffer over the socket connection, and calls the given callback
@@ -205,7 +234,7 @@ Inputs:
 - socket:   a `net.TCP_Socket` to send to
 - buf:      The buffer send
 */
-send_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Sent) -> ^Completion {
+send_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Sent_TCP) -> ^Completion {
 	return _send(io(), socket, buf, user, callback)
 }
 
@@ -225,7 +254,7 @@ send_udp :: proc(
 	socket: net.UDP_Socket,
 	buf: []byte,
 	user: rawptr,
-	callback: On_Sent,
+	callback: On_Sent_UDP,
 ) -> ^Completion {
 	return _send(io, socket, buf, user, callback, endpoint)
 }
@@ -237,7 +266,7 @@ This will keep sending until either an error or the full buffer is sent
 
 NOTE: polymorphic variants for type safe user data are available under `send_all_tcp_poly`, `send_all_tcp_poly2`, and `send_all_tcp_poly3`.
 */
-send_all_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Sent) -> ^Completion {
+send_all_tcp :: proc(socket: net.TCP_Socket, buf: []byte, user: rawptr, callback: On_Sent_TCP) -> ^Completion {
 	return _send(io(), socket, buf, user, callback, all = true)
 }
 
@@ -254,12 +283,12 @@ send_all_udp :: proc(
 	socket: net.UDP_Socket,
 	buf: []byte,
 	user: rawptr,
-	callback: On_Sent,
+	callback: On_Sent_UDP,
 ) -> ^Completion {
 	return _send(io, socket, buf, user, callback, endpoint, all = true)
 }
 
-On_Read :: #type proc(user: rawptr, read: int, err: os.Errno)
+On_Read :: #type proc(user: rawptr, read: int, err: FS_Error)
 
 /*
 Reads from the given handle, at the given offset, at most `len(buf)` bytes, and calls the given callback
@@ -272,7 +301,7 @@ Inputs:
 - offset:   The offset to begin the read from
 - buf:      The buffer to put read bytes into
 */
-read_at :: proc(fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
+read_at :: proc(fd: Handle, offset: int, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
 	return _read(io(), fd, offset, buf, user, callback)
 }
 
@@ -287,11 +316,11 @@ Inputs:
 - offset:   The offset to begin the read from
 - buf:      The buffer to put read bytes into
 */
-read_at_all :: proc(fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
+read_at_all :: proc(fd: Handle, offset: int, buf: []byte, user: rawptr, callback: On_Read) -> ^Completion {
 	return _read(io(), fd, offset, buf, user, callback, all = true)
 }
 
-On_Write :: #type proc(user: rawptr, written: int, err: os.Errno)
+On_Write :: #type proc(user: rawptr, written: int, err: FS_Error)
 
 /*
 Writes to the given handle, at the given offset, at most `len(buf)` bytes, and calls the given callback
@@ -304,7 +333,7 @@ Inputs:
 - offset:   The offset to begin the write from
 - buf:      The buffer to write to the file
 */
-write_at :: proc(fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
+write_at :: proc(fd: Handle, offset: int, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
 	return _write(io(), fd, offset, buf, user, callback)
 }
 
@@ -321,10 +350,11 @@ Inputs:
 - offset:   The offset to begin the write from
 - buf:      The buffer to write to the file
 */
-write_at_all :: proc(fd: os.Handle, offset: int, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
+write_at_all :: proc(fd: Handle, offset: int, buf: []byte, user: rawptr, callback: On_Write) -> ^Completion {
 	return _write(io(), fd, offset, buf, user, callback, true)
 }
 
+// TODO: should this have an error too?
 On_Poll :: #type proc(user: rawptr, event: Poll_Event)
 
 /*
@@ -338,7 +368,7 @@ Inputs:
 - event:    Whether to call the callback when `fd` is ready to be read from, or be written to
 - multi:    Keeps the poll after an event happens, calling the callback again for further events, remove poll with `remove`
 */
-poll :: proc(fd: os.Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
+poll :: proc(fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
 	return _poll(io(), fd, event, multi, user, callback)
 }
 
@@ -363,3 +393,4 @@ Operation :: union {
 	Op_Poll,
 	Op_Remove,
 }
+
