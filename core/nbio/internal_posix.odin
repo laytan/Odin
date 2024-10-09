@@ -1,15 +1,14 @@
+#+build darwin, openbsd, netbsd, freebsd
 #+private
 package nbio
 
-import "base:runtime"
+import    "base:runtime"
 
-import "core:container/queue"
-import "core:mem"
+import    "core:container/queue"
+import    "core:net"
+import    "core:sys/posix"
+import    "core:time"
 import kq "core:sys/kqueue"
-import "core:sys/posix"
-import "core:net"
-import "core:os"
-import "core:time"
 
 MAX_EVENTS :: 256
 
@@ -23,9 +22,10 @@ _IO :: struct #no_copy {
 	timeouts:        [dynamic]^Completion,
 	completed:       queue.Queue(^Completion),
 	io_pending:      [dynamic]^Completion,
-	allocator:       mem.Allocator,
 	now:             time.Time,
 }
+
+_Handle :: posix.FD
 
 _Completion :: struct {
 	operation: Operation,
@@ -41,13 +41,13 @@ Op_Accept :: struct {
 
 Op_Close :: struct {
 	callback: On_Close,
-	handle:   os.Handle,
+	handle:   Handle,
 }
 
 Op_Connect :: struct {
 	callback:  On_Connect,
 	socket:    net.TCP_Socket,
-	sockaddr:  os.SOCKADDR_STORAGE_LH,
+	sockaddr:  posix.sockaddr_storage,
 	initiated: bool,
 }
 
@@ -72,7 +72,7 @@ Op_Send :: struct {
 
 Op_Read :: struct {
 	callback: On_Read,
-	fd:       os.Handle,
+	fd:       Handle,
 	buf:      []byte,
 	offset:	  int,
 	all:   	  bool,
@@ -82,7 +82,7 @@ Op_Read :: struct {
 
 Op_Write :: struct {
 	callback: On_Write,
-	fd:       os.Handle,
+	fd:       Handle,
 	buf:      []byte,
 	offset:   int,
 	all:      bool,
@@ -101,7 +101,7 @@ Op_Next_Tick :: struct {
 
 Op_Poll :: struct {
 	callback: On_Poll,
-	fd:       os.Handle,
+	fd:       Handle,
 	event:    Poll_Event,
 	multi:    bool,
 }
@@ -110,7 +110,33 @@ Op_Remove :: struct {
 	target: ^Completion,
 }
 
-flush :: proc(io: ^IO) -> os.Errno {
+push_completed :: proc(io: ^IO, completed: ^Completion) {
+	ok, err := queue.push_back(&io.completed, completed)
+	if !ok || err != nil {
+		panic("nbio completed queue allocation failure")
+	}
+}
+
+push_timeout :: proc(io: ^IO, completion: ^Completion) {
+	when !ODIN_DISABLE_ASSERT {
+		_, is_timeout := completion.operation.(Op_Timeout)
+		assert(is_timeout)
+	}
+
+	_, err := append(&io.timeouts, completion)
+	if err != nil {
+		panic("nbio timeout queue allocation failure")
+	}
+}
+
+push_pending :: proc(io: ^IO, completion: ^Completion) {
+	_, err := append(&io.io_pending, completion)
+	if err != nil {
+		panic("nbio pending queue allocation failure")
+	}
+}
+
+flush :: proc(io: ^IO) -> General_Error {
 	defer assert(io.io_inflight >= 0)
 
 	events: [MAX_EVENTS]kq.KEvent
@@ -120,7 +146,7 @@ flush :: proc(io: ^IO) -> os.Errno {
 
 	if (change_events > 0 || queue.len(io.completed) == 0) {
 		if (change_events == 0 && queue.len(io.completed) == 0 && io.io_inflight == 0) {
-			return os.ERROR_NONE
+			return nil
 		}
 
 		max_timeout := time.Millisecond * 10
@@ -134,7 +160,7 @@ flush :: proc(io: ^IO) -> os.Errno {
 				assert(new_events == 0)
 				continue
 			} else if err != nil {
-				return os.Platform_Error(err)
+				return General_Error(err)
 			} else {
 				break
 			}
@@ -152,7 +178,7 @@ flush :: proc(io: ^IO) -> os.Errno {
 			for event in events[:new_events] {
 				completion := cast(^Completion)event.udata
 				completion.in_kernel = false
-				queue.push_back(&io.completed, completion)
+				push_completed(io, completion)
 			}
 		}
 	}
@@ -193,13 +219,23 @@ time_out_op :: proc(io: ^IO, completed: ^Completion) {
 	context = completed.ctx
 	switch &op in completed.operation {
 	case Op_Accept:      op.callback(completed.user_data, {}, {}, net.Accept_Error.Would_Block)
-	case Op_Close:       op.callback(completed.user_data, false)
+	case Op_Close:       op.callback(completed.user_data, .Timeout)
 	case Op_Connect:     op.callback(completed.user_data, {}, net.Dial_Error.Timeout)
-	case Op_Read:        op.callback(completed.user_data, 0, os.EWOULDBLOCK)
-	case Op_Recv:        op.callback(completed.user_data, 0, nil, net.UDP_Recv_Error.Timeout) // TODO: may be tcp
-	case Op_Send:        op.callback(completed.user_data, 0, net.UDP_Send_Error.Timeout)      // TODO: may be tcp
-	case Op_Write:       op.callback(completed.user_data, 0, os.EWOULDBLOCK)
-	case Op_Poll:        op.callback(completed.user_data, nil)
+	case Op_Read:        op.callback(completed.user_data, 0, .Timeout)
+	case Op_Recv:
+		switch cb in op.callback {
+		case On_Recv_TCP: cb(completed.user_data, 0, net.TCP_Recv_Error.Timeout)
+		case On_Recv_UDP: cb(completed.user_data, 0, {}, net.UDP_Recv_Error.Timeout)
+		case:             unreachable()
+		}
+	case Op_Send:
+		switch cb in op.callback {
+		case On_Sent_TCP: cb(completed.user_data, 0, net.TCP_Send_Error.Timeout)
+		case On_Sent_UDP: cb(completed.user_data, 0, net.UDP_Send_Error.Timeout)
+		case:             unreachable()
+		}
+	case Op_Write:       op.callback(completed.user_data, 0, .Timeout)
+	case Op_Poll:        op.callback(completed.user_data, nil) // TODO: add error to callback
 	case Op_Timeout, Op_Next_Tick, Op_Remove: panic("timed out untimeoutable")
 	case: unreachable()
 	}
@@ -241,10 +277,10 @@ flush_io :: proc(io: ^IO, events: []kq.KEvent) -> (changed_events: int, completi
 			event.ident = uintptr(op.fd)
 			event.filter = .Write
 		case Op_Recv:
-			event.ident = uintptr(os.Socket(net.any_socket_to_socket(op.socket)))
+			event.ident = uintptr(net.any_socket_to_socket(op.socket))
 			event.filter = .Read
 		case Op_Send:
-			event.ident = uintptr(os.Socket(net.any_socket_to_socket(op.socket)))
+			event.ident = uintptr(net.any_socket_to_socket(op.socket))
 			event.filter = .Write
 		case Op_Poll:
 			event.ident = uintptr(op.fd)
@@ -277,10 +313,10 @@ flush_io :: proc(io: ^IO, events: []kq.KEvent) -> (changed_events: int, completi
 				event.ident = uintptr(inner_op.fd)
 				event.filter = .Write
 			case Op_Recv:
-				event.ident = uintptr(os.Socket(net.any_socket_to_socket(inner_op.socket)))
+				event.ident = uintptr(net.any_socket_to_socket(inner_op.socket))
 				event.filter = .Read
 			case Op_Send:
-				event.ident = uintptr(os.Socket(net.any_socket_to_socket(inner_op.socket)))
+				event.ident = uintptr(net.any_socket_to_socket(inner_op.socket))
 				event.filter = .Write
 			case Op_Poll:
 				event.ident = uintptr(inner_op.fd)
@@ -342,7 +378,7 @@ flush_timeouts :: proc(io: ^IO) -> (min_timeout: Maybe(i64)) {
 do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	client, source, err := net.accept_tcp(op.sock)
 	if err == net.Accept_Error.Would_Block {
-		append(&io.io_pending, completion)
+		push_pending(io, completion)
 		return
 	}
 
@@ -352,7 +388,7 @@ do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 
 	if err != nil {
 		net.close(client)
-		op.callback(completion.user_data, {}, {}, err)
+		op.callback(completion.user_data, {}, {}, err.(net.Accept_Error))
 	} else {
 		op.callback(completion.user_data, client, source, nil)
 	}
@@ -361,31 +397,33 @@ do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 }
 
 do_close :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
-	ok := os.close(op.handle)
-
-	op.callback(completion.user_data, ok == nil)
-
+	res := posix.close(op.handle)
+	op.callback(completion.user_data, FS_Error(posix.errno()) if res != .OK else nil)
 	pool_put(&io.completion_pool, completion)
 }
 
 do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 	defer op.initiated = true
 
-	err: os.Errno
+	err: posix.Errno
 	if op.initiated {
 		// We have already called os.connect, retrieve error number only.
-		os.getsockopt(os.Socket(op.socket), os.SOL_SOCKET, os.SO_ERROR, &err, size_of(os.Errno))
+		size := posix.socklen_t(size_of(err))
+		posix.getsockopt(posix.FD(op.socket), posix.SOL_SOCKET, .ERROR, &err, &size)
 	} else {
-		err = os.connect(os.Socket(op.socket), (^os.SOCKADDR)(&op.sockaddr), i32(op.sockaddr.len))
-		if err == os.EINPROGRESS {
-			append(&io.io_pending, completion)
-			return
+		res := posix.connect(posix.FD(op.socket), (^posix.sockaddr)(&op.sockaddr), posix.socklen_t(op.sockaddr.ss_len))
+		if res != .OK {
+			err = posix.errno()
+			if err == .EINPROGRESS {
+				push_pending(io, completion)
+				return
+			}
 		}
 	}
 
-	if err != os.ERROR_NONE {
+	if err != nil {
 		net.close(op.socket)
-		op.callback(completion.user_data, {}, net.Dial_Error(err.(os.Platform_Error)))
+		op.callback(completion.user_data, {}, net.Dial_Error(err))
 	} else {
 		op.callback(completion.user_data, op.socket, nil)
 	}
@@ -394,19 +432,20 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 }
 
 do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
-	read, err := os.read_at(op.fd, op.buf, i64(op.offset))
-	op.read += read
-
-	if err != os.ERROR_NONE {
-		if err == os.EWOULDBLOCK {
-			append(&io.io_pending, completion)
+	read := posix.pread(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset))
+	if read < 0 {
+		err := posix.errno()
+		if err == .EWOULDBLOCK {
+			push_pending(io, completion)
 			return
 		}
 
-		op.callback(completion.user_data, op.read, err)
+		op.callback(completion.user_data, op.read, FS_Error(err))
 		pool_put(&io.completion_pool, completion)
 		return
 	}
+
+	op.read += read
 
 	if op.all && op.read < op.len {
 		op.buf = op.buf[read:]
@@ -416,51 +455,69 @@ do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 		return
 	}
 
-	op.callback(completion.user_data, op.read, os.ERROR_NONE)
+	op.callback(completion.user_data, op.read, nil)
 	pool_put(&io.completion_pool, completion)
 }
 
 do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
-	received: int
-	err: net.Network_Error
-	remote_endpoint: Maybe(net.Endpoint)
+	// received: int
+	// err: net.Network_Error
+	// remote_endpoint: Maybe(net.Endpoint)
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		received, err = net.recv_tcp(sock, op.buf)
+		received, err := net.recv_tcp(sock, op.buf)
+		if err != nil {
+			// NOTE: Timeout is the name for EWOULDBLOCK in net package.
+			if err == net.TCP_Recv_Error.Timeout {
+				push_pending(io, completion)
+				return
+			}
 
-		// NOTE: Timeout is the name for EWOULDBLOCK in net package.
-		if err == net.TCP_Recv_Error.Timeout {
-			append(&io.io_pending, completion)
+			maybe_cancel_timeout(completion)
+			op.callback.(On_Recv_TCP)(completion.user_data, op.received, err.(net.TCP_Recv_Error))
+			pool_put(&io.completion_pool, completion)
 			return
 		}
-	case net.UDP_Socket:
-		received, remote_endpoint, err = net.recv_udp(sock, op.buf)
 
-		// NOTE: Timeout is the name for EWOULDBLOCK in net package.
-		if err == net.UDP_Recv_Error.Timeout {
-			append(&io.io_pending, completion)
+		op.received += received
+
+		if op.all && op.received < op.len {
+			op.buf = op.buf[received:]
+			do_recv(io, completion, op)
 			return
 		}
-	}
 
-	op.received += received
-
-	if err != nil {
 		maybe_cancel_timeout(completion)
-		op.callback(completion.user_data, op.received, remote_endpoint, err)
+		op.callback.(On_Recv_TCP)(completion.user_data, op.received, nil)
 		pool_put(&io.completion_pool, completion)
-		return
-	}
 
-	if op.all && op.received < op.len {
-		op.buf = op.buf[received:]
-		do_recv(io, completion, op)
-		return
-	}
+	case net.UDP_Socket:
+		received, remote_endpoint, err := net.recv_udp(sock, op.buf)
+		if err != nil {
+			// NOTE: Timeout is the name for EWOULDBLOCK in net package.
+			if err == net.UDP_Recv_Error.Timeout {
+				push_pending(io, completion)
+				return
+			}
 
-	maybe_cancel_timeout(completion)
-	op.callback(completion.user_data, op.received, remote_endpoint, err)
-	pool_put(&io.completion_pool, completion)
+			maybe_cancel_timeout(completion)
+			op.callback.(On_Recv_UDP)(completion.user_data, op.received, remote_endpoint, err.(net.UDP_Recv_Error))
+			pool_put(&io.completion_pool, completion)
+			return
+		}
+
+		op.received += received
+
+		if op.all && op.received < op.len {
+			op.buf = op.buf[received:]
+			do_recv(io, completion, op)
+			return
+		}
+
+		maybe_cancel_timeout(completion)
+		op.callback.(On_Recv_UDP)(completion.user_data, op.received, remote_endpoint, nil)
+		pool_put(&io.completion_pool, completion)
+	}
 }
 
 maybe_cancel_timeout :: #force_inline proc(completion: ^Completion) {
@@ -471,66 +528,81 @@ maybe_cancel_timeout :: #force_inline proc(completion: ^Completion) {
 }
 
 do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
-	sent:  u32
-	errno: os.Errno
-	err:   net.Network_Error
-
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		sent, errno = os.send(os.Socket(sock), op.buf, os.MSG_NOSIGNAL)
-		if errno == os.EPIPE {
-			err = net.TCP_Send_Error.Connection_Closed
-		} else if errno != nil {
-			err = net.TCP_Send_Error(errno.(os.Platform_Error))
+		sent := posix.send(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL})
+		if sent < 0 {
+			errno := posix.errno()
+			err   := net.TCP_Send_Error(errno)
+			if errno == .EPIPE {
+				err = net.TCP_Send_Error.Connection_Closed
+			} else if errno == .EWOULDBLOCK {
+				push_pending(io, completion)
+				return
+			}
+
+			op.callback.(On_Sent_TCP)(completion.user_data, op.sent, err)
+			pool_put(&io.completion_pool, completion)
+			return
 		}
+
+		op.sent += sent
+
+		if op.all && op.sent < op.len {
+			op.buf = op.buf[sent:]
+			do_send(io, completion, op)
+			return
+		}
+
+		op.callback.(On_Sent_TCP)(completion.user_data, op.sent, nil)
+		pool_put(&io.completion_pool, completion)
 
 	case net.UDP_Socket:
 		toaddr := _endpoint_to_sockaddr(op.endpoint.(net.Endpoint))
-		sent, errno = os.sendto(os.Socket(sock), op.buf, os.MSG_NOSIGNAL, cast(^os.SOCKADDR)&toaddr, i32(toaddr.len))
-		if errno == os.EPIPE {
-			err = net.UDP_Send_Error.Not_Socket
-		} else if errno != nil {
-			err = net.UDP_Send_Error(errno.(os.Platform_Error))
-		}
-	}
+		sent := posix.sendto(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
+		if sent < 0 {
+			errno := posix.errno()
+			err   := net.UDP_Send_Error(errno)
+			if errno == .EPIPE {
+				err = net.UDP_Send_Error.Not_Socket
+			} else if errno == .EWOULDBLOCK {
+				push_pending(io, completion)
+				return
+			}
 
-	op.sent += int(sent)
-
-	if errno != os.ERROR_NONE {
-		if errno == os.EWOULDBLOCK {
-			append(&io.io_pending, completion)
+			op.callback.(On_Sent_UDP)(completion.user_data, op.sent, err)
+			pool_put(&io.completion_pool, completion)
 			return
 		}
 
-		op.callback(completion.user_data, op.sent, err)
+		op.sent += sent
+
+		if op.all && op.sent < op.len {
+			op.buf = op.buf[sent:]
+			do_send(io, completion, op)
+			return
+		}
+
+		op.callback.(On_Sent_UDP)(completion.user_data, op.sent, nil)
 		pool_put(&io.completion_pool, completion)
-		return
 	}
-
-	if op.all && op.sent < op.len {
-		op.buf = op.buf[sent:]
-		do_send(io, completion, op)
-		return
-	}
-
-	op.callback(completion.user_data, op.sent, nil)
-	pool_put(&io.completion_pool, completion)
 }
 
 do_write :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
-	written, err := os.write_at(op.fd, op.buf, i64(op.offset))
-	op.written += written
-
-	if err != os.ERROR_NONE {
-		if err == os.EWOULDBLOCK {
-			append(&io.io_pending, completion)
+	written := posix.pwrite(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset))
+	if written < 0 {
+		err := posix.errno()
+		if err == .EWOULDBLOCK {
+			push_pending(io, completion)
 			return
 		}
 
-		op.callback(completion.user_data, op.written, err)
+		op.callback(completion.user_data, op.written, FS_Error(err))
 		pool_put(&io.completion_pool, completion)
 		return
 	}
+
+	op.written += written
 
 	// The write did not write the whole buffer, need to write more.
 	if op.all && op.written < op.len {
@@ -541,7 +613,7 @@ do_write :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
 		return
 	}
 
-	op.callback(completion.user_data, op.written, os.ERROR_NONE)
+	op.callback(completion.user_data, op.written, nil)
 	pool_put(&io.completion_pool, completion)
 }
 
@@ -589,22 +661,22 @@ do_next_tick :: proc(io: ^IO, completion: ^Completion, op: ^Op_Next_Tick) {
 }
 
 // Private proc in net package, verbatim copy.
-_endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: os.SOCKADDR_STORAGE_LH) {
+_endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: posix.sockaddr_storage) {
 	switch a in ep.address {
 	case net.IP4_Address:
-		(^os.sockaddr_in)(&sockaddr)^ = os.sockaddr_in {
+		(^posix.sockaddr_in)(&sockaddr)^ = posix.sockaddr_in {
 			sin_port   = u16be(ep.port),
-			sin_addr   = transmute(os.in_addr)a,
-			sin_family = u8(os.AF_INET),
-			sin_len    = size_of(os.sockaddr_in),
+			sin_addr   = transmute(posix.in_addr)a,
+			sin_family = .INET,
+			sin_len    = size_of(posix.sockaddr_in),
 		}
 		return
 	case net.IP6_Address:
-		(^os.sockaddr_in6)(&sockaddr)^ = os.sockaddr_in6 {
+		(^posix.sockaddr_in6)(&sockaddr)^ = posix.sockaddr_in6 {
 			sin6_port   = u16be(ep.port),
-			sin6_addr   = transmute(os.in6_addr)a,
-			sin6_family = u8(os.AF_INET6),
-			sin6_len    = size_of(os.sockaddr_in6),
+			sin6_addr   = transmute(posix.in6_addr)a,
+			sin6_family = .INET6,
+			sin6_len    = size_of(posix.sockaddr_in6),
 		}
 		return
 	}
