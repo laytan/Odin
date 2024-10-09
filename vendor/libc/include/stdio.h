@@ -12,6 +12,8 @@ typedef struct {} FILE;
 #define stdout ((FILE *)2)
 #define stderr ((FILE *)3)
 
+#define EOF -1
+
 FILE *fopen(const char *, char *);
 int fclose(FILE *);
 int fseek(FILE *, long, int);
@@ -45,3 +47,6 @@ static inline int printf(const char *fmt, ...) {
 	va_end(args);
 	return result;
 }
+
+int putchar(int ch);
+int getchar();

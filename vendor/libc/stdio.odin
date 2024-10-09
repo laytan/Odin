@@ -8,6 +8,8 @@ import stb "vendor:stb/sprintf"
 
 FILE :: uintptr
 
+EOF  :: -1
+
 @(require, linkage="strong", link_name="fopen")
 fopen :: proc "c" (path: cstring, mode: cstring) -> FILE {
 	context = g_ctx
@@ -103,4 +105,29 @@ vfprintf :: proc "c" (file: FILE, fmt: cstring, args: ^c.va_list) -> i32 {
 	}
 
 	return i32(len(buf))
+}
+
+@(require, linkage="strong", link_name="putchar")
+putchar :: proc "c" (char: c.int) -> c.int {
+	context = g_ctx
+
+	n, err := os.write_byte(os.stdout, byte(char))	
+	if n == 0 || err != nil {
+		return EOF
+	}
+	return char
+}
+
+@(require, linkage="strong", link_name="getchar")
+getchar :: proc "c" () -> c.int {
+	when #defined(os.stdin) {
+		ret: [1]byte
+		n, err := os.read(os.stdin, ret[:])
+		if n == 0 || err != nil {
+			return EOF
+		}
+		return c.int(ret[0])
+	} else {
+		return EOF
+	}
 }

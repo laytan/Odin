@@ -98,3 +98,54 @@ log :: proc "c" (x: f32) -> f32 {
 sin :: proc "c" (x: f32) -> f32 {
 	return math.sin(x)
 }
+
+@(require, linkage="strong", link_name="trunc")
+trunc :: proc "c" (x: f64) -> f64 {
+	return math.trunc(x)
+}
+
+@(require, linkage="strong", link_name="isfinite")
+isfinite :: proc "c" (x: f32) -> bool {
+	switch math.classify(x) {
+	case .Normal, .Subnormal, .Zero, .Neg_Zero: return true
+	case .Inf, .Neg_Inf, .NaN:                  return false
+	case:                                       unreachable()
+	}
+}
+
+@(require, linkage="strong", link_name="log2")
+log2 :: proc "c" (x: f64) -> f64 {
+	return math.log2(x)
+}
+
+@(require, linkage="strong", link_name="log10")
+log10 :: proc "c" (x: f64) -> f64 {
+	return math.log10(x)
+}
+
+@(require, linkage="strong", link_name="asin")
+asin :: proc "c" (x: f64) -> f64 {
+	return math.asin(x)
+}
+
+@(require, linkage="strong", link_name="atan")
+atan :: proc "c" (x: f64) -> f64 {
+	return math.atan(x)
+}
+
+@(require, linkage="strong", link_name="tan")
+tan :: proc "c" (x: f64) -> f64 {
+	return math.tan(x)
+}
+
+@(require, linkage="strong", link_name="atan2")
+atan2 :: proc "c" (y: f64, x: f64) -> f64 {
+	return math.atan2(y, x)
+}
+
+@(require, linkage="strong", link_name="modf")
+modf :: proc "c" (num: f64, iptr: ^f64) -> f64 {
+	integral, fractional := math.modf(num)
+	iptr^ = integral
+	return fractional
+}

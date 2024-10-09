@@ -1,8 +1,10 @@
 package odin_libc
 
+import "base:intrinsics"
 import "base:runtime"
 
 import "core:c"
+import "core:os"
 import "core:slice"
 import "core:sort"
 import "core:strconv"
@@ -114,6 +116,47 @@ strtol :: proc "c" (str: cstring, str_end: ^cstring, base: i32) -> c.long {
 
 	n: int
 	i, _ := strconv.parse_i64_of_base(sstr, int(base), &n)
-	str_end ^= cstring(raw_data(sstr)[n:])
+	if str_end != nil {
+		str_end ^= cstring(raw_data(sstr)[n:])
+	}
 	return c.long(clamp(i, i64(min(c.long)), i64(max(c.long))))
+}
+
+@(require, linkage="strong", link_name="strtod")
+strtod :: proc "c" (str: cstring, str_end: ^cstring) -> c.double {
+	context = g_ctx
+
+	sstr := string(str)
+	sstr  = strings.trim_left_space(sstr)
+
+	n: int
+	val, _ := strconv.parse_f64(sstr, &n)
+	if str_end != nil {
+		str_end ^= cstring(raw_data(sstr)[n:])
+	}
+
+	return c.double(val)
+}
+
+@(require, linkage="strong", link_name="abort")
+abort :: proc "c" () -> ! {
+	intrinsics.trap()
+}
+
+@(require, linkage="strong", link_name="exit")
+exit :: proc "c" (exit_code: c.int) -> ! {
+	os.exit(int(exit_code))
+}
+
+ldiv_t :: struct {
+	quot: c.long,
+	rem:  c.long,
+}
+
+@(require, linkage="strong", link_name="ldiv")
+ldiv :: proc "c" (number: c.long, denom: c.long) -> ldiv_t {
+	return {
+		quot = number  / denom,
+		rem  = number %% denom,
+	}
 }
