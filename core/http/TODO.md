@@ -66,11 +66,14 @@
     - [ ] Windows
 - [ ] check if some of the calls need to take a flags bitset.
 - [ ] don't use os.Errno or os package at all
-- [ ] consider making the `IO` a thread local global
+	- [x] Darwin
+	- [ ] Linux
+	- [ ] Windows
+- [x] consider making the `IO` a thread local global
 - [ ] calm down the cpu use
 	- [x] Linux
 	- [x] Darwin
-	- [ ] Windows
+	- [?] Windows
 - [ ] A way to tick without blocking
 
 # Non critical wants

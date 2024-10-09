@@ -1,27 +1,38 @@
+#+build darwin, netbsd, openbsd, freebsd
+#+private
 package nbio
 
-import "core:container/queue"
-import "core:sys/posix"
-import kq "core:sys/kqueue"
-import "core:net"
-import "core:os"
-import "core:time"
+import    "base:runtime"
 
-_init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
+import    "core:container/queue"
+import    "core:net"
+import    "core:sys/posix"
+import    "core:time"
+import kq "core:sys/kqueue"
+
+_init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	qerr: posix.Errno
 	io.kq, qerr = kq.kqueue()
 	if qerr != .NONE {
-		return os.Platform_Error(qerr)
+		return General_Error(qerr)
+	}
+	defer if err != nil { posix.close(io.kq) }
+
+	perr: runtime.Allocator_Error
+	if perr = pool_init(&io.completion_pool, allocator = allocator); perr != nil {
+		err = .Allocation_Failed
+		return
+	}
+	defer if err != nil { pool_destroy(&io.completion_pool) }
+
+	io.timeouts.allocator   = allocator
+	io.io_pending.allocator = allocator
+
+	if perr = queue.init(&io.completed, allocator = allocator); perr != nil {
+		err = .Allocation_Failed
+		return
 	}
 
-	pool_init(&io.completion_pool, allocator = allocator)
-
-	io.timeouts = make([dynamic]^Completion, allocator)
-	io.io_pending = make([dynamic]^Completion, allocator)
-
-	queue.init(&io.completed, allocator = allocator)
-
-	io.allocator = allocator
 	return
 }
 
@@ -30,8 +41,6 @@ _num_waiting :: proc(io: ^IO) -> int {
 }
 
 _destroy :: proc(io: ^IO) {
-	context.allocator = io.allocator
-
 	delete(io.timeouts)
 	delete(io.io_pending)
 
@@ -46,14 +55,71 @@ _now :: proc(io: ^IO) -> time.Time {
 	return io.now
 }
 
-_tick :: proc(io: ^IO) -> os.Errno {
+_tick :: proc(io: ^IO) -> General_Error {
 	return flush(io)
 }
 
-_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Network_Error {
-	if errno := os.listen(os.Socket(socket), backlog); errno != nil {
-		return net.Listen_Error(errno.(os.Platform_Error))
+_open :: proc(_: ^IO, path: string, flags: File_Flags, perm: int) -> (handle: Handle, errno: FS_Error) {
+	if path == "" {
+		errno = .Invalid_Argument
+		return
 	}
+
+	assert(len(path) <= posix.PATH_MAX)
+	buf: [posix.PATH_MAX+1]byte = ---
+	n := copy(buf[:], path)
+	buf[n+1] = 0
+
+	sys_flags := posix.O_Flags{.NOCTTY, .CLOEXEC, .NONBLOCK}
+
+	if .Write in flags {
+		if .Read in flags {
+			sys_flags += {.RDWR}
+		} else {
+			sys_flags += {.WRONLY}
+		}
+	}
+
+	if .Append      in flags { sys_flags += {.APPEND} }
+	if .Create      in flags { sys_flags += {.CREAT} }
+	if .Excl        in flags { sys_flags += {.EXCL} }
+	if .Sync        in flags { sys_flags += {.DSYNC} }
+	if .Trunc       in flags { sys_flags += {.TRUNC} }
+	if .Inheritable in flags { sys_flags -= {.CLOEXEC} }
+
+	handle = posix.open(cstring(raw_data(buf[:])), sys_flags, transmute(posix.mode_t)posix._mode_t(perm))
+	if handle < 0 {
+		errno = FS_Error(posix.errno())
+	}
+
+	return
+}
+
+// // TODO: public `prepare_handle` and `prepare_socket` to take in a handle/socket from some other source?
+// // (If that is possible on Windows).
+// _prepare_handle :: proc(fd: Handle) -> FS_Error {
+// 	res := posix.fcntl(fd, .GETFL, uintptr(0))
+// 	if res < 0 {
+// 		return FS_Error(posix.errno())
+// 	}
+//
+// 	flags := transmute()
+// }
+
+_file_size :: proc(_: ^IO, fd: Handle) -> (i64, FS_Error) {
+	stat: posix.stat_t
+	if posix.fstat(fd, &stat) != .OK {
+		return 0, FS_Error(posix.errno())
+	}
+
+	return i64(stat.st_size), nil
+}
+
+_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {
+	if res := posix.listen(posix.FD(socket), i32(backlog)); res != .OK {
+		return net.Listen_Error(posix.errno())
+	}
+
 	return nil
 }
 
@@ -71,12 +137,11 @@ _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Acce
 	return completion
 }
 
-// Wraps os.close using the kqueue.
 _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
-	completion.ctx           = context
-	completion.user_data     = user
+	completion.ctx       = context
+	completion.user_data = user
 
 	completion.operation = Op_Close{
 		callback = callback,
@@ -84,17 +149,16 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 	op := &completion.operation.(Op_Close)
 
 	switch h in fd {
-	case net.TCP_Socket: op.handle = os.Handle(h)
-	case net.UDP_Socket: op.handle = os.Handle(h)
-	case net.Socket:     op.handle = os.Handle(h)
-	case os.Handle:      op.handle = h
+	case net.TCP_Socket: op.handle = Handle(h)
+	case net.UDP_Socket: op.handle = Handle(h)
+	case net.Socket:     op.handle = Handle(h)
+	case Handle:         op.handle = h
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
-// TODO: maybe call this dial?
 _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> (^Completion, net.Network_Error) {
 	if endpoint.port == 0 {
 		return nil, net.Dial_Error.Port_Required
@@ -120,13 +184,13 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 		sockaddr = _endpoint_to_sockaddr(endpoint),
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion, nil
 }
 
 _read :: proc(
 	io: ^IO,
-	fd: os.Handle,
+	fd: Handle,
 	offset: int,
 	buf: []byte,
 	user: rawptr,
@@ -145,7 +209,7 @@ _read :: proc(
 		len      = len(buf),
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
@@ -161,7 +225,7 @@ _recv :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, user: rawptr, callba
 		len      = len(buf),
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
@@ -175,7 +239,7 @@ _send :: proc(
 	all := false,
 ) -> ^Completion {
 	if _, ok := socket.(net.UDP_Socket); ok {
-		assert(endpoint != nil)
+		assert(endpoint != nil, "send on UDP socket requires endpoint to send to")
 	}
 
 	completion := pool_get(&io.completion_pool)
@@ -190,13 +254,13 @@ _send :: proc(
 		len      = len(buf),
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
 _write :: proc(
 	io: ^IO,
-	fd: os.Handle,
+	fd: Handle,
 	offset: int,
 	buf: []byte,
 	user: rawptr,
@@ -215,7 +279,7 @@ _write :: proc(
 		len      = len(buf),
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
@@ -229,7 +293,7 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 		expires  = time.time_add(io.now, dur),
 	}
 
-	append(&io.timeouts, completion)
+	push_timeout(io, completion)
 	return completion
 }
 
@@ -250,7 +314,8 @@ _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) ->
 		expires = time.time_add(io.now, dur),
 	}
 	target.timeout = completion
-	append(&io.timeouts, completion)
+
+	push_timeout(io, completion)
 	return completion
 }
 
@@ -282,7 +347,7 @@ _remove :: proc(io: ^IO, target: ^Completion) {
 		target = target,
 	}
 
-	append(&io.io_pending, completion)
+	push_pending(io, completion)
 }
 
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
@@ -293,11 +358,11 @@ _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion
 		callback = callback,
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
-_poll :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
+_poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
 	completion.ctx = context
@@ -309,6 +374,6 @@ _poll :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, user: rawp
 		multi    = multi,
 	}
 
-	append(&io.io_pending, completion)
+	push_pending(io, completion)
 	return completion
 }
