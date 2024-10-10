@@ -22,13 +22,9 @@ foreign CoreFoundation {
 Release :: proc {
 	ReleaseObject,
 	ReleaseString,
+	ReleaseDictionary,
 }
 
 ReleaseObject :: #force_inline proc(cf: TypeRef) {
 	CFRelease(cf)
-}
-
-// Releases a Core Foundation string.
-ReleaseString :: #force_inline proc(theString: String) {
-	CFRelease(TypeRef(theString))
 }

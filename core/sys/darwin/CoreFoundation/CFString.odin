@@ -180,6 +180,10 @@ foreign CoreFoundation {
 STR :: StringMakeConstantString
 
 StringCopyToOdinString :: proc(theString: String, allocator := context.allocator) -> (str: string, ok: bool) #optional_ok {
+	if theString == nil {
+		return
+	}
+
 	length := StringGetLength(theString)
 	max := StringGetMaximumSizeForEncoding(length, StringEncoding(StringBuiltInEncodings.UTF8))
 
@@ -191,4 +195,9 @@ StringCopyToOdinString :: proc(theString: String, allocator := context.allocator
 	n: Index
 	StringGetBytes(theString, {0, length}, StringEncoding(StringBuiltInEncodings.UTF8), 0, false, raw_data(buf), Index(len(buf)), &n)
 	return string(buf[:n]), true
+}
+
+// Releases a Core Foundation string.
+ReleaseString :: #force_inline proc(theString: String) {
+	CFRelease(TypeRef(theString))
 }
