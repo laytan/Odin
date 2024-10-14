@@ -143,6 +143,8 @@ flush :: proc(io: ^IO) -> General_Error {
 
 	min_timeout := flush_timeouts(io)
 	change_events, completions_flushed := flush_io(io, events[:])
+	// PERF: this is ordered and O(N), can this be made unordered?
+	remove_range(&io.io_pending, 0, completions_flushed)
 
 	if (change_events > 0 || queue.len(io.completed) == 0) {
 		if (change_events == 0 && queue.len(io.completed) == 0 && io.io_inflight == 0) {
@@ -165,9 +167,6 @@ flush :: proc(io: ^IO) -> General_Error {
 				break
 			}
 		}
-
-		// PERF: this is ordered and O(N), can this be made unordered?
-		remove_range(&io.io_pending, 0, completions_flushed)
 
 		// TODO: does removal return a response, because this would be wrong otherwise?
 		io.io_inflight += change_events
