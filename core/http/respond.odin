@@ -47,10 +47,9 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 	assert_has_td(loc)
 	assert(!r.sent, "response has already been sent", loc)
 
-	io := &td.io
-	handle, errno := nbio.open(io, path)
-	if errno != os.ERROR_NONE {
-		if errno == ENOENT {
+	handle, errno := nbio.open(path)
+	if errno != nil {
+		if errno == .Not_Exist {
 			log.debugf("respond_file, open %q, no such file or directory", path)
 		} else {
 			log.warnf("respond_file, open %q error: %i", path, errno)
@@ -60,11 +59,11 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 		return
 	}
 
-	size, err := nbio.file_size(io, handle)
-	if err != os.ERROR_NONE || int(size) < 0 {
+	size, err := nbio.file_size(handle)
+	if err != nil || int(size) < 0 {
 		log.errorf("Could not seek the file size of file at %q, error number: %i", path, err)
 		respond(r, Status.Internal_Server_Error)
-		nbio.close(io, handle)
+		nbio.close(handle)
 		return
 	}
 
@@ -77,27 +76,27 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 	bytes.buffer_grow(&r._buf, int(size))
 	buf := dynamic_unwritten(r._buf.buf)[:size]
 
-	on_read :: proc(user: rawptr, read: int, err: os.Errno) {
+	on_read :: proc(user: rawptr, read: int, err: nbio.FS_Error) {
 		r      := cast(^Response)user
-		handle := os.Handle(uintptr(context.user_ptr))
+		handle := nbio.Handle(uintptr(context.user_ptr))
 
 		dynamic_add_len(&r._buf.buf, read)
 
-		if err != os.ERROR_NONE {
+		if err != nil {
 			log.errorf("Reading file from respond_file failed, error number: %i", err)
 			respond(r, Status.Internal_Server_Error)
-			nbio.close(&td.io, handle)
+			nbio.close(handle)
 			return
 		}
 
 		respond(r, Status.OK)
-		nbio.close(&td.io, handle)
+		nbio.close(handle)
 	}
 
 	// Using the context.user_ptr to point to the file handle.
 	context.user_ptr = rawptr(uintptr(handle))
 
-	nbio.read_at_all(io, handle, 0, buf, r, on_read)
+	nbio.read_at_all(handle, 0, buf, r, on_read)
 }
 
 /*

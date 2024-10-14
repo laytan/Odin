@@ -92,9 +92,9 @@ remove :: proc(target: ^Completion) {
 }
 
 // TODO: document.
-with_timeout :: proc(io: ^IO, dur: time.Duration, target: ^Completion, loc := #caller_location) -> ^Completion {
+with_timeout :: proc(dur: time.Duration, target: ^Completion, loc := #caller_location) -> ^Completion {
 	if target == nil || dur == 0 { return nil }
-	return _timeout_completion(io, dur, target)
+	return _timeout_completion(io(), dur, target)
 }
 
 Handle :: _Handle

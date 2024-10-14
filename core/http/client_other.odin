@@ -16,13 +16,12 @@ import cio  "core:io"
 import      "core:http/dns"
 import      "core:nbio"
 
-_client_init :: proc(c: ^Client, io: ^nbio.IO, allocator := context.allocator) -> bool {
+_client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	c.allocator = allocator
-	c.io = io
 	c.conns.allocator = allocator
 
 	// NOTE: this is "blocking"
-	ns_err, hosts_err, ok := dns.init_sync(&c.dnsc, c.io, allocator)
+	ns_err, hosts_err, ok := dns.init_sync(&c.dnsc, allocator)
 	if ns_err != nil {
 		log.errorf("DNS client init: name servers error: %v", ns_err)
 	}
@@ -63,7 +62,7 @@ _client_destroy :: proc(c: ^Client) {
 			case .Connected:
 				log.debug("closing connection")
 				conn.state = .Closing
-				nbio.close(c.io, conn.socket, c, conn, proc(c: ^Client, conn: ^Client_Connection, ok: bool) {
+				nbio.close_poly2(conn.socket, c, conn, proc(c: ^Client, conn: ^Client_Connection, ok: nbio.FS_Error) {
 					if conn.ssl != nil {
 						client_ssl.connection_destroy(c.ssl, conn.ssl)
 					}
@@ -80,7 +79,7 @@ _client_destroy :: proc(c: ^Client) {
 	}
 
 	if len(c.conns) > 0 {
-		nbio.next_tick(c.io, c, _client_destroy)
+		nbio.next_tick_poly(c, _client_destroy)
 		return
 	}
 
@@ -114,7 +113,6 @@ _response_destroy :: proc(c: ^Client, res: Client_Response) {
 
 _Client :: struct {
     allocator: mem.Allocator,
-    io:        ^nbio.IO,
 	// TODO: ideally the dns client is able to be set by the user.
 	// So you can run multiple clients on the same DNS client?
 	dnsc:      dns.Client,
@@ -168,9 +166,9 @@ client_connection_destroy :: proc(c: ^Client, conn: ^Client_Connection) {
 		client_ssl.connection_destroy(c.ssl, conn.ssl)
 	}
 
-	nbio.close(c.io, conn.socket, c, conn, proc(c: ^Client, conn: ^Client_Connection, ok: bool) {
-		if !ok {
-			log.warn("failed closing connection")
+	nbio.close_poly2(conn.socket, c, conn, proc(c: ^Client, conn: ^Client_Connection, err: nbio.FS_Error) {
+		if err != nil {
+			log.warnf("failed closing connection: %v", err)
 		}
 
 		conn.state = .Closed
@@ -311,7 +309,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 		log.debug("connecting to endpoint")
 
-		nbio.connect(r.c.io, r.ep, r, on_tcp_connect)
+		nbio.connect_poly(r.ep, r, on_tcp_connect)
 
 		on_tcp_connect :: proc(r: ^In_Flight, socket: net.TCP_Socket, err: net.Network_Error) {
 			if err != nil {
@@ -348,10 +346,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 						on_connected(r, nil)
 					case .Want_Read:
 						log.debug("SSL connect want read")
-						nbio.poll(r.c.io, os.Handle(r.conn.socket), .Read,  false, r, ssl_connect)
+						nbio.poll_poly(nbio.Handle(r.conn.socket), .Read,  false, r, ssl_connect)
 					case .Want_Write:
 						log.debug("SSL connect want write")
-						nbio.poll(r.c.io, os.Handle(r.conn.socket), .Write, false, r, ssl_connect)
+						nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_connect)
 					case .Shutdown:
 						log.error("SSL connect error: Shutdown")
 						on_connected(r, net.Dial_Error.Refused)
@@ -456,12 +454,12 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 		log.debugf("Sending HTTP request:\n%v%v", string(r.conn.buf.buf[:]), string(r.body))
 
-		nbio.send_all(r.c.io, r.conn.socket, r.conn.buf.buf[:], r, on_sent_req)
+		nbio.send_all_tcp_poly(r.conn.socket, r.conn.buf.buf[:], r, on_sent_req)
 		if len(r.body) > 0 {
-			nbio.send_all(r.c.io, r.conn.socket, r.body, r, on_sent_body)
+			nbio.send_all_tcp_poly(r.conn.socket, r.body, r, on_sent_body)
 		}
 
-		on_sent_req :: proc(r: ^In_Flight, sent: int, err: net.Network_Error) {
+		on_sent_req :: proc(r: ^In_Flight, sent: int, err: net.TCP_Send_Error) {
 			assert(r.conn.state == .Requesting)
 			r.conn.state = .Sent_Headers if err == nil else .Failed
 
@@ -470,7 +468,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			}
 		}
 
-		on_sent_body :: proc(r: ^In_Flight, sent: int, err: net.Network_Error) {
+		on_sent_body :: proc(r: ^In_Flight, sent: int, err: net.TCP_Send_Error) {
 			#partial switch r.conn.state {
 			case .Failed:       on_sent_request(r, net.TCP_Send_Error.Aborted)
 			case .Sent_Headers: on_sent_request(r, err)
@@ -492,10 +490,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				ssl_write_body(r, nil)
 			case .Want_Read:
 				log.debug("SSL write want read")
-				nbio.poll(r.c.io, os.Handle(r.conn.socket), .Read, false, r, ssl_write_req)
+				nbio.poll_poly(nbio.Handle(r.conn.socket), .Read, false, r, ssl_write_req)
 			case .Want_Write:
 				log.debug("SSL write want write")
-				nbio.poll(r.c.io, os.Handle(r.conn.socket), .Write, false, r, ssl_write_req)
+				nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_write_req)
 			case .Shutdown:
 				log.error("write failed, connection is closed")
 				on_sent_request(r, net.TCP_Send_Error.Connection_Closed)
@@ -524,10 +522,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				on_sent_request(r, nil)
 			case .Want_Read:
 				log.debug("SSL write want read")
-				nbio.poll(r.c.io, os.Handle(r.conn.socket), .Read, false, r, ssl_write_body)
+				nbio.poll_poly(nbio.Handle(r.conn.socket), .Read, false, r, ssl_write_body)
 			case .Want_Write:
 				log.debug("SSL write want write")
-				nbio.poll(r.c.io, os.Handle(r.conn.socket), .Write, false, r, ssl_write_body)
+				nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_write_body)
 			case .Shutdown:
 				log.error("write failed, connection is closed")
 				on_sent_request(r, net.TCP_Send_Error.Connection_Closed)
@@ -562,9 +560,9 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			switch r.ep.scheme {
 			case .HTTP:
 				log.debug("executing non-SSL read")
-				nbio.recv(
-					r.c.io, r.conn.socket, buf, s, callback,
-					proc(s: ^Scanner, callback: On_Scanner_Read, n: int, _: Maybe(net.Endpoint), err: net.Network_Error) {
+				nbio.recv_tcp_poly2(
+					r.conn.socket, buf, s, callback,
+					proc(s: ^Scanner, callback: On_Scanner_Read, n: int, err: net.TCP_Recv_Error) {
 						callback(s, n, err)
 					},
 				)
@@ -579,10 +577,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 						callback(&r.conn.scanner, n, nil)
 					case .Want_Read:
 						log.debug("SSL read want read")
-						nbio.poll(r.c.io, os.Handle(r.conn.socket), .Read, false, r, buf, callback, ssl_recv)
+						nbio.poll_poly3(nbio.Handle(r.conn.socket), .Read, false, r, buf, callback, ssl_recv)
 					case .Want_Write:
 						log.debug("SSL read want write")
-						nbio.poll(r.c.io, os.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
+						nbio.poll_poly3(nbio.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
 					case .Shutdown:
 						log.error("read failed, connection is closed")
 						callback(&r.conn.scanner, 0, net.TCP_Recv_Error.Connection_Closed)
@@ -609,7 +607,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 					// TODO: clean up all things that will be allocated anew.
 					// TODO: don't do this infinitely, after x (maybe just 1) retry give this error back to the user.
 
-					nbio.close(r.c.io, r.conn.socket)
+					nbio.close(r.conn.socket)
 					// TODO: maybe set this to .Closed and in `connect` do cleanup.
 					r.conn.state = .Pending
 					connect(r)
