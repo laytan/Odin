@@ -103,7 +103,7 @@ _response_destroy :: proc(c: ^Client, res: Client_Response) {
 	headers_destroy(res.headers)
 
 	for cookie in res.cookies {
-		delete(cookie.value)
+		delete(cookie.name)
 	}
 	delete(res.cookies)
 
