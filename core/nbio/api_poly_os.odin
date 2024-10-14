@@ -4,7 +4,6 @@ package nbio
 import "base:intrinsics"
 
 import "core:net"
-import "core:os"
 
 close_poly :: proc(fd: Closable, p: $T, callback: $C/proc(p: T, err: FS_Error)) -> ^Completion
 	where size_of(T) <= MAX_USER_ARGUMENTS {

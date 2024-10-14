@@ -8,7 +8,6 @@ import      "core:bufio"
 import      "core:log"
 import      "core:mem"
 import      "core:net"
-import      "core:os"
 import      "core:strconv"
 import      "core:strings"
 import      "core:slice"
@@ -112,7 +111,7 @@ _response_destroy :: proc(c: ^Client, res: Client_Response) {
 }
 
 _Client :: struct {
-    allocator: mem.Allocator,
+	allocator: mem.Allocator,
 	// TODO: ideally the dns client is able to be set by the user.
 	// So you can run multiple clients on the same DNS client?
 	dnsc:      dns.Client,
@@ -149,8 +148,8 @@ in_flight_destroy :: proc(r: ^In_Flight) {
 Client_Connection :: struct {
 	ep:         Endpoint,
 	state:      Client_Connection_State,
-    ssl:        SSL_Connection,
-    socket:     net.TCP_Socket,
+	ssl:        SSL_Connection,
+	socket:     net.TCP_Socket,
 	buf:        strings.Builder,
 	scanner:    Scanner,
 	using body: Has_Body,
