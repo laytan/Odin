@@ -362,6 +362,8 @@ Polls for the given event on the subject handle
 
 NOTE: polymorphic variants for type safe user data are available under `poll_poly`, `poll_poly2`, and `poll_poly3`.
 
+TODO: make this accept sockets too.
+
 Inputs:
 - io:       The IO instance to use
 - fd:       The file descriptor to poll

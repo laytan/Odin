@@ -66,8 +66,8 @@ JS_Credentials :: enum u8 {
 	Omit,        // Never include credentials.
 }
 
-client_init :: proc(c: ^Client, io: ^nbio.IO, allocator := context.allocator) {
-	_client_init(c, io, allocator)
+client_init :: proc(c: ^Client, allocator := context.allocator) {
+	_client_init(c, allocator)
 }
 
 client_destroy :: proc(c: ^Client) {
@@ -106,7 +106,7 @@ get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
 			return s.res, s.err
 		}
 
-		if err := nbio.tick(c.io); err != nil {
+		if err := nbio.tick(); err != nil {
 			return {}, .Unknown
 		}
 	}
@@ -165,7 +165,7 @@ multi_sync_buf :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no
 				break
 			}
 
-			if err := nbio.tick(c.io); err != nil {
+			if err := nbio.tick(); err != nil {
 				for &r in res[(i-1)*64:] {
 					r.err = .Unknown
 				}

@@ -35,8 +35,6 @@ Client :: struct {
 
 	cache: map[string]Cache_Entry,
 
-	io: ^nbio.IO,
-
 	// Hosts/Name servers configuration.
 	name_servers:     []net.Endpoint,
 	name_servers_err: Init_Error,
@@ -69,11 +67,9 @@ Callback :: struct {
 	ctx: runtime.Context,
 }
 
-init :: proc(c: ^Client, io: ^nbio.IO, user_data: rawptr, on_init: On_Init, allocator := context.allocator) {
+init :: proc(c: ^Client, user_data: rawptr, on_init: On_Init, allocator := context.allocator) {
 	c.allocator = allocator
 	c.cache.allocator = allocator
-
-	c.io = io
 
 	c.init_cb = on_init
 	c.init_ud = user_data
@@ -85,16 +81,16 @@ init :: proc(c: ^Client, io: ^nbio.IO, user_data: rawptr, on_init: On_Init, allo
 	load_hosts(c)
 }
 
-init_sync :: proc(c: ^Client, io: ^nbio.IO, allocator := context.allocator) -> (name_servers_err: Init_Error, hosts_err: Init_Error, ok: bool) {
+init_sync :: proc(c: ^Client, allocator := context.allocator) -> (name_servers_err: Init_Error, hosts_err: Init_Error, ok: bool) {
 	context.user_ptr = &name_servers_err
-	init(c, io, &hosts_err, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {
+	init(c, &hosts_err, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {
 		(^Init_Error)(context.user_ptr)^ = name_servers_err
 		(^Init_Error)(user)^ = hosts_err
 	})
 
 	for {
-		errno := nbio.tick(io)
-		if errno != os.ERROR_NONE {
+		errno := nbio.tick()
+		if errno != nil {
 			ok = false
 			return
 		}
@@ -121,7 +117,7 @@ destroy_cb :: proc(c: ^Client, user: rawptr, cb: proc(user: rawptr)) {
 
 	// Try to clear again next tick, we don't want to interrupt in progress requests.
 	if len(c.cache) > 0 {
-		nbio.next_tick(c.io, c, user, cb, destroy_cb)
+		nbio.next_tick_poly3(c, user, cb, destroy_cb)
 	} else {
 		delete(c.cache)
 		delete(c.name_servers, c.allocator)
@@ -141,7 +137,7 @@ cache_clear :: proc(c: ^Client) {
 
 		delete(hostname, c.allocator)
 		delete_key(&c.cache, hostname)
-		nbio.remove(c.io, entry.evictor)
+		nbio.remove(entry.evictor)
 	}
 }
 
@@ -151,7 +147,7 @@ cache_evict :: proc(c: ^Client, hostname: string) {
 		log.debugf("DNS of %q has been evicted", hostname)
 		delete_key(&c.cache, hostname)
 		delete(hostname, c.allocator)
-		nbio.remove(c.io, entry.evictor)
+		nbio.remove(entry.evictor)
 	}
 }
 
@@ -288,7 +284,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 		if req.socket != {} {
 			log.debug("closing socket of previous name server")
-			nbio.close(req.client.io, req.socket)
+			nbio.close(req.socket)
 		}
 
 		req.name_server += 1
@@ -307,7 +303,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 				log.warn("no DNS results gotten from IP6 either, calling callbacks with error:", entry.err)
 
 				// Evict the cached error after a minute.
-				nbio.timeout(req.client.io, time.Minute, req.client, req.hostname, evict_record)
+				nbio.timeout_poly2(time.Minute, req.client, req.hostname, evict_record)
 
 				free(req, req.client.allocator)
 
@@ -327,7 +323,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 		log.debugf("quering name server %v over %v", ns, family)
 
-		sock, oerr := nbio.open_socket(req.client.io, family, .UDP)
+		sock, oerr := nbio.open_socket(family, .UDP)
 		if oerr != nil {
 			log.warnf("could not open UDP socket to name server: %v", oerr)
 			next(req, oerr)
@@ -335,12 +331,12 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		}
 		req.socket = sock.(net.UDP_Socket)
 
-		nbio.send_all(req.client.io, ns, req.socket, req.packet[:req.packet_len], req, on_sent)
+		nbio.send_all_udp_poly(ns, req.socket, req.packet[:req.packet_len], req, on_sent)
 	}
 
 	on_record :: proc(req: ^Request, rec: Record) {
 		log.debug("got DNS record", rec)
-		nbio.close(req.client.io, req.socket)
+		nbio.close(req.socket)
 
 		free(req, req.client.allocator)
 
@@ -349,7 +345,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		entry.record = rec
 
 		expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
-		entry.evictor = nbio.timeout(req.client.io, expires, req.client, req.hostname, evict_record)
+		entry.evictor = nbio.timeout_poly2(expires, req.client, req.hostname, evict_record)
 
 		for cb in entry.callbacks {
 			context = cb.ctx
@@ -366,17 +362,17 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		}
 	}
 
-	on_sent :: proc(req: ^Request, n: int, err: net.Network_Error) {
+	on_sent :: proc(req: ^Request, n: int, err: net.UDP_Send_Error) {
 		log.debugf("sent a %m packet with %v err, receiving response", n, err)
 		if err != nil {
 			next(req, err)
 			return
 		}
 
-		nbio.with_timeout(req.client.io, DNS_SERVER_TIMEOUT, nbio.recv(req.client.io, req.socket, req.response[:], req, on_recv))
+		nbio.with_timeout(DNS_SERVER_TIMEOUT, nbio.recv_udp_poly(req.socket, req.response[:], req, on_recv))
 	}
 
-	on_recv :: proc(req: ^Request, sz: int, _: Maybe(net.Endpoint), err: net.Network_Error) {
+	on_recv :: proc(req: ^Request, sz: int, _: net.Endpoint, err: net.UDP_Recv_Error) {
 		log.debugf("received a %m packet with %v err, parsing", sz, err)
 		if err != nil {
 			next(req, err)
@@ -484,17 +480,17 @@ load_name_servers :: proc(c: ^Client) {
 
 	log.debugf("reading resolv conf at %q", resolv_conf)
 
-	fd, err := nbio.open(c.io, resolv_conf)
-	if err != os.ERROR_NONE {
+	fd, err := nbio.open(resolv_conf)
+	if err != nil {
 		load_name_servers_done(c, .Failed_Open, "the resolv conf at %q could not be opened due to errno: %v", resolv_conf, err)
 		return
 	}
 
-	on_resolv_conf_content :: proc(c: ^Client, fd: os.Handle, buf: []byte, err: os.Errno) {
-		nbio.close(c.io, fd)
+	on_resolv_conf_content :: proc(c: ^Client, fd: nbio.Handle, buf: []byte, err: nbio.FS_Error) {
+		nbio.close(fd)
 		defer delete(buf, c.allocator)
 
-		if err != os.ERROR_NONE {
+		if err != nil {
 			load_name_servers_done(c, .Failed_Read, "read resolv conf errno: %v", err)
 			return
 		}
@@ -505,7 +501,7 @@ load_name_servers :: proc(c: ^Client) {
 		load_name_servers_done(c, .None)
 	}
 
-	nbio.read_entire_file(c.io, fd, c, fd, on_resolv_conf_content, c.allocator)
+	nbio.read_entire_file2(fd, c, fd, on_resolv_conf_content, c.allocator)
 }
 
 // Loads the hosts file from the OS, this is implicitly called during `init`.
@@ -521,17 +517,17 @@ load_hosts :: proc(c: ^Client) {
 
 	log.debugf("reading hosts file at %q", hosts_file)
 
-	fd, err := nbio.open(c.io, hosts_file)
-	if err != os.ERROR_NONE {
+	fd, err := nbio.open(hosts_file)
+	if err != nil {
 		load_hosts_done(c, .Failed_Open, "the hosts file at %q could not be opened due to errno: %v", hosts_file, err)
 		return
 	}
 
-	on_hosts_content :: proc(c: ^Client, fd: os.Handle, buf: []byte, err: os.Errno) {
-		nbio.close(c.io, fd)
+	on_hosts_content :: proc(c: ^Client, fd: nbio.Handle, buf: []byte, err: nbio.FS_Error) {
+		nbio.close(fd)
 		defer delete(buf, c.allocator)
 
-		if err != os.ERROR_NONE {
+		if err != nil {
 			load_hosts_done(c, .Failed_Read, "read hosts file errno: %v", err)
 			return
 		}
@@ -542,7 +538,7 @@ load_hosts :: proc(c: ^Client) {
 		load_hosts_done(c, .None)
 	}
 
-	nbio.read_entire_file(c.io, fd, c, fd, on_hosts_content, c.allocator)
+	nbio.read_entire_file2(fd, c, fd, on_hosts_content, c.allocator)
 }
 
 @(private)

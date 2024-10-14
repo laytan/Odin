@@ -339,12 +339,12 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 	}
 
 	buf := bytes.buffer_to_bytes(&r._buf)
-	nbio.send_all(&td.io, conn.socket, buf, conn, on_response_sent)
+	nbio.send_all_tcp(conn.socket, buf, conn, on_response_sent)
 }
 
 
 @(private)
-on_response_sent :: proc(conn_: rawptr, sent: int, err: net.Network_Error) {
+on_response_sent :: proc(conn_: rawptr, sent: int, err: net.TCP_Send_Error) {
 	conn := cast(^Connection)conn_
 
 	if err != nil {
