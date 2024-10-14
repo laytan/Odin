@@ -34,7 +34,7 @@ listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts :=
 
 		err := http.listen(s, ep, opts)
 		if err != nil {
-			if err == net.Dial_Error.Address_In_Use {
+			if err == net.Dial_Error.Address_In_Use || err == net.Listen_Error.Address_In_Use || err == net.Bind_Error.Address_In_Use {
 				log.infof("endpoint %v in use, trying next port", ep, location=loc)
 				continue
 			}
