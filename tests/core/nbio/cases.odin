@@ -24,7 +24,7 @@ open_next_available_local_port :: proc(t: ^testing.T, loc := #caller_location) -
 		err: net.Network_Error
 		sock, err = nbio.open_and_listen_tcp(ep)
 		if err != nil {
-			if err == net.Dial_Error.Address_In_Use {
+			if err == net.Dial_Error.Address_In_Use || err == net.Listen_Error.Address_In_Use || err == net.Bind_Error.Address_In_Use {
 				log.infof("endpoint %v in use, trying next port", ep, location=loc)
 				continue
 			}
