@@ -1,10 +1,9 @@
 package tests_client
 
 import "core:http"
-import "core:nbio"
 import "core:log"
+import "core:nbio"
 import "core:net"
-import "core:os"
 import "core:sync"
 import "core:testing"
 import "core:thread"

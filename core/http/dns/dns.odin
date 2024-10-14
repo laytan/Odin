@@ -7,7 +7,6 @@ import "core:log"
 import "core:mem"
 import "core:nbio"
 import "core:net"
-import "core:os"
 import "core:strings"
 import "core:time"
 

@@ -1,4 +1,3 @@
-// package client provides a HTTP/1.1 client.
 package http
 
 import "base:runtime"
@@ -125,6 +124,8 @@ responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
 	}
 	delete(s)
 }
+
+// TODO: allow changing chunk size.
 
 /*
 Sends out all requests given asynchronously in chunks of 64.
