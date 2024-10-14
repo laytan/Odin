@@ -283,7 +283,10 @@ sync :: proc(t: ^testing.T) {
 
 	c: http.Client
 	http.client_init(&c)
-	defer http.client_destroy(&c)
+	defer {
+		http.client_destroy(&c)
+		ev(t, nbio.run(), nil)
+	}
 
 	res, err := http.get(&c, "https://odin-lang.org")
 	testing.expect_value(t, err, nil)
@@ -303,7 +306,10 @@ multi_sync :: proc(t: ^testing.T) {
 
 	c: http.Client
 	http.client_init(&c)
-	defer http.client_destroy(&c)
+	defer {
+		http.client_destroy(&c)
+		ev(t, nbio.run(), nil)
+	}
 
 	responses, err := http.multi_sync(&c, 
 		{url="https://odin-lang.org"},
