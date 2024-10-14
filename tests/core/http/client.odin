@@ -64,7 +64,7 @@ test_ok :: proc(tt: ^testing.T) {
 	///
 
 	client: http.Client
-	http.client_init(&client, http.io())
+	http.client_init(&client)
 
 	req := http.Client_Request{
 		url = net.endpoint_to_string(ep),
@@ -125,12 +125,8 @@ connection_pool :: proc(t: ^testing.T) {
 	}, init_context=context)
 	defer thread.destroy(server_thread)
 
-	io: nbio.IO
-	ev(t, nbio.init(&io), os.ERROR_NONE)
-	defer nbio.destroy(&io)
-
 	@static client: http.Client
-	http.client_init(&client, &io)
+	http.client_init(&client)
 
 	sync.one_shot_event_wait(&s.listening)
 
@@ -153,7 +149,7 @@ connection_pool :: proc(t: ^testing.T) {
 			http.response_destroy(&client, res)
 		}
 
-		ev(t, nbio.run(&io), os.ERROR_NONE)
+		ev(t, nbio.run(), nil)
 
 		ev(t, len(client.conns), 1)
 		for _, conns in client.conns {
@@ -162,7 +158,7 @@ connection_pool :: proc(t: ^testing.T) {
 	}
 
 	http.client_destroy(&client)
-	ev(t, nbio.run(&io), os.ERROR_NONE)
+	ev(t, nbio.run(), nil)
 
 	http.server_shutdown(&s.s)
 }
@@ -192,7 +188,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 
 	///
 
-	http.client_init(&state.client, http.io())
+	http.client_init(&state.client)
 
 	state.req = http.Client_Request{
 		url = net.endpoint_to_string(ep),
@@ -238,7 +234,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 			http._connection_close(c)
 
 			// NOTE: On a timeout send the next request, closing a connection takes time.
-			nbio.timeout(http.io(), http.Conn_Close_Delay, rawptr(nil), send_second_request)
+			nbio.timeout(http.Conn_Close_Delay, rawptr(nil), send_second_request)
 		}
 
 		http.respond(res)
@@ -254,16 +250,12 @@ openssl :: proc(t: ^testing.T) {
 
 	State :: struct {
 		t:      ^testing.T,
-		io:     nbio.IO,
 		client: http.Client,
 	}
 	s: State
 	s.t = t
 
-	ev(t, nbio.init(&s.io), os.ERROR_NONE)
-	defer nbio.destroy(&s.io)
-
-	http.client_init(&s.client, &s.io)
+	http.client_init(&s.client)
 
 	req := http.Client_Request{
 		url = "https://www.google.com/",
@@ -281,7 +273,7 @@ openssl :: proc(t: ^testing.T) {
 		http.client_destroy(&s.client)
 	})
 
-	ev(t, nbio.run(&s.io), os.ERROR_NONE)
+	ev(t, nbio.run(), nil)
 }
 
 @(test)
@@ -290,13 +282,8 @@ sync :: proc(t: ^testing.T) {
 
 	http.set_client_ssl(ssl_http.client_implementation())
 
-	// TODO: will be thread local in nbio / removed.
-	io: nbio.IO
-	ev(t, nbio.init(&io), os.ERROR_NONE)
-	defer nbio.destroy(&io)
-
 	c: http.Client
-	http.client_init(&c, &io)
+	http.client_init(&c)
 	defer http.client_destroy(&c)
 
 	res, err := http.get(&c, "https://odin-lang.org")
@@ -313,14 +300,10 @@ multi_sync :: proc(t: ^testing.T) {
 
 	http.set_client_ssl(ssl_http.client_implementation())
 
-	// TODO: will be thread local in nbio / removed.
-	io: nbio.IO
-	ev(t, nbio.init(&io), os.ERROR_NONE)
-	defer nbio.destroy(&io)
-	defer nbio.run(&io)
+	defer nbio.run()
 
 	c: http.Client
-	http.client_init(&c, &io)
+	http.client_init(&c)
 	defer http.client_destroy(&c)
 
 	responses, err := http.multi_sync(&c, 

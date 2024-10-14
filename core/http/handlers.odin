@@ -79,13 +79,13 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 
 	data.opts = opts
 	data.hits = make(map[net.Address]int, 16, allocator)
-	data.next_sweep = time.time_add(nbio.now(io()), opts.window)
+	data.next_sweep = time.time_add(nbio.now(), opts.window)
 	h.user_data = data
 
 	h.handle = proc(h: ^Handler, req: ^Request, res: ^Response) {
 		data := (^Rate_Limit_Data)(h.user_data)
 
-		now := nbio.now(io())
+		now := nbio.now()
 
 		sync.lock(&data.mu)
 

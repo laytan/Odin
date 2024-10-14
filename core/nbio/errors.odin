@@ -32,7 +32,7 @@ FS_Error :: enum i32 {
 	// TODO:
 	// Permission_Denied = PLATFORM_ERR_PERMISSION_DENIED,
 	// Exist             = PLATFORM_ERR_EXISTS,
-	// Not_Exist         = PLATFORM_ERR_NOT_EXISTS,
+	Not_Exist         = PLATFORM_ERR_NOT_EXIST,
 }
 
 Platform_Error :: _Platform_Error

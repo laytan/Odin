@@ -101,7 +101,6 @@ Server :: struct {
 Server_Thread :: struct {
 	conns:       map[net.TCP_Socket]^Connection,
 	state:       Server_State,
-	io:          nbio.IO,
 
 	// Need to keep track of this, if the server socket is closed (during shutdown) we need to manually cancel
 	// operations on it.
@@ -119,12 +118,6 @@ assert_has_td :: #force_inline proc(loc := #caller_location) {
 @(private, thread_local)
 td: Server_Thread
 
-// Returns the implicit IO/event loop for the current handler thread.
-io :: proc(loc := #caller_location) -> ^nbio.IO {
-	assert_has_td(loc)
-	return &td.io
-}
-
 Default_Endpoint := net.Endpoint {
 	address = net.IP4_Any,
 	port    = 8080,
@@ -141,16 +134,7 @@ listen :: proc(
 	// initial_block_cap = int(s.opts.initial_temp_block_cap)
 	// max_free_blocks_queued = int(s.opts.max_free_blocks_queued)
 
-	errno := nbio.init(&td.io)
-	// TODO: error handling.
-	assert(errno == os.ERROR_NONE)
-
-	s.tcp_sock, err = nbio.open_and_listen_tcp(&td.io, endpoint)
-	if err != nil {
-		nbio.destroy(&td.io)
-		return
-	}
-
+	s.tcp_sock = nbio.open_and_listen_tcp(endpoint) or_return
 	td.state = .Listening
 	return
 }
@@ -197,15 +181,9 @@ _server_thread_init :: proc(s: ^Server) {
 	td.conns = make(map[net.TCP_Socket]^Connection)
 	// td.free_temp_blocks = make(map[int]queue.Queue(^Block))
 
-	if sync.current_thread_id() != s.main_thread {
-		errno := nbio.init(&td.io)
-		// TODO: error handling.
-		assert(errno == os.ERROR_NONE)
-	}
-
 	log.debug("accepting connections")
 
-	td.curr_accept = nbio.accept(&td.io, s.tcp_sock, s, on_accept)
+	td.curr_accept = nbio.accept(s.tcp_sock, s, on_accept)
 
 	log.debug("starting event loop")
 	td.state = .Serving
@@ -214,8 +192,8 @@ _server_thread_init :: proc(s: ^Server) {
 		if td.state == .Closed          { break }
 		if td.state == .Cleaning        { continue }
 
-		errno := nbio.tick(&td.io)
-		if errno != os.ERROR_NONE {
+		errno := nbio.tick()
+		if errno != nil {
 			// // TODO: check how this behaves on Windows.
 			// when ODIN_OS != .Windows {
 			// 	if errno == os.EINTR {
@@ -271,12 +249,10 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 	// }
 
 	if sync.current_thread_id() == s.main_thread {
-		nbio.close(&td.io, s.tcp_sock, rawptr(nil), proc(_: rawptr, ok: bool) {
-			assert(ok)
-		})
+		nbio.close(s.tcp_sock)
 	}
 
-	nbio.remove(&td.io, td.curr_accept)
+	nbio.remove(td.curr_accept)
 	td.curr_accept = nil
 
 	for i := 0; ; i += 1 {
@@ -297,15 +273,13 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 			break
 		}
 
-		err := nbio.tick(&td.io)
-		fmt.assertf(err == os.ERROR_NONE, "IO tick error during shutdown: %v", err)
+		err := nbio.tick()
+		fmt.assertf(err == nil, "IO tick error during shutdown: %v", err)
 	}
 
 	td.state = .Cleaning
 	log.debug("running out remaining events")
-	nbio.run(&td.io)
-	log.debug("destroying")
-	nbio.destroy(&td.io)
+	nbio.run()
 	td.state = .Closed
 
 	log.info("shutdown: done")
@@ -415,12 +389,12 @@ _connection_close :: proc(c: ^Connection, loc := #caller_location) {
 	// to process the closing and receive any remaining data.
 	net.shutdown(c.socket, net.Shutdown_Manner.Send)
 
-	nbio.timeout(&td.io, Conn_Close_Delay, c, proc(c: rawptr) {
+	nbio.timeout(Conn_Close_Delay, c, proc(c: rawptr) {
 		c := cast(^Connection)c
 
-		nbio.remove(&td.io, c.curr_recv)
+		nbio.remove(c.curr_recv)
 
-		nbio.close(&td.io, c.socket, c, proc(c: rawptr, ok: bool) {
+		nbio.close(c.socket, c, proc(c: rawptr, err: nbio.FS_Error) {
 			c := cast(^Connection)c
 
 			log.infof("[%i] closed connection", c.socket)
@@ -443,28 +417,25 @@ connection_temp_allocator :: proc(c: ^Connection) -> mem.Allocator {
 }
 
 @(private)
-on_accept :: proc(server: rawptr, sock: net.TCP_Socket, source: net.Endpoint, err: net.Network_Error) {
+on_accept :: proc(server: rawptr, sock: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
 	server := cast(^Server)server
 
 	if err != nil {
-		#partial switch e in err {
-		case net.Accept_Error:
-			#partial switch e {
-			case .No_Socket_Descriptors_Available_For_Client_Socket:
-				log.error("Connection limit reached, trying again in a bit")
-				nbio.timeout(&td.io, time.Second, server, proc(server: rawptr) {
-					server := cast(^Server)server
-					td.curr_accept = nbio.accept(&td.io, server.tcp_sock, server, on_accept)
-				})
-				return
-			}
+		#partial switch err {
+		case .No_Socket_Descriptors_Available_For_Client_Socket:
+			log.error("Connection limit reached, trying again in a bit")
+			nbio.timeout(time.Second, server, proc(server: rawptr) {
+				server := cast(^Server)server
+				td.curr_accept = nbio.accept(server.tcp_sock, server, on_accept)
+			})
+			return
 		}
 
 		fmt.panicf("accept error: %v", err)
 	}
 
 	// Accept next connection.
-	td.curr_accept = nbio.accept(&td.io, server.tcp_sock, server, on_accept)
+	td.curr_accept = nbio.accept(server.tcp_sock, server, on_accept)
 
 	c := new(Connection, server.conn_allocator)
 	c.state = .New
@@ -486,11 +457,11 @@ conn_handle_reqs :: proc(c: ^Connection) {
 		context.user_ptr = rawptr(callback)
 
 		c.curr_recv = nbio.with_timeout(
-			&td.io, s.timeout,
-			nbio.recv(&td.io, c.socket, buf, c, on_recv),
+			s.timeout,
+			nbio.recv_tcp(c.socket, buf, c, on_recv),
 		)
 
-		on_recv :: proc(c: rawptr, n: int, _: Maybe(net.Endpoint), err: net.Network_Error) {
+		on_recv :: proc(c: rawptr, n: int,  err: net.TCP_Recv_Error) {
 			c := (^Connection)(c)
 			c.curr_recv = nil
 			callback := (On_Scanner_Read)(context.user_ptr)
@@ -691,10 +662,10 @@ server_date_update :: proc(s: rawptr) {
 		return
 	}
 
-	nbio.timeout(&td.io, time.Second, s, server_date_update)
+	nbio.timeout(time.Second, s, server_date_update)
 
 	bytes.buffer_reset(&s.date.buf)
-	s.date.now = nbio.now(&td.io)
+	s.date.now = nbio.now()
 	date_write(bytes.buffer_to_stream(&s.date.buf), s.date.now)
 }
 
