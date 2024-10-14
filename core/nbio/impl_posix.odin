@@ -65,10 +65,14 @@ _open :: proc(_: ^IO, path: string, flags: File_Flags, perm: int) -> (handle: Ha
 		return
 	}
 
-	assert(len(path) <= posix.PATH_MAX)
+	if len(path) > posix.PATH_MAX {
+		errno = .Overflow
+		return
+	}
+
 	buf: [posix.PATH_MAX+1]byte = ---
 	n := copy(buf[:], path)
-	buf[n+1] = 0
+	buf[n] = 0
 
 	sys_flags := posix.O_Flags{.NOCTTY, .CLOEXEC, .NONBLOCK}
 
