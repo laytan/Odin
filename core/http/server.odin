@@ -188,7 +188,7 @@ _server_thread_init :: proc(s: ^Server) {
 	log.debug("starting event loop")
 	td.state = .Serving
 	for {
-		if sync.atomic_load(&s.closing) { _server_thread_shutdown(s) }
+		if sync.atomic_load(&s.closing) { _server_thread_shutdown(s); assert(td.state == .Closed) }
 		if td.state == .Closed          { break }
 		if td.state == .Cleaning        { continue }
 
@@ -248,10 +248,6 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 	// 	log.infof("had %i temp blocks to spare", blocks)
 	// }
 
-	if sync.current_thread_id() == s.main_thread {
-		nbio.close(s.tcp_sock)
-	}
-
 	nbio.remove(td.curr_accept)
 	td.curr_accept = nil
 
@@ -278,6 +274,11 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 	}
 
 	td.state = .Cleaning
+
+	if sync.current_thread_id() == s.main_thread {
+		nbio.close(s.tcp_sock)
+	}
+
 	log.debug("running out remaining events")
 	nbio.run()
 	td.state = .Closed

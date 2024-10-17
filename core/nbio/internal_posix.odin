@@ -5,6 +5,7 @@ package nbio
 import    "base:runtime"
 
 import    "core:container/queue"
+import    "core:log"
 import    "core:net"
 import    "core:sys/posix"
 import    "core:time"
@@ -159,7 +160,6 @@ flush :: proc(io: ^IO) -> General_Error {
 			err: posix.Errno
 			new_events, err = kq.kevent(io.kq, events[:change_events], events[:], &timeout)
 			if err == .EINTR {
-				assert(new_events == 0)
 				continue
 			} else if err != nil {
 				return General_Error(err)
@@ -172,13 +172,16 @@ flush :: proc(io: ^IO) -> General_Error {
 		io.io_inflight += change_events
 		io.io_inflight -= int(new_events)
 
-		if new_events > 0 {
-			queue.reserve(&io.completed, int(new_events))
-			for event in events[:new_events] {
-				completion := cast(^Completion)event.udata
-				completion.in_kernel = false
-				push_completed(io, completion)
+		assert(new_events >= 0)
+
+		queue.reserve(&io.completed, int(new_events))
+		for event in events[:new_events] {
+			completion := cast(^Completion)event.udata
+			if .Error in event.flags {
+				log.warnf("error on %v fd %v: %v", completion, event.ident, posix.strerror(posix.Errno(event.data)))
 			}
+			completion.in_kernel = false
+			push_completed(io, completion)
 		}
 	}
 
