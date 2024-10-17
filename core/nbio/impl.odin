@@ -42,9 +42,11 @@ destroy_thread :: proc() {
 }
 
 init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
+	assert(!io.initialized)
 	return _init(io, allocator)
 }
 
 destroy :: proc(io: ^IO) {
+	assert(io.initialized)
 	_destroy(io)
 }
