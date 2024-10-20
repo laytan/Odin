@@ -3,13 +3,48 @@ package simd
 import "base:builtin"
 import "base:intrinsics"
 
-// IS_EMULATED is true iff the compile-time target lacks hardware support
-// for at least 128-bit SIMD.
-IS_EMULATED :: true when (ODIN_ARCH == .amd64 || ODIN_ARCH == .i386) && !intrinsics.has_target_feature("sse2") else
-	true when (ODIN_ARCH == .arm64 || ODIN_ARCH == .arm32) && !intrinsics.has_target_feature("neon") else
-	true when (ODIN_ARCH == .wasm64p32 || ODIN_ARCH == .wasm32) && !intrinsics.has_target_feature("simd128") else
-	true when (ODIN_ARCH == .riscv64) && !intrinsics.has_target_feature("v") else
-	false
+@(private) has :: intrinsics.has_target_feature
+
+when ODIN_ARCH == .amd64 || ODIN_ARCH == .i386 {
+	when has("avx512f") && !(has("prefer-256-bit") || has("prefer-128-bit"))      { _TARGET_VECTOR_LENGTH ::   64 }
+	else when (has("prefer-256-bit") || has("avx2")) && !has("prefer-128-bit")    { _TARGET_VECTOR_LENGTH ::   32 }
+	else when has("sse") || has("sse2")                                           { _TARGET_VECTOR_LENGTH ::   16 }
+	else when has("mmx") || has("3dnow")                                          { _TARGET_VECTOR_LENGTH ::    8 }
+	else                                                                          { _TARGET_VECTOR_LENGTH ::    0 }
+} else when ODIN_ARCH == .arm32 {
+	when has("neon")                                                              { _TARGET_VECTOR_LENGTH ::   16 }
+	else                                                                          { _TARGET_VECTOR_LENGTH ::    0 }
+} else when ODIN_ARCH == .arm64 {
+	when has("sve") || has("neon")                                                { _TARGET_VECTOR_LENGTH ::   16 }
+	else                                                                          { _TARGET_VECTOR_LENGTH ::    0 }
+} else when ODIN_ARCH == .riscv64 {
+	when has("zvl32b")                                                            { _TARGET_VECTOR_LENGTH ::    4 }
+	else when has("zvl64b")                                                       { _TARGET_VECTOR_LENGTH ::    8 }
+	else when has("zvl128b")                                                      { _TARGET_VECTOR_LENGTH ::   16 }
+	else when has("zvl256b")                                                      { _TARGET_VECTOR_LENGTH ::   32 }
+	else when has("zvl512b")                                                      { _TARGET_VECTOR_LENGTH ::   64 }
+	else when has("zvl1024b")                                                     { _TARGET_VECTOR_LENGTH ::  128 }
+	else when has("zvl2048b")                                                     { _TARGET_VECTOR_LENGTH ::  256 }
+	else when has("zvl8192b")                                                     { _TARGET_VECTOR_LENGTH ::  512 }
+	else when has("zvl16384b")                                                    { _TARGET_VECTOR_LENGTH :: 1024 }
+	else when has("zvl32768b")                                                    { _TARGET_VECTOR_LENGTH :: 2048 }
+	else when has("zvl65536b")                                                    { _TARGET_VECTOR_LENGTH :: 4096 }
+	else when has("v")                                                            { _TARGET_VECTOR_LENGTH ::  256 }
+	else                                                                          { _TARGET_VECTOR_LENGTH ::    0 }
+} else when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32 {
+	when has("simd128")                                                           { _TARGET_VECTOR_LENGTH ::   16 }
+	else                                                                          { _TARGET_VECTOR_LENGTH ::    0 }
+} else {
+	#panic("TODO")
+}
+
+// TARGET_VECTOR_LENGTH is the size in bytes of the compile-time target's vector registers,
+// or `size_of(int)` when the target has no support (IS_EMULATED).
+// One could use the constant like: `foo: #simd [max(1, simd.TARGET_VECTOR_LENGTH / size_of(T))]T`.
+TARGET_VECTOR_LENGTH :: size_of(int) when _TARGET_VECTOR_LENGTH == 0 else _TARGET_VECTOR_LENGTH
+
+// IS_EMULATED is true iff the compile-time target lacks hardware support SIMD.
+IS_EMULATED :: _TARGET_VECTOR_LENGTH == 0
 
 // 128-bit vector aliases
 u8x16 :: #simd[16]u8
