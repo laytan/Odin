@@ -1,5 +1,7 @@
-#include <stddef.h>
+#include <alloca.h>
+#include <assert.h>
 #include <stdarg.h>
+#include <stddef.h>
 
 #pragma once
 
@@ -44,4 +46,36 @@ static inline int printf(const char *fmt, ...) {
 	int result = vfprintf(stdout, fmt, args);
 	va_end(args);
 	return result;
+}
+
+extern int __sscanf(const char *str, const char *format, void *ptrs);
+
+static inline int vsscanf(const char *str, const char *format, va_list ap) {
+	// TODO: %n$ type of format.
+
+	int count = 0;
+	for (int i = 0; format[i]; i++) {
+		if (format[i] == '%') {
+			if (format[i+1] == '%') {
+				i++;
+				continue;
+			}
+			count++;
+		}
+	}
+
+	void **ptrs = (void **)(alloca(count*sizeof(void *)));
+	for (int i = 0; i < count; i++) {
+		ptrs[i] = va_arg(ap, void *);
+	}
+
+	return __sscanf(str, format, ptrs);
+}
+
+static inline int sscanf(const char *str, const char *format, ...) {
+	va_list args;
+	va_start(args, format);
+	int res = vsscanf(str, format, args);
+	va_end(args);
+	return res;
 }
