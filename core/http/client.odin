@@ -1,11 +1,15 @@
 package http
 
-import "base:runtime"
-
 import "core:nbio"
 import "core:slice"
 
 // TODO: timeouts
+
+// TODO: set max concurrency
+
+// TODO: accept a different allocator, on which the response is allocated.
+
+// TODO: sync can only be done in non-js :(.
 
 Client :: _Client
 
@@ -73,19 +77,35 @@ client_destroy :: proc(c: ^Client) {
 	_client_destroy(c)
 }
 
-// TODO: accept a different allocator, on which the response is allocated.
-
-client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Response) {
-	_client_request(c, req, user, cb)
-}
-
 response_destroy :: proc(c: ^Client, res: Client_Response) {
 	_response_destroy(c, res)
 }
 
-// TODO: sync can only be done in non-js :(.
+get :: proc(url: string) -> Client_Request {
+	return { url = url }
+}
 
-get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
+// TODO: post, post_json, yada yada
+
+request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: proc(r: Client_Response, s: rawptr, err: Request_Error)) {
+	_client_request(c, req, user, cb)
+}
+
+Multi_Res :: struct {
+	res: Client_Response,
+	err: Request_Error,
+}
+
+responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
+	for res in s {
+		if res.err == nil {
+			response_destroy(c, res.res)
+		}
+	}
+	delete(s)
+}
+
+sync_one_request :: proc(c: ^Client, req: Client_Request) -> (Client_Response, Request_Error) {
 	State :: struct {
 		res:  Client_Response,
 		err:  Request_Error,
@@ -93,7 +113,7 @@ get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
 	}
 	s: State
 
-	_client_request(c, {url = url}, &s, proc(r: Client_Response, s: rawptr, err: Request_Error) {
+	_client_request(c, req, &s, proc(r: Client_Response, s: rawptr, err: Request_Error) {
 		s := (^State)(s)
 		s.res = r
 		s.err = err
@@ -111,35 +131,20 @@ get :: proc(c: ^Client, url: string) -> (Client_Response, Request_Error) {
 	}
 }
 
-Multi_Res :: struct {
-	res: Client_Response,
-	err: Request_Error,
-}
-
-responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
-	for res in s {
-		if res.err == nil {
-			response_destroy(c, res.res)
-		}
-	}
-	delete(s)
-}
-
-// TODO: allow changing chunk size.
-
 /*
 Sends out all requests given asynchronously in chunks of 64.
 */
-multi_sync :: proc(c: ^Client, reqs: ..Client_Request) -> (res: []Multi_Res, err: runtime.Allocator_Error) {
-	res = make([]Multi_Res, len(reqs)) or_return
-	multi_sync_buf(c, reqs, res)
-	return
+sync_requests :: proc(c: ^Client, reqs: ..Client_Request) -> []Multi_Res {
+	res, err := make([]Multi_Res, len(reqs))
+	if err != nil { return nil }
+	sync_requests_into(c, reqs, res)
+	return res
 }
 
 /*
 Sends out all requests given asynchronously in chunks of 64.
 */
-multi_sync_buf :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no_bounds_check {
+sync_requests_into :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no_bounds_check {
 	assert(len(res) >= len(reqs))
 
 	Done :: bit_set[0..<64; u64]
@@ -176,4 +181,10 @@ multi_sync_buf :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no
 	}
 
 	return
+}
+
+sync_request :: proc {
+	sync_one_request,
+	sync_requests,
+	sync_requests_into,
 }

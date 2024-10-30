@@ -65,11 +65,9 @@ test_ok :: proc(tt: ^testing.T) {
 	client: http.Client
 	http.client_init(&client)
 
-	req := http.Client_Request{
-		url = net.endpoint_to_string(ep),
-	}
+	req := http.get(net.endpoint_to_string(ep))
 
-	http.client_request(&client, req, &client, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+	http.request(&client, req, &client, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		client := (^http.Client)(user)
 
 		ev(t, err, nil)
@@ -129,13 +127,11 @@ connection_pool :: proc(t: ^testing.T) {
 
 	sync.one_shot_event_wait(&s.listening)
 
-	req := http.Client_Request{
-		url = net.endpoint_to_string(s.ep),
-	}
+	req := http.get(net.endpoint_to_string(s.ep))
 
 	for _ in 0..<2 {
-		http.client_request(&client, req, t, on_response)
-		http.client_request(&client, req, t, on_response)
+		http.request(&client, req, t, on_response)
+		http.request(&client, req, t, on_response)
 
 		on_response :: proc(res: http.Client_Response, t: rawptr, err: http.Request_Error) {
 			t := (^testing.T)(t)
@@ -189,11 +185,9 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 
 	http.client_init(&state.client)
 
-	state.req = http.Client_Request{
-		url = net.endpoint_to_string(ep),
-	}
+	state.req = http.get(net.endpoint_to_string(ep))
 
-	http.client_request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+	http.request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		ev(state.t, err, nil)
 		ev(state.t, res.status, http.Status.OK)
 		ev(state.t, http.headers_has_unsafe(res.headers, "date"), true)
@@ -205,7 +199,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 	})
 
 	send_second_request :: proc(_: rawptr) {
-		http.client_request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+		http.request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 			ev(state.t, err, nil)
 			ev(state.t, res.status, http.Status.OK)
 			ev(state.t, http.headers_has_unsafe(res.headers, "date"), true)
@@ -256,11 +250,7 @@ openssl :: proc(t: ^testing.T) {
 
 	http.client_init(&s.client)
 
-	req := http.Client_Request{
-		url = "https://www.google.com/",
-	}
-
-	http.client_request(&s.client, req, &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+	http.request(&s.client, http.get("https://www.google.com/"), &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		s := (^State)(user)
 
 		ev(s.t, err, nil)
@@ -288,7 +278,7 @@ sync :: proc(t: ^testing.T) {
 		ev(t, nbio.run(), nil)
 	}
 
-	res, err := http.get(&c, "https://odin-lang.org")
+	res, err := http.sync_request(&c, http.get("https://odin-lang.org"))
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, res.status, http.Status.OK)
 	testing.expect(t, len(res.body) > 0)
@@ -311,12 +301,12 @@ multi_sync :: proc(t: ^testing.T) {
 		ev(t, nbio.run(), nil)
 	}
 
-	responses, err := http.multi_sync(&c, 
-		{url="https://odin-lang.org"},
-		{url="https://odin-lang.org/docs/overview/"},
-		{url="https://odin-lang.org/docs/faq/"},
+	responses := http.sync_request(&c, 
+		http.get("https://odin-lang.org"),
+		http.get("https://odin-lang.org/docs/overview/"),
+		http.get("https://odin-lang.org/docs/faq/"),
 	)
-	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(responses), 3)
 	defer http.responses_destroy(&c, responses)
 
 	for response in responses {
