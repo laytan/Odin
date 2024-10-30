@@ -2,9 +2,9 @@
 	- core
 		- net
 			- http         | HTTP client and server
-			- dns          | DNS client built on asyncio
+			- dns          | DNS client built on nbio (maybe call it nbdns?)
 		- io
-			- asyncio      | "Low" level asynchronous IO event loop
+			- nbio         | "Low" level asynchronous IO event loop
 		- sys
 			- linux
 				- io_uring | IO Uring API
@@ -14,9 +14,14 @@
 
 # TODO
 
+- [ ] Move packages into final spot (see tree above)
 - [ ] Make sure everything runs under `-sanitize:address`
 - [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
 - [x] Build/update openssl using CI (on a cron?)
+- [ ] move tests to listening on port 0 (which gets a port assigned by kernel) and query the actual port
+- [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
+- [x] Support the BSDs
+	- [x] verify kqueue against bsd headers
 
 ## HTTP Server
 
@@ -26,6 +31,11 @@
 - [x] `http.io()` that returns `&http.td.io` or errors if it isn't one of the handler threads
 - [x] `panic` when user does `free_all` on the given temp ally
 - [x] in `http.respond`, set the `context.temp_allocator` back to the current connection's, so a user changing it doesn't fuck it up
+- [ ] Add an API to set a custom temp allocator
+- [ ] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
+- [ ] Regex router
+- [ ] A way to say: "get the body before calling this handler"
+- [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
 
 ## HTTP Client
 
@@ -37,14 +47,17 @@
 - [ ] Expand configuration
     - [ ] Max response size
 	- [ ] Timeouts
+	- [ ] Max concurrency
 - [x] Create a thin VTable interface for the OpenSSL functionality (so we can put openSSL in vendor and the rest in core)
-- [ ] Synchronous API (just take over the `nbio` event loop until the request is done)
-- [ ] API that takes over event loop until all pending requests are completed
+- [x] Synchronous API (just take over the `nbio` event loop until the request is done)
 - [ ] Poly API
 - [ ] Testing
 	- [ ] Big requests > 16kb (a TLS packet)
 - [x] Consider move into main package, but may be confusing?
 - [ ] Each host has multiple connections, when a request is made, get an available connection or make a new connection.
+- [ ] Follow redirects
+- [ ] Ingest cookies / Cookie JAR
+- [ ] Nice APIS wrapping over all the configuration for common actions
 
 ## DNS Client
 
@@ -75,25 +88,6 @@
 	- [x] Darwin
 	- [?] Windows
 - [ ] A way to tick without blocking
-
-# Non critical wants
-
-- [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
-- [ ] Support the BSDs
-	- [x] verify kqueue against bsd headers
-
-## HTTP Server
-
-- [ ] Add an API to set a custom temp allocator
-- [ ] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
-- [ ] A way to say: "get the body before calling this handler"
-- [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
-
-## HTTP Client
-
-- [ ] Follow redirects
-- [ ] Ingest cookies / Cookie JAR
-- [ ] Nice APIS wrapping over all the configuration for common actions
 
 ## WASM
 
