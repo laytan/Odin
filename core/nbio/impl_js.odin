@@ -3,37 +3,30 @@ package nbio
 
 import "base:runtime"
 
-import "core:os"
 import "core:time"
 
-foreign import "odin_io"
-
-// TODO: update with thread local stuff.
-
-_IO :: struct #no_copy {
-	// NOTE: num_waiting is also changed in JS.
-	num_waiting: int,
-	allocator:   runtime.Allocator,
-	// TODO: priority queue, or that other sorted list.
-	pending:     [dynamic]^Completion,
-	done:        [dynamic]^Completion,
-	free_list:   [dynamic]^Completion,
-}
-#assert(offset_of(_IO, num_waiting) == 0, "Relied upon in JS")
-
-@(private)
-_Completion :: struct {
-	ctx:     runtime.Context,
-	cb:      proc(user: rawptr),
-	timeout: time.Time,
+@(export)
+nbio_io_ptr :: proc() -> ^IO {
+	return io()
 }
 
-_init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
+@(export)
+nbio_tick :: proc() {
+	err := _tick(io())
+	if err != nil {
+		buf: [1024]byte = ---
+		n := copy(buf[:], "could not tick non-blocking IO: ")
+		n += copy(buf[:], error_string(err))
+		panic(string(buf[:n]))
+	}
+}
+
+_init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	io.allocator = allocator
 	io.pending.allocator = allocator
 	io.done.allocator = allocator
 	io.free_list.allocator = allocator
-	return os.ERROR_NONE
+	return nil
 }
 
 _num_waiting :: #force_inline proc(io: ^IO) -> int {
@@ -58,13 +51,20 @@ _destroy :: proc(io: ^IO) {
 	delete(io.free_list)
 }
 
-_tick :: proc(io: ^IO) -> os.Errno {
+_now :: proc(io: ^IO) -> time.Time {
+	return io.now
+}
+
+_tick :: proc(io: ^IO) -> General_Error {
+	io.now = time.now()
+
 	if len(io.pending) > 0 {
-		now := time.now()
 		#reverse for c, i in io.pending {
-			if time.diff(now, c.timeout) <= 0 {
+			if time.diff(io.now, c.timeout) <= 0 {
 				ordered_remove(&io.pending, i)
-				append(&io.done, c)
+
+				_, err := append(&io.done, c)
+				if err != nil { return .Allocation_Failed }
 			}
 		}
 	}
@@ -74,33 +74,35 @@ _tick :: proc(io: ^IO) -> os.Errno {
 		context = completion.ctx
 		completion.cb(completion.user_data)
 		io.num_waiting -= 1
-		append(&io.free_list, completion)
+
+		_, err := append(&io.free_list, completion)
+		if err != nil { return .Allocation_Failed }
 	}
 
-	return os.ERROR_NONE
+	return nil
 }
 
 // Runs the callback after the timeout, using the kqueue.
 _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout) -> ^Completion {
 	completion, ok := pop_safe(&io.free_list)
 	if !ok {
-		completion = new(Completion, io.allocator)
+		completion = new_completion(io)
 	}
 
 	completion.ctx = context
 	completion.user_data = user
 	completion.cb = callback
-	completion.timeout = time.time_add(time.now(), dur)
+	completion.timeout = time.time_add(io.now, dur)
 
 	io.num_waiting += 1
-	append(&io.pending, completion)
+	push_pending(io, completion)
 	return completion
 }
 
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
 	completion, ok := pop_safe(&io.free_list)
 	if !ok {
-		completion = new(Completion, io.allocator)
+		completion = new_completion(io)
 	}
 
 	completion.ctx = context
@@ -108,7 +110,7 @@ _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion
 	completion.cb = callback
 
 	io.num_waiting += 1
-	append(&io.done, completion)
+	push_done(io, completion)
 	return completion
 }
 

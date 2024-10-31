@@ -1479,7 +1479,8 @@ function odinSetupDefaultImports(wasmMemoryInterface, consoleElement, memory) {
 				const callback = wmi.exports.__indirect_function_table.get(cbIdx);
 
 				// Increase the `nbio.IO` `num_wating`.
-				const io = wmi.loadPtr(clientPtr);
+				const ctx = wmi.exports.http_client_req_ctx(reqPtr);
+				const io  = wmi.exports.nbio_io_ptr(ctx);
 				let numWaiting = wmi.loadInt(io);
 				wmi.storeInt(io, numWaiting+1);
 
@@ -2098,6 +2099,10 @@ async function runWasm(wasmPath, consoleElement, extraForeignImports, wasmMemory
 			const dt = (currTimeStamp - prevTimeStamp)*0.001;
 			prevTimeStamp = currTimeStamp;
 
+			if (exports.nbio_tick) {
+				exports.nbio_tick(odin_ctx);
+			}
+
 			if (!exports.step(dt, odin_ctx)) {
 				exports._end();
 				return;
@@ -2106,6 +2111,21 @@ async function runWasm(wasmPath, consoleElement, extraForeignImports, wasmMemory
 			window.requestAnimationFrame(step);
 		}
 
+		window.requestAnimationFrame(step);
+	} else if (exports.nbio_tick) {
+		const odin_ctx = exports.default_context_ptr();
+		const io = exports.nbio_io_ptr(odin_ctx);
+		function step(_) {
+			exports.nbio_tick(odin_ctx);
+
+			const numWaiting = wasmMemoryInterface.loadInt(io);
+			if (numWaiting <= 0) {
+				exports._end();
+				return;
+			}
+
+			window.requestAnimationFrame(step);
+		}
 		window.requestAnimationFrame(step);
 	} else {
 		exports._end();

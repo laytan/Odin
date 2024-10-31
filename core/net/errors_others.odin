@@ -1,6 +1,7 @@
 #+build !darwin
 #+build !windows
 #+build !linux
+#+build !freebsd
 package net
 
 import "core:c"
