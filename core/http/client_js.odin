@@ -6,17 +6,14 @@ import "base:runtime"
 import "core:nbio"
 import "core:slice"
 
+@(extra_linker_flags="--export-table")
 foreign import "odin_io"
 
 _Client :: struct {
-	io:        ^nbio.IO,
 	allocator: runtime.Allocator,
 }
-#assert(offset_of(_Client, io) == 0, "Relied upon in JS")
 
-// TODO: use given IO.
-_client_init :: proc(c: ^Client, io: ^nbio.IO, allocator := context.allocator) {
-	c.io = io
+_client_init :: proc(c: ^Client, allocator := context.allocator) {
 	c.allocator = allocator
 }
 
@@ -42,6 +39,11 @@ In_Flight :: struct {
 	user: rawptr,
 	cb:   On_Response,
 	ctx:  runtime.Context,
+}
+
+@(export, private="file")
+http_client_req_ctx :: proc(req: ^In_Flight) -> ^runtime.Context {
+	return &req.ctx
 }
 
 @(private="file")

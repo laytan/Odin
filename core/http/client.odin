@@ -44,6 +44,8 @@ Request_Error :: enum {
 	DNS,
 }
 
+// TODO: maybe should hold the client so the callback can get the client without passing it through.
+// + response_destroy could be made to use that instead of taking the client too.
 Client_Response :: struct {
 	status:  Status,
 	body:    []byte,
@@ -106,6 +108,8 @@ responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
 }
 
 sync_one_request :: proc(c: ^Client, req: Client_Request) -> (Client_Response, Request_Error) {
+	not_js()
+
 	State :: struct {
 		res:  Client_Response,
 		err:  Request_Error,
@@ -135,6 +139,8 @@ sync_one_request :: proc(c: ^Client, req: Client_Request) -> (Client_Response, R
 Sends out all requests given asynchronously in chunks of 64.
 */
 sync_requests :: proc(c: ^Client, reqs: ..Client_Request) -> []Multi_Res {
+	not_js()
+
 	res, err := make([]Multi_Res, len(reqs))
 	if err != nil { return nil }
 	sync_requests_into(c, reqs, res)
@@ -145,6 +151,8 @@ sync_requests :: proc(c: ^Client, reqs: ..Client_Request) -> []Multi_Res {
 Sends out all requests given asynchronously in chunks of 64.
 */
 sync_requests_into :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res) #no_bounds_check {
+	not_js()
+
 	assert(len(res) >= len(reqs))
 
 	Done :: bit_set[0..<64; u64]
@@ -187,4 +195,9 @@ sync_request :: proc {
 	sync_one_request,
 	sync_requests,
 	sync_requests_into,
+}
+
+@(private="file", disabled=ODIN_OS != .JS)
+not_js :: proc(loc := #caller_location) {
+	panic("Synchronized HTTP requests cannot be done in JS, you have to use the http.request() procedure and use callbacks", loc=loc)
 }

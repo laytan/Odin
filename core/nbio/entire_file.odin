@@ -1,3 +1,4 @@
+#+build !js
 package nbio
 
 import "base:runtime"
