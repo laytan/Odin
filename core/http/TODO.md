@@ -22,6 +22,7 @@
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
 - [x] Support the BSDs
 	- [x] verify kqueue against bsd headers
+- [ ] Investigate sendfile and splice for Linux (if it can be used and where)
 
 ## HTTP Server
 
@@ -32,10 +33,10 @@
 - [x] `panic` when user does `free_all` on the given temp ally
 - [x] in `http.respond`, set the `context.temp_allocator` back to the current connection's, so a user changing it doesn't fuck it up
 - [ ] Add an API to set a custom temp allocator
-- [ ] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
-- [ ] Regex router
+- [x] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
 - [ ] A way to say: "get the body before calling this handler"
 - [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
+- [x] Regex router
 
 ## HTTP Client
 
