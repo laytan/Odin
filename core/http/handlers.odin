@@ -7,8 +7,8 @@ import "core:strconv"
 import "core:sync"
 import "core:time"
 
-Handler_Proc :: proc(handler: ^Handler, req: ^Request, res: ^Response)
-Handle_Proc :: proc(req: ^Request, res: ^Response)
+Handler_Proc :: proc(handler: ^Handler, ctx: ^Context)
+Handle_Proc :: proc(ctx: ^Context)
 
 Handler :: struct {
 	user_data: rawptr,
@@ -20,9 +20,9 @@ handler :: proc(handle: Handle_Proc) -> Handler {
 	h: Handler
 	h.user_data = rawptr(handle)
 
-	handle := proc(h: ^Handler, req: ^Request, res: ^Response) {
+	handle := proc(h: ^Handler, ctx: ^Context) {
 		p := (Handle_Proc)(h.user_data)
-		p(req, res)
+		p(ctx)
 	}
 
 	h.handle = handle
@@ -82,7 +82,7 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 	data.next_sweep = time.time_add(nbio.now(), opts.window)
 	h.user_data = data
 
-	h.handle = proc(h: ^Handler, req: ^Request, res: ^Response) {
+	h.handle = proc(h: ^Handler, using ctx: ^Context) {
 		data := (^Rate_Limit_Data)(h.user_data)
 
 		now := nbio.now()
@@ -116,7 +116,7 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 		}
 
 		next := h.next.(^Handler)
-		next.handle(next, req, res)
+		next.handle(next, ctx)
 	}
 
 	return h

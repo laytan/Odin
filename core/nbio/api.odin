@@ -29,6 +29,16 @@ run :: proc() -> General_Error {
 	return nil
 }
 
+run_until :: proc(done: ^bool) -> General_Error {
+	if !g_io.initialized { return nil }
+	for _num_waiting(&g_io) > 0 && !done^ {
+		if errno := _tick(&g_io); errno != nil {
+			return errno
+		}
+	}
+	return nil
+}
+
 /*
 Returns the number of in-progress IO to be completed.
 */

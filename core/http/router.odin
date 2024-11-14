@@ -41,15 +41,15 @@ router :: proc(router: ^Router) -> Handler {
 	h: Handler
 	h.user_data = router
 
-	h.handle = proc(handler: ^Handler, req: ^Request, res: ^Response) {
+	h.handle = proc(handler: ^Handler, using ctx: ^Context) {
 		router := (^Router)(handler.user_data)
 		rline := req.line.(Requestline)
 
-		if routes_try(router.routes[rline.method][:], req, res) {
+		if routes_try(router.routes[rline.method][:], ctx) {
 			return
 		}
 
-		if routes_try(router.all[:], req, res) {
+		if routes_try(router.all[:], ctx) {
 			return
 		}
 
@@ -225,13 +225,13 @@ route_add :: proc(router: ^Router, routes: ^[dynamic]Route, pattern: string, han
 }
 
 @(private)
-routes_try :: proc(routes: []Route, req: ^Request, res: ^Response) -> bool {
+routes_try :: proc(routes: []Route, using ctx: ^Context) -> bool {
 	for route in routes {
 		capture, matched := regex.match(route.regex, req.url.path, context.temp_allocator, context.temp_allocator)
 		if matched {
 			req.url_params = capture.groups[1:]
 			rh := route.handler
-			rh.handle(&rh, req, res)
+			rh.handle(&rh, ctx)
 			return true
 		}
 	}
