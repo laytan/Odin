@@ -311,12 +311,6 @@ request_path_write :: proc(w: io.Writer, target: URL) -> io.Error {
 	return nil
 }
 
-request_path :: proc(target: URL, allocator := context.allocator) -> (rq_path: string) {
-	res := strings.builder_make(0, len(target.path), allocator)
-	request_path_write(strings.to_writer(&res), target)
-	return strings.to_string(res)
-}
-
 Status :: enum {
 	Continue                        = 100,
 	Switching_Protocols             = 101,
@@ -387,7 +381,8 @@ Status :: enum {
 	Network_Authentication_Required = 511,
 }
 
-_status_strings: [max(Status) + Status(1)]string
+@(private)
+_status_strings: #sparse [Status]string
 
 // Populates the status_strings like a map from status to their string representation.
 // Where an empty string means an invalid code.
