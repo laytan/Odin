@@ -356,6 +356,7 @@ Connection :: struct {
 	scanner:        Scanner,
 	temp_allocator: virtual.Arena,
 	loop:           Loop,
+	ctx:            Context,
 
 	// Need to keep track of this, if (during shutdown) the socket is closed we need to manually cancel
 	// operations on it.
@@ -370,6 +371,11 @@ Loop :: struct {
 	conn: ^Connection,
 	req:  Request,
 	res:  Response,
+}
+
+Context :: struct {
+	req:  ^Request,
+	res:  ^Response,
 }
 
 _connection_close :: proc(c: ^Connection, loc := #caller_location) {
@@ -636,7 +642,8 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 				context.temp_allocator = no_free_all_allocator(l.conn)
 			}
 
-			l.conn.server.handler.handle(&l.conn.server.handler, &l.req, &l.res)
+			l.conn.ctx = {&l.req, &l.res}
+			l.conn.server.handler.handle(&l.conn.server.handler, &l.conn.ctx)
 		}
 	}
 }

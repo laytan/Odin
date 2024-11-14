@@ -20,6 +20,7 @@
 - [x] Build/update openssl using CI (on a cron?)
 - [ ] move tests to listening on port 0 (which gets a port assigned by kernel) and query the actual port
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
+	- [ ] benchmark the difference between the various nbio things with a callback vs taking over the event loop until an operation completes (http.body vs http.body_cb), if looping is fine, do that everywhere by default
 - [x] Support the BSDs
 	- [x] verify kqueue against bsd headers
 - [ ] Investigate sendfile and splice for Linux (if it can be used and where)
@@ -34,9 +35,9 @@
 - [x] in `http.respond`, set the `context.temp_allocator` back to the current connection's, so a user changing it doesn't fuck it up
 - [ ] Add an API to set a custom temp allocator
 - [x] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
-- [ ] A way to say: "get the body before calling this handler"
 - [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
 - [x] Regex router
+- [ ] Remove rate limit middleware; it's kinda bad/basic and easy to add userland
 
 ## HTTP Client
 

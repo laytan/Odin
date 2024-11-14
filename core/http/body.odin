@@ -7,6 +7,7 @@ import "core:log"
 import "core:net"
 import "core:strconv"
 import "core:strings"
+import "core:nbio"
 
 Body :: string
 
@@ -33,7 +34,7 @@ Do not call this more than once.
 
 **Tip** If an error is returned, easily respond with an appropriate error code like this, `http.respond(res, http.body_error_status(err))`.
 */
-body :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, cb: Body_Callback) {
+body :: proc(sub: ^Has_Body, max_length: int, user_data: rawptr, cb: Body_Callback) {
 	assert(sub._body_ok == nil, "you can only call body once per request")
 
 	enc_header, ok := headers_get_unsafe(sub.headers, "transfer-encoding")
@@ -42,6 +43,31 @@ body :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, cb: Body_C
 	} else {
 		_body_length(sub, max_length, user_data, cb)
 	}
+}
+
+body_sync :: proc(sub: ^Has_Body, max_length: int) -> (Body, Body_Error) {
+	Ret :: struct {
+		done: bool,
+		body: Body,
+		err:  Body_Error,
+	}
+	r: Ret
+
+	body(sub, max_length, &r, proc(r: rawptr, body: Body, err: Body_Error) {
+		r := (^Ret)(r)
+		r.done = true
+		r.body = body
+		r.err  = err
+	})
+
+	if err := nbio.run_until(&r.done); err != nil {
+		if r.err == nil {
+			r.err = .Unknown
+		}
+		log.errorf("nbio: %v", nbio.error_string(err))
+	}
+
+	return r.body, r.err
 }
 
 /*
