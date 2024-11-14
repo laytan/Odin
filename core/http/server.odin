@@ -140,7 +140,7 @@ listen :: proc(
 }
 
 serve :: proc(s: ^Server, h: Handler) -> (err: net.Network_Error) {
-	assert(td.state == .Listening)
+	assert(td.state == .Listening, "http server is not listening, listen before serve")
 	s.handler = h
 
 	thread_count := max(0, s.opts.thread_count - 1)
