@@ -7,9 +7,8 @@ import "core:log"
 import "core:net"
 import "core:strconv"
 import "core:strings"
-import "core:nbio"
 
-Body :: string
+Body :: []byte
 
 Body_Callback :: #type proc(user_data: rawptr, body: Body, err: Body_Error)
 
@@ -17,8 +16,22 @@ Body_Error :: bufio.Scanner_Error
 
 Has_Body :: struct {
 	headers: Headers,
-	_body_ok: Maybe(bool),
+	_body: struct {
+		data:     []byte,
+		err:      Body_Error,
+		consumed: bool,
+		cbs: struct {
+			using _: _Cb,
+			others: [dynamic]_Cb,
+		},
+	},
 	_scanner: ^Scanner,
+}
+
+@(private="file")
+_Cb :: struct {
+	cb:        Body_Callback,
+	user_data: rawptr,
 }
 
 /*
@@ -35,47 +48,62 @@ Do not call this more than once.
 **Tip** If an error is returned, easily respond with an appropriate error code like this, `http.respond(res, http.body_error_status(err))`.
 */
 body :: proc(sub: ^Has_Body, max_length: int, user_data: rawptr, cb: Body_Callback) {
-	assert(sub._body_ok == nil, "you can only call body once per request")
-
-	enc_header, ok := headers_get_unsafe(sub.headers, "transfer-encoding")
-	if ok && strings.has_suffix(enc_header, "chunked") {
-		_body_chunked(sub, max_length, user_data, cb)
-	} else {
-		_body_length(sub, max_length, user_data, cb)
+	if sub._body.consumed {
+		cb(user_data, sub._body.data, sub._body.err)
+		return
 	}
-}
 
-body_sync :: proc(sub: ^Has_Body, max_length: int) -> (Body, Body_Error) {
-	Ret :: struct {
-		done: bool,
-		body: Body,
-		err:  Body_Error,
-	}
-	r: Ret
+	if sub._body.cbs.cb == nil {
+		sub._body.cbs.cb        = cb
+		sub._body.cbs.user_data = user_data
 
-	body(sub, max_length, &r, proc(r: rawptr, body: Body, err: Body_Error) {
-		r := (^Ret)(r)
-		r.done = true
-		r.body = body
-		r.err  = err
-	})
-
-	if err := nbio.run_until(&r.done); err != nil {
-		if r.err == nil {
-			r.err = .Unknown
+		enc_header, ok := headers_get_unsafe(sub.headers, "transfer-encoding")
+		if ok && strings.has_suffix(enc_header, "chunked") {
+			_body_chunked(sub, max_length)
+		} else {
+			_body_length(sub, max_length)
 		}
-		log.errorf("nbio: %v", nbio.error_string(err))
+	} else {
+		context.allocator = context.temp_allocator // TODO: FUCK
+		append(&sub._body.cbs.others, _Cb{
+			cb        = cb,
+			user_data = user_data,
+		})
 	}
-
-	return r.body, r.err
 }
+
+// TODO: should we have this?
+// body_sync :: proc(sub: ^Has_Body, max_length: int) -> (Body, Body_Error) {
+// 	Ret :: struct {
+// 		done: bool,
+// 		body: Body,
+// 		err:  Body_Error,
+// 	}
+// 	r: Ret
+//
+// 	body(sub, max_length, &r, proc(r: rawptr, body: Body, err: Body_Error) {
+// 		r := (^Ret)(r)
+// 		r.done = true
+// 		r.body = body
+// 		r.err  = err
+// 	})
+//
+// 	if err := nbio.run_until(&r.done); err != nil {
+// 		if r.err == nil {
+// 			r.err = .Unknown
+// 		}
+// 		log.errorf("nbio: %v", nbio.error_string(err))
+// 	}
+//
+// 	return r.body, r.err
+// }
 
 /*
 Parses a URL encoded body, aka bodies with the 'Content-Type: application/x-www-form-urlencoded'.
 
 Key&value pairs are percent decoded and put in a map.
 */
-body_url_encoded :: proc(plain: Body, allocator := context.temp_allocator) -> (res: map[string]string, ok: bool) {
+body_url_encoded :: proc(plain: string, allocator := context.temp_allocator) -> (res: map[string]string, ok: bool) {
 
 	insert :: proc(m: ^map[string]string, plain: string, keys: int, vals: int, end: int, allocator := context.temp_allocator) -> bool {
 		has_value := vals != -1
@@ -145,32 +173,28 @@ body_error_status :: proc(e: Body_Error) -> Status {
 	}
 }
 
-
 // "Decodes" a request body based on the content length header.
 // Meant for internal usage, you should use `http.request_body`.
-_body_length :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, cb: Body_Callback) {
-	sub._body_ok = false
-
+_body_length :: proc(sub: ^Has_Body, max_length: int = -1) {
 	len, ok := headers_get_unsafe(sub.headers, "content-length")
 	if !ok {
-		cb(user_data, "", nil)
+		_body_do_cbs(sub, nil, nil)
 		return
 	}
 
 	ilen, lenok := strconv.parse_int(len, 10)
 	if !lenok {
-		cb(user_data, "", .Bad_Read_Count)
+		_body_do_cbs(sub, nil, .Bad_Read_Count)
 		return
 	}
 
 	if max_length > -1 && ilen > max_length {
-		cb(user_data, "", .Too_Long)
+		_body_do_cbs(sub, nil, .Too_Long)
 		return
 	}
 
 	if ilen == 0 {
-		sub._body_ok = true
-		cb(user_data, "", nil)
+		_body_do_cbs(sub, nil, nil)
 		return
 	}
 
@@ -179,10 +203,7 @@ _body_length :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, cb
 	sub._scanner.split          = scan_num_bytes
 	sub._scanner.split_data     = rawptr(uintptr(ilen))
 
-	sub._body_ok = true
-	scanner_scan2(sub._scanner, user_data, cb, proc(user_data: rawptr, cb: Body_Callback, token: string, err: bufio.Scanner_Error) {
-		cb(user_data, token, err)
-	})
+	scanner_scan(sub._scanner, sub, _body_do_cbs_string)
 }
 
 /*
@@ -214,14 +235,13 @@ Content-Length := length
 Remove "chunked" from Transfer-Encoding
 Remove Trailer from existing header fields
 */
-_body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, cb: Body_Callback) {
-	sub._body_ok = false
+_body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 
 	on_scan :: proc(s: ^Chunked_State, size_line: string, err: bufio.Scanner_Error) {
 		size_line := size_line
 
 		if err != nil {
-			s.cb(s.user_data, "", err)
+			_body_do_cbs(s.sub, nil, err)
 			return
 		}
 
@@ -234,7 +254,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 		size, ok := strconv.parse_int(string(size_line), 16)
 		if !ok {
 			log.infof("Encountered an invalid chunk size when decoding a chunked body: %q", string(size_line))
-			s.cb(s.user_data, "", .Bad_Read_Count)
+			_body_do_cbs(s.sub, nil, .Bad_Read_Count)
 			return
 		}
 
@@ -245,7 +265,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 		}
 
 		if s.max_length > -1 && strings.builder_len(s.buf) + size > s.max_length {
-			s.cb(s.user_data, "", .Too_Long)
+			_body_do_cbs(s.sub, nil, .Too_Long)
 			return
 		}
 
@@ -259,7 +279,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 
 	on_scan_chunk :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
 		if err != nil {
-			s.cb(s.user_data, "", err)
+			_body_do_cbs(s.sub, nil, err)
 			return
 		}
 
@@ -270,7 +290,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 
 		on_scan_empty_line :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
 			if err != nil {
-				s.cb(s.user_data, "", err)
+				_body_do_cbs(s.sub, nil, err)
 				return
 			}
 			assert(len(token) == 0)
@@ -295,15 +315,14 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 			headers_set_unsafe(&s.sub.headers, "transfer-encoding", new_te_header)
 			s.sub.headers.readonly = true
 
-			s.sub._body_ok = true
-			s.cb(s.user_data, strings.to_string(s.buf), nil)
+			_body_do_cbs(s.sub, s.buf.buf[:], nil)
 			return
 		}
 
 		key, ok := header_parse(&s.sub.headers, string(line), context.temp_allocator)
 		if !ok {
 			log.infof("Invalid header when decoding chunked body: %q", string(line))
-			s.cb(s.user_data, "", .Unknown)
+			_body_do_cbs(s.sub, nil, .Unknown)
 			return
 		}
 
@@ -319,9 +338,6 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 	Chunked_State :: struct {
 		sub:        ^Has_Body,
 		max_length: int,
-		user_data:  rawptr,
-		cb:         Body_Callback,
-
 		buf:        strings.Builder,
 	}
 
@@ -332,9 +348,29 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1, user_data: rawptr, c
 
 	s.sub        = sub
 	s.max_length = max_length
-	s.user_data  = user_data
-	s.cb         = cb
 
 	s.sub._scanner.split = scan_lines
 	scanner_scan(s.sub._scanner, s, on_scan)
+}
+
+@(private="file")
+_body_do_cbs_bytes :: proc(sub: ^Has_Body, body: Body, err: Body_Error) {
+	sub._body.err = err
+	sub._body.consumed = true
+
+	sub._body.cbs.cb(sub._body.cbs.user_data, body, err)
+	for other in sub._body.cbs.others {
+		other.cb(other.user_data, body, err)
+	}
+}
+
+@(private="file")
+_body_do_cbs_string :: proc(sub: ^Has_Body, body: string, err: Body_Error) {
+	_body_do_cbs(sub, transmute([]byte)body, err)
+}
+
+@(private="file")
+_body_do_cbs :: proc {
+	_body_do_cbs_string,
+	_body_do_cbs_bytes,
 }

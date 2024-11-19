@@ -549,7 +549,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 		scanner_init(&r.conn.scanner, r, scanner_recv)
 
 		r.conn.will_close = false
-		r.conn._body_ok = nil
+		// r.conn._body_ok = nil // TODO
 
 		scanner_recv :: proc(r: rawptr, buf: []byte, s: ^Scanner, callback: On_Scanner_Read) {
 			r := (^In_Flight)(r)
@@ -733,7 +733,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			body(&r.conn.body, -1, r, on_body)
 		}
 
-		on_body :: proc(r: rawptr, body: string, err: Body_Error) {
+		on_body :: proc(r: rawptr, body: []byte, err: Body_Error) {
 			r := (^In_Flight)(r)
 			if err != nil {
 				handle_scanner_err(r, err)

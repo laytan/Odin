@@ -26,9 +26,8 @@ Response :: struct {
 	on_sent_ud: rawptr,
 
 	// Only for internal usage.
-	_conn:            ^Connection,
-	_buf:             bytes.Buffer,
-	_heading_written: bool,
+	_conn: ^Connection,
+	_buf:  bytes.Buffer,
 }
 
 response_init :: proc(r: ^Response, allocator := context.allocator) {
@@ -217,8 +216,7 @@ You can pass `content_length < 0` to omit the content-length header, note that t
 required on most responses, but there are things like transfer-encodings that could leave it out.
 */
 _response_write_heading :: proc(r: ^Response, content_length: int) {
-	if r._heading_written { return }
-	r._heading_written = true
+	if bytes.buffer_length(&r._buf) > 0 { return }
 
 	ws   :: bytes.buffer_write_string
 	conn := r._conn
@@ -292,7 +290,24 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) {
 	assert(!r.sent, "response has already been sent", loc)
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
-	r.sent = true
+
+	_response_write_heading(r, 0)
+
+	user_ptr:   rawptr
+	user_index: int
+	if status_is_informational(r.status) {
+		buf := bytes.buffer_to_bytes(&r._buf)
+
+		user_ptr = raw_data(buf)
+		user_index = len(buf)
+
+		r._buf = {}
+		r._buf.buf.allocator = context.temp_allocator
+	} else {
+		r.sent = true
+	}
+	context.user_ptr   = user_ptr
+	context.user_index = user_index
 
 	check_body :: proc(res: rawptr, body: Body, err: Body_Error) {
 		res := cast(^Response)res
@@ -313,14 +328,9 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	// its response, since otherwise the remaining data on a persistent
 	// connection would be misinterpreted as the next request.
 	if !response_must_close(&conn.loop.req, r) {
-
-		// Body has been drained during handling.
-		if _, got_body := conn.loop.req._body_ok.?; got_body {
-			response_send_got_body(r, false)
-		} else {
-			body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, r, check_body)
-		}
-
+		// TODO: if informational, `Max_Post_Handler_Discard_Bytes` does not suffice, user should
+		// be able to choose that.
+		body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, r, check_body)
 	} else {
 		response_send_got_body(r, true)
 	}
@@ -334,11 +344,15 @@ response_send_got_body :: proc(r: ^Response, will_close: bool) {
 		if !connection_set_state(r._conn, .Will_Close) { return }
 	}
 
-	if bytes.buffer_length(&r._buf) == 0 {
-		_response_write_heading(r, 0)
+	buf: []byte
+	if context.user_ptr != nil {
+		buf = ([^]byte)(context.user_ptr)[:context.user_index]
+	} else {
+		buf = bytes.buffer_to_bytes(&r._buf)
 	}
 
-	buf := bytes.buffer_to_bytes(&r._buf)
+	log.debug("\n", string(buf), sep="")
+
 	nbio.send_all_tcp(conn.socket, buf, conn, on_response_sent)
 }
 
@@ -358,13 +372,16 @@ on_response_sent :: proc(conn_: rawptr, sent: int, err: net.TCP_Send_Error) {
 // Response has been sent, clean up and close/handle next.
 @(private)
 clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
+	// TODO: make work as optional callback to a respond call, maybe have a respond_informational() for it.
 	if conn.loop.res.on_sent != nil {
 		conn.loop.res.on_sent(conn, conn.loop.res.on_sent_ud)
 	}
 
-	// If the response is switching protocol, do not try to handle new
-	// requests, this is now the user's connection to deal with.
-	if conn.loop.res.status == .Switching_Protocols {
+	// If the response is informational, do not try to handle new
+	// requests yet, we are still finishing this one.
+	// NOTE: using context here, the status could have already changed for the next normal response.
+	is_informational := context.user_ptr != nil
+	if is_informational {
 		return
 	}
 
@@ -413,12 +430,6 @@ response_must_close :: proc(req: ^Request, res: ^Response) -> bool {
 
 	// If we are responding with a close connection header, make sure we close.
 	if res, res_has := headers_get_unsafe(res.headers, "connection"); res_has && res == "close" {
-		return true
-	}
-
-	// If the body was tried to be received, but failed, close.
-	if body_ok, got_body := req._body_ok.?; got_body && !body_ok {
-		headers_set_close(&res.headers)
 		return true
 	}
 

@@ -137,7 +137,7 @@ respond_dir :: proc(r: ^Response, base, target, request: string, loc := #caller_
 		return
 	}
 
-	file_path := filepath.join([]string{"./", target, strings.trim_prefix(req_clean, base_clean)}, context.temp_allocator)
+	file_path := filepath.join({"./", target, strings.trim_prefix(req_clean, base_clean)}, context.temp_allocator)
 	respond_file(r, file_path, loc = loc)
 }
 
