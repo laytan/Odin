@@ -3,6 +3,7 @@ package http
 import "core:fmt"
 import "core:io"
 import "core:path/filepath"
+import "core:reflect"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
@@ -516,7 +517,7 @@ _mime_to_content_type := [Mime_Type]string{
 	.Wasm        = "application/wasm",
 }
 
-mime_to_content_type :: proc(m: Mime_Type) -> string {
-	assert(m >= .Plain && m <= .Wasm)
+mime_to_content_type :: proc(m: Mime_Type) -> string #no_bounds_check {
+	assert(reflect.enum_value_has_name(m))
 	return _mime_to_content_type[m]
 }
