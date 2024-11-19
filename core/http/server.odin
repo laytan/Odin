@@ -611,11 +611,12 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		l.conn.scanner.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
 
 		// Automatically respond with a continue status when the client has the Expect: 100-continue header.
-		if expect, ok := headers_get_unsafe(l.req.headers, "expect");
+		if expect, ok := headers_get(&l.req.headers, "expect");
 			ok && expect == "100-continue" && l.conn.server.opts.auto_expect_continue {
 
 			l.res.status = .Continue
 
+			// TODO: this does not work anymore since we expect another response after 1xx responses.
 			respond(&l.res)
 			return
 		}

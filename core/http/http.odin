@@ -61,13 +61,13 @@ requestline_write :: proc(w: io.Writer, rline: Requestline) -> io.Error {
 	switch t in rline.target {
 	case string:
 		url := url_parse(t)              
-		request_path_write(w, url)                                    or_return // <METHOD> <SP> <TARGET>
+		request_path_write(w, url)                  or_return // <METHOD> <SP> <TARGET>
 	case URL:
-		request_path_write(w, t)                                      or_return // <METHOD> <SP> <TARGET>
+		request_path_write(w, t)                    or_return // <METHOD> <SP> <TARGET>
 	}
 
 	io.write_byte(w, ' ')                           or_return // <METHOD> <SP> <TARGET> <SP>
-	version_write(w, rline.version)                                   or_return // <METHOD> <SP> <TARGET> <SP> <VERSION>
+	version_write(w, rline.version)                 or_return // <METHOD> <SP> <TARGET> <SP> <VERSION>
 	io.write_string(w, "\r\n")                      or_return // <METHOD> <SP> <TARGET> <SP> <VERSION> <CRLF>
 
 	return nil
@@ -129,6 +129,7 @@ Method :: enum u8 {
 	Trace,
 }
 
+@(private="file")
 _method_strings := [?]string{"GET", "POST", "DELETE", "PATCH", "PUT", "HEAD", "CONNECT", "OPTIONS", "TRACE"}
 
 method_string :: proc(m: Method) -> string #no_bounds_check {
@@ -147,7 +148,7 @@ method_parse :: proc(m: string) -> (method: Method, ok: bool) #no_bounds_check {
 }
 
 // Parses the header and adds it to the headers if valid. The given string is copied.
-header_parse :: proc(headers: ^Headers, line: string, allocator := context.allocator) -> (key: string, ok: bool) {
+header_parse :: proc(headers: ^Headers, line: string, allocator := context.allocator) -> (key: string, ok: bool) #no_bounds_check {
 	// Preceding spaces should not be allowed.
 	(len(line) > 0 && line[0] != ' ') or_return
 
@@ -157,16 +158,12 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 	// There must not be a space before the colon.
 	(line[colon - 1] != ' ') or_return
 
-	// TODO: see if we can do this only if these are given.
-	has_host   := headers_has_unsafe(headers^, "host")
-	cl, has_cl := headers_get_unsafe(headers^, "content-length")
-
-	value := strings.clone(strings.trim_space(line[colon + 1:]), allocator)
-	key = headers_set(headers, line[:colon], value)
+	key    = line[:colon]
+	value := strings.trim_space(line[colon + 1:])
 
 	// RFC 7230 5.4: Server MUST respond with 400 to any request
 	// with multiple "Host" header fields.
-	if key == "host" && has_host {
+	if headers_cmp(key, "host") == .Equal && headers_has(headers, "host") {
 		return
 	}
 
@@ -175,12 +172,58 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 	// field-values or a single Content-Length header field having an
 	// invalid value, then the message framing is invalid and the
 	// recipient MUST treat it as an unrecoverable error.
-	if key == "content-length" && has_cl && cl != value {
-		return
+	if headers_cmp(key, "content-length") == .Equal {
+		if cl, has_cl := headers_get(headers, "content-length"); has_cl {
+			if cl != value {
+				return
+			}
+		}
 	}
+
+	headers_set(headers, key, strings.clone(value, allocator))
 
 	ok = true
 	return
+}
+
+@(private="file")
+allowed_trailers: Headers
+
+@(private="file", init)
+init_allowed_trailers :: proc() {
+	headers_init(&allowed_trailers)
+	// Message framing:
+	headers_set(&allowed_trailers, "transfer-encoding", "")
+	headers_set(&allowed_trailers, "content-length", "")
+	// Routing:
+	headers_set(&allowed_trailers, "host", "")
+	// Request modifiers:
+	headers_set(&allowed_trailers, "if-match", "")
+	headers_set(&allowed_trailers, "if-none-match", "")
+	headers_set(&allowed_trailers, "if-modified-since", "")
+	headers_set(&allowed_trailers, "if-unmodified-since", "")
+	headers_set(&allowed_trailers, "if-range", "")
+	// Authentication:
+	headers_set(&allowed_trailers, "www-authenticate", "")
+	headers_set(&allowed_trailers, "authorization", "")
+	headers_set(&allowed_trailers, "proxy-authenticate", "")
+	headers_set(&allowed_trailers, "proxy-authorization", "")
+	headers_set(&allowed_trailers, "cookie", "")
+	headers_set(&allowed_trailers, "set-cookie", "")
+	// Control data:
+	headers_set(&allowed_trailers, "age", "")
+	headers_set(&allowed_trailers, "cache-control", "")
+	headers_set(&allowed_trailers, "expires", "")
+	headers_set(&allowed_trailers, "date", "")
+	headers_set(&allowed_trailers, "location", "")
+	headers_set(&allowed_trailers, "retry-after", "")
+	headers_set(&allowed_trailers, "vary", "")
+	headers_set(&allowed_trailers, "warning", "")
+	// How to process:
+	headers_set(&allowed_trailers, "content-encoding", "")
+	headers_set(&allowed_trailers, "content-type", "")
+	headers_set(&allowed_trailers, "trailer", "")
+	headers_set(&allowed_trailers, "content-range", "")
 }
 
 // Returns if this is a valid trailer header.
@@ -194,23 +237,7 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 // 7.1 of [RFC7231]), or determining how to process the payload (e.g.,
 // Content-Encoding, Content-Type, Content-Range, and Trailer).
 header_allowed_trailer :: proc(key: string) -> bool {
-	switch key {
-	     // Message framing:
-	case "transfer-encoding", "content-length",
-	     // Routing:
-	     "host",
-	     // Request modifiers:
-         "if-match", "if-none-match", "if-modified-since", "if-unmodified-since", "if-range",
-	     // Authentication:
-	     "www-authenticate", "authorization", "proxy-authenticate", "proxy-authorization", "cookie", "set-cookie",
-	     // Control data:
-	     "age", "cache-control", "expires", "date", "location", "retry-after", "vary", "warning",
-	     // How to process:
-	     "content-encoding", "content-type", "content-range", "trailer":
-		return false
-	case:
-		return true
-	}
+	return headers_has(&allowed_trailers, key)
 }
 
 @(private)

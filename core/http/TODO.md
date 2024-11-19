@@ -36,6 +36,7 @@
 - [ ] Add an API to set a custom temp allocator
 - [x] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
 - [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
+- [ ] An API to read in a streamed fashion, maybe expose the scanner API used internally
 - [x] Regex router
 - [ ] Remove rate limit middleware; it's kinda bad/basic and easy to add userland
 
@@ -52,7 +53,7 @@
 	- [ ] Max concurrency
 - [x] Create a thin VTable interface for the OpenSSL functionality (so we can put openSSL in vendor and the rest in core)
 - [x] Synchronous API (just take over the `nbio` event loop until the request is done)
-- [ ] Poly API
+- [ ] Poly API?
 - [ ] Testing
 	- [ ] Big requests > 16kb (a TLS packet)
 - [x] Consider move into main package, but may be confusing?
