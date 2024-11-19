@@ -1,6 +1,9 @@
 package http
 
-import "core:strings"
+import rb "core:container/rbtree"
+import    "core:strings"
+import    "core:unicode/utf8"
+import    "core:unicode"
 
 // I want custom hash functions on maps :((((((
 
@@ -8,73 +11,98 @@ import "core:strings"
 
 // A case-insensitive ASCII map for storing headers.
 Headers :: struct {
-	_kv:      map[string]string,
+	// _kv:      map[string]string,
+	_kv:      rb.Tree(string, string),
 	readonly: bool,
 }
 
 headers_init :: proc(h: ^Headers, allocator := context.allocator) {
-	h._kv.allocator = allocator
+	rb.init_cmp(&h._kv, headers_cmp, allocator)
 }
 
-headers_destroy :: proc(h: Headers) {
-	delete(h._kv)
-}
+headers_cmp :: proc(a, b: string) -> rb.Ordering #no_bounds_check {
+	// TODO: can headers be utf8, or can we just say ascii?
+	// TODO: characters exist where lowercase is more bytes than uppercase.
 
-headers_count :: #force_inline proc(h: Headers) -> int {
-	return len(h._kv)
-}
-
-/*
-Sets a header, given key is first sanitized, final (sanitized) key is returned.
-*/
-headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) -> string {
-	if h.readonly {
-		panic("these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
+	if len(a) < len(b) {
+		return .Less
+	} else if len(a) > len(b) {
+		return .Greater
 	}
 
-	l := sanitize_key(h^, k)
-	h._kv[l] = v
-	return l
+	a, b := a, b
+	for len(a) > 0 {
+		ar, aw := utf8.decode_rune(a)
+		ar = unicode.to_lower(ar)
+		a = a[aw:]
+
+		br, bw := utf8.decode_rune(b)
+		br = unicode.to_lower(br)
+		b = b[bw:]
+
+		if ar < br {
+			return .Less
+		} else if ar > br {
+			return .Greater
+		}
+	}
+
+	return .Equal
 }
 
-/*
-Unsafely set header, given key is assumed to be a lowercase string and to be without newlines. */
-headers_set_unsafe :: #force_inline proc(h: ^Headers, k: string, v: string, loc := #caller_location) {
+// NOTE: only call this if the allocator is not temporary and you have individual free, this
+// iterates the entire tree and is expensive.
+headers_destroy :: proc(h: ^Headers) {
+	rb.destroy(&h._kv, false)
+}
+
+Headers_Iterator :: rb.Iterator(string, string)
+
+headers_iterator :: proc(h: ^Headers) -> Headers_Iterator {
+	return rb.iterator(&h._kv, .Forward)
+}
+
+headers_next :: proc(iter: ^Headers_Iterator) -> (key: string, val: string, ok: bool) {
+	n: ^rb.Node(string, string)
+	n, ok = rb.iterator_next(iter)
+	if n != nil {
+		key = n.key
+		val = n.value
+	}
+	return
+}
+
+headers_count :: #force_inline proc(h: ^Headers) -> int {
+	return rb.len(&h._kv)
+}
+
+headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) {
 	assert(!h.readonly, "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
-	h._kv[k] = v
+	n, ok, _ := rb.find_or_insert(&h._kv, k, v)
+	assert(ok)
+	assert(n.value == v)
 }
 
-headers_get :: proc(h: Headers, k: string) -> (string, bool) #optional_ok {
-	return h._kv[sanitize_key(h, k)]
+headers_get :: proc(h: ^Headers, k: string) -> (string, bool) #optional_ok {
+	return rb.find_value(&h._kv, k)
 }
 
-/*
-Unsafely get header, given key is assumed to be a lowercase string.
-*/
-headers_get_unsafe :: #force_inline proc(h: Headers, k: string) -> (string, bool) #optional_ok {
-	return h._kv[k]
-}
-
-headers_has :: proc(h: Headers, k: string) -> bool {
-	return sanitize_key(h, k) in h._kv
-}
-
-/*
-Unsafely check for a header, given key is assumed to be a lowercase string.
-*/
-headers_has_unsafe :: #force_inline proc(h: Headers, k: string) -> bool {
-	return k in h._kv
+headers_has :: proc(h: ^Headers, k: string) -> bool {
+	n := rb.find(&h._kv, k)
+	return n != nil
 }
 
 headers_delete :: proc(h: ^Headers, k: string) -> (deleted_key: string, deleted_value: string) {
-	return delete_key(&h._kv, sanitize_key(h^, k))
-}
+	n := rb.find(&h._kv, k)
+	if n == nil {
+		return
+	}
 
-/*
-Unsafely delete a header, given key is assumed to be a lowercase string.
-*/
-headers_delete_unsafe :: #force_inline proc(h: ^Headers, k: string) {
-	delete_key(&h._kv, k)
+	deleted_key   = n.key
+	deleted_value = n.value
+
+	rb.remove_node(&h._kv, n, false)
+	return
 }
 
 /* Common Helpers */
@@ -85,22 +113,22 @@ headers_set_content_type :: proc {
 }
 
 headers_set_content_type_string :: #force_inline proc(h: ^Headers, ct: string) {
-	headers_set_unsafe(h, "content-type", ct)
+	headers_set(h, "content-type", ct)
 }
 
 headers_set_content_type_mime :: #force_inline proc(h: ^Headers, ct: Mime_Type) {
-	headers_set_unsafe(h, "content-type", mime_to_content_type(ct))
+	headers_set(h, "content-type", mime_to_content_type(ct))
 }
 
 headers_set_close :: #force_inline proc(h: ^Headers) {
-	headers_set_unsafe(h, "connection", "close")
+	headers_set(h, "connection", "close")
 }
 
 // Validates the headers of a request, from the pov of the server.
 headers_sanitize_for_server :: proc(headers: ^Headers) -> bool {
 	// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
 	// HTTP/1.1 request message that lacks a Host header field.
-	if !headers_has_unsafe(headers^, "host") {
+	if !headers_has(headers, "host") {
 		return false
 	}
 
@@ -115,35 +143,16 @@ headers_sanitize :: proc(headers: ^Headers) -> bool {
 	// the final encoding, the message body length cannot be determined
 	// reliably; the server MUST respond with the 400 (Bad Request)
 	// status code and then close the connection.
-	if enc_header, ok := headers_get_unsafe(headers^, "transfer-encoding"); ok {
+	if enc_header, ok := headers_get(headers, "transfer-encoding"); ok {
 		strings.has_suffix(enc_header, "chunked") or_return
-	}
 
-	// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
-	// Content-Length header field, the Transfer-Encoding overrides the
-	// Content-Length.  Such a message might indicate an attempt to
-	// perform request smuggling (Section 9.5) or response splitting
-	// (Section 9.4) and ought to be handled as an error.
-	if headers_has_unsafe(headers^, "transfer-encoding") && headers_has_unsafe(headers^, "content-length") {
-		headers_delete_unsafe(headers, "content-length")
+		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
+		// Content-Length header field, the Transfer-Encoding overrides the
+		// Content-Length.  Such a message might indicate an attempt to
+		// perform request smuggling (Section 9.5) or response splitting
+		// (Section 9.4) and ought to be handled as an error.
+		headers_delete(headers, "content-length")
 	}
 
 	return true
-}
-
-// Escapes any newlines and converts ASCII to lowercase.
-@(private="file")
-sanitize_key :: proc(h: Headers, k: string) -> string {
-	allocator := h._kv.allocator
-
-	// general +4 in rare case of newlines, so we might not need to reallocate.
-	b := strings.builder_make(0, len(k)+4, allocator)
-	for c in transmute([]byte)k {
-		switch c {
-		case 'A'..='Z': strings.write_byte(&b, c + 32)
-		case '\n':      strings.write_string(&b, "\\n")
-		case:           strings.write_byte(&b, c)
-		}
-	}
-	return strings.to_string(b)
 }

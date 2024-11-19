@@ -5,15 +5,15 @@ package http
 import intr "base:intrinsics"
 
 import      "core:bufio"
+import      "core:http/dns"
 import      "core:log"
 import      "core:mem"
+import      "core:nbio"
 import      "core:net"
+import      "core:slice"
 import      "core:strconv"
 import      "core:strings"
-import      "core:slice"
 import cio  "core:io"
-import      "core:http/dns"
-import      "core:nbio"
 
 _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	c.allocator = allocator
@@ -93,14 +93,15 @@ _client_destroy :: proc(c: ^Client) {
 	log.debug("client destroyed")
 }
 
-_response_destroy :: proc(c: ^Client, res: Client_Response) {
+_response_destroy :: proc(c: ^Client, res: ^Client_Response) {
 	context.allocator = c.allocator
 
-	for k, v in res.headers._kv {
+	iter := headers_iterator(&res.headers)
+	for k, v in headers_next(&iter) {
 		delete(k)
 		delete(v)
 	}
-	headers_destroy(res.headers)
+	headers_destroy(&res.headers)
 
 	for cookie in res.cookies {
 		delete(cookie.name)
@@ -185,7 +186,7 @@ client_connection_destroy :: proc(c: ^Client, conn: ^Client_Connection) {
 
 		strings.builder_destroy(&conn.buf)
 		scanner_destroy(&conn.scanner)
-		headers_destroy(conn.headers)
+		headers_destroy(&conn.headers)
 		free(conn)
 	})
 }
@@ -381,7 +382,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			err := requestline_write(s, { method = r.method, target = r.url, version = {1, 1} })
 			assert(err == nil) // Only really can be an allocator error.
 
-			if !headers_has_unsafe(r.headers, "content-length") {
+			if !headers_has(&r.headers, "content-length") {
 				buf_len := len(r.body)
 				if buf_len == 0 {
 					ws(buf, "content-length: 0\r\n")
@@ -401,21 +402,24 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				}
 			}
 
-			if !headers_has_unsafe(r.headers, "accept") {
+			if !headers_has(&r.headers, "accept") {
 				ws(buf, "accept: */*\r\n")
 			}
 
-			if !headers_has_unsafe(r.headers, "user-agent") {
+			if !headers_has(&r.headers, "user-agent") {
 				ws(buf, "user-agent: odin-http\r\n")
 			}
 
-			if !headers_has_unsafe(r.headers, "host") {
+			if !headers_has(&r.headers, "host") {
 				ws(buf, "host: ")
 				ws(buf, url_parse(r.url).host)
 				ws(buf, "\r\n")
 			}
 
-			for header, value in r.headers._kv {
+			// TODO: escaping headers and cookies.
+
+			iter := headers_iterator(&r.headers)
+			for header, value in headers_next(&iter) {
 				ws(buf, header)
 				ws(buf, ": ")
 				ws(buf, value)
@@ -706,8 +710,8 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			}
 
 			if key == "set-cookie" {
-				cookie_str := headers_get_unsafe(r.conn.headers, "set-cookie")
-				headers_delete_unsafe(&r.conn.headers, "set-cookie")
+				cookie_str := headers_get(&r.conn.headers, "set-cookie")
+				headers_delete(&r.conn.headers, "set-cookie")
 				delete(key, r.c.allocator)
 
 				cookie, cok := cookie_parse(cookie_str)

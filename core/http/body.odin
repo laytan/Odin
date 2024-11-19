@@ -57,7 +57,7 @@ body :: proc(sub: ^Has_Body, max_length: int, user_data: rawptr, cb: Body_Callba
 		sub._body.cbs.cb        = cb
 		sub._body.cbs.user_data = user_data
 
-		enc_header, ok := headers_get_unsafe(sub.headers, "transfer-encoding")
+		enc_header, ok := headers_get(&sub.headers, "transfer-encoding")
 		if ok && strings.has_suffix(enc_header, "chunked") {
 			_body_chunked(sub, max_length)
 		} else {
@@ -176,7 +176,7 @@ body_error_status :: proc(e: Body_Error) -> Status {
 // "Decodes" a request body based on the content length header.
 // Meant for internal usage, you should use `http.request_body`.
 _body_length :: proc(sub: ^Has_Body, max_length: int = -1) {
-	len, ok := headers_get_unsafe(sub.headers, "content-length")
+	len, ok := headers_get(&sub.headers, "content-length")
 	if !ok {
 		_body_do_cbs(sub, nil, nil)
 		return
@@ -306,13 +306,13 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 	on_scan_trailer :: proc(s: ^Chunked_State, line: string, err: bufio.Scanner_Error) {
 		// Headers are done, success.
 		if err != nil || len(line) == 0 {
-			headers_delete_unsafe(&s.sub.headers, "trailer")
+			headers_delete(&s.sub.headers, "trailer")
 
-			te_header := headers_get_unsafe(s.sub.headers, "transfer-encoding")
+			te_header := headers_get(&s.sub.headers, "transfer-encoding")
 			new_te_header := strings.trim_suffix(te_header, "chunked")
 
 			s.sub.headers.readonly = false
-			headers_set_unsafe(&s.sub.headers, "transfer-encoding", new_te_header)
+			headers_set(&s.sub.headers, "transfer-encoding", new_te_header)
 			s.sub.headers.readonly = true
 
 			_body_do_cbs(s.sub, s.buf.buf[:], nil)
