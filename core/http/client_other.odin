@@ -93,8 +93,9 @@ _client_destroy :: proc(c: ^Client) {
 	log.debug("client destroyed")
 }
 
-_response_destroy :: proc(c: ^Client, res: ^Client_Response) {
+_response_destroy :: proc(c: ^Client, res: Client_Response) {
 	context.allocator = c.allocator
+	res := res
 
 	iter := headers_iterator(&res.headers)
 	for k, v in headers_next(&iter) {
@@ -382,7 +383,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			err := requestline_write(s, { method = r.method, target = r.url, version = {1, 1} })
 			assert(err == nil) // Only really can be an allocator error.
 
-			if !headers_has(&r.headers, "content-length") {
+			if !headers_has(r.headers, "content-length") {
 				buf_len := len(r.body)
 				if buf_len == 0 {
 					ws(buf, "content-length: 0\r\n")
@@ -402,15 +403,15 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				}
 			}
 
-			if !headers_has(&r.headers, "accept") {
+			if !headers_has(r.headers, "accept") {
 				ws(buf, "accept: */*\r\n")
 			}
 
-			if !headers_has(&r.headers, "user-agent") {
+			if !headers_has(r.headers, "user-agent") {
 				ws(buf, "user-agent: odin-http\r\n")
 			}
 
-			if !headers_has(&r.headers, "host") {
+			if !headers_has(r.headers, "host") {
 				ws(buf, "host: ")
 				ws(buf, url_parse(r.url).host)
 				ws(buf, "\r\n")
@@ -712,6 +713,8 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 			if headers_cmp(key, "set-cookie") == .Equal {
 				dkey, dval := headers_delete(&r.conn.headers, "set-cookie")
+
+				// TODO: this allocation can be avoided by splitting header_parse into 2 procs (header_split, giving key and val slice, and another that allocates, checks etc.)
 				delete(dkey, r.c.allocator)
 
 				cookie, cok := cookie_parse(dval)

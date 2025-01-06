@@ -163,7 +163,7 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 
 	// RFC 7230 5.4: Server MUST respond with 400 to any request
 	// with multiple "Host" header fields.
-	if headers_cmp(key, "host") == .Equal && headers_has(headers, "host") {
+	if headers_cmp(key, "host") == .Equal && headers_has(headers^, "host") {
 		return
 	}
 
@@ -173,7 +173,7 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 	// invalid value, then the message framing is invalid and the
 	// recipient MUST treat it as an unrecoverable error.
 	if headers_cmp(key, "content-length") == .Equal {
-		if cl, has_cl := headers_get(headers, "content-length"); has_cl {
+		if cl, has_cl := headers_get(headers^, "content-length"); has_cl {
 			if cl != value {
 				return
 			}
@@ -194,6 +194,8 @@ allowed_trailers: Headers
 
 @(private="file", init)
 init_allowed_trailers :: proc() {
+	// TODO: maybe just check each of these in a loop instead.
+
 	headers_init(&allowed_trailers)
 	// Message framing:
 	headers_set(&allowed_trailers, "transfer-encoding", "")
@@ -240,7 +242,7 @@ init_allowed_trailers :: proc() {
 // 7.1 of [RFC7231]), or determining how to process the payload (e.g.,
 // Content-Encoding, Content-Type, Content-Range, and Trailer).
 header_allowed_trailer :: proc(key: string) -> bool {
-	return headers_has(&allowed_trailers, key)
+	return headers_has(allowed_trailers, key)
 }
 
 @(private)

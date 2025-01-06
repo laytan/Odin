@@ -79,7 +79,7 @@ client_destroy :: proc(c: ^Client) {
 	_client_destroy(c)
 }
 
-response_destroy :: proc(c: ^Client, res: ^Client_Response) {
+response_destroy :: proc(c: ^Client, res: Client_Response) {
 	_response_destroy(c, res)
 }
 
@@ -101,7 +101,7 @@ Multi_Res :: struct {
 responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
 	for &res in s {
 		if res.err == nil {
-			response_destroy(c, &res.res)
+			response_destroy(c, res.res)
 		}
 	}
 	delete(s)

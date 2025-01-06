@@ -224,7 +224,7 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
-	reserve_size    := MIN + content_length + (AVG_HEADER_SIZE * headers_count(&r.headers))
+	reserve_size    := MIN + content_length + (AVG_HEADER_SIZE * headers_count(r.headers))
 	bytes.buffer_grow(&r._buf, reserve_size)
 
 	// According to RFC 7230 3.1.2 the reason phrase is insignificant,
@@ -242,15 +242,15 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 	ws(b, "\r\n")
 
 	// Per RFC 9910 6.6.1 a Date header must be added in 2xx, 3xx, 4xx responses.
-	if r.status >= .OK && r.status <= .Internal_Server_Error && !headers_has(&r.headers, "date") {
+	if r.status >= .OK && r.status <= .Internal_Server_Error && !headers_has(r.headers, "date") {
 		ws(b, "date: ")
 		ws(b, server_date(conn.server))
 		ws(b, "\r\n")
 	}
 
 	if (
-		content_length > -1                        &&
-		!headers_has(&r.headers, "content-length") &&
+		content_length > -1                       &&
+		!headers_has(r.headers, "content-length") &&
 		response_needs_content_length(r, conn) \
 	) {
 		if content_length == 0 {
@@ -433,12 +433,12 @@ response_needs_content_length :: proc(r: ^Response, conn: ^Connection) -> bool {
 @(private)
 response_must_close :: proc(req: ^Request, res: ^Response) -> bool {
 	// If the request we are responding to indicates it is closing the connection, close our side too.
-	if req, req_has := headers_get(&req.headers, "connection"); req_has && req == "close" {
+	if req, req_has := headers_get(req.headers, "connection"); req_has && req == "close" {
 		return true
 	}
 
 	// If we are responding with a close connection header, make sure we close.
-	if res, res_has := headers_get(&res.headers, "connection"); res_has && res == "close" {
+	if res, res_has := headers_get(res.headers, "connection"); res_has && res == "close" {
 		return true
 	}
 
