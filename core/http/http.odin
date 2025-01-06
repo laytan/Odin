@@ -180,6 +180,9 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 		}
 	}
 
+	key = strings.clone(key, allocator)
+
+	// TODO: figure out if we need to clone on both client and server, probably don't need to on the server.
 	headers_set(headers, key, strings.clone(value, allocator))
 
 	ok = true
