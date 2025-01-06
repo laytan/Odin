@@ -308,12 +308,10 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 		if err != nil || len(line) == 0 {
 			headers_delete(&s.sub.headers, "trailer")
 
-			te_header := headers_get(&s.sub.headers, "transfer-encoding")
-			new_te_header := strings.trim_suffix(te_header, "chunked")
-
 			s.sub.headers.readonly = false
-			headers_delete(&s.sub.headers, "transfer-encoding")
-			headers_set(&s.sub.headers, "transfer-encoding", new_te_header)
+			dkey, dval := headers_delete(&s.sub.headers, "transfer-encoding")
+			new_val := strings.trim_suffix(dval, "chunked")
+			headers_set(&s.sub.headers, dkey, new_val)
 			s.sub.headers.readonly = true
 
 			_body_do_cbs(s.sub, s.buf.buf[:], nil)

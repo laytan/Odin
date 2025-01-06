@@ -711,11 +711,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			}
 
 			if headers_cmp(key, "set-cookie") == .Equal {
-				cookie_str := headers_get(&r.conn.headers, "set-cookie")
-				headers_delete(&r.conn.headers, "set-cookie")
-				delete(key, r.c.allocator)
+				dkey, dval := headers_delete(&r.conn.headers, "set-cookie")
+				delete(dkey, r.c.allocator)
 
-				cookie, cok := cookie_parse(cookie_str)
+				cookie, cok := cookie_parse(dval)
 				if !cok {
 					handle_bad_response(r, "invalid cookie")
 					return
