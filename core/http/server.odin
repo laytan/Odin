@@ -510,7 +510,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 				log.warnf("[%i] request scanner error: %v", err, l.conn.socket)
 			}
 
-			clean_request_loop(l.conn, close = true)
+			clean_request_loop_err(l.conn, close = true)
 			return
 		}
 
@@ -529,7 +529,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 	on_rline2 :: proc(l: ^Loop, token: string, err: bufio.Scanner_Error) {
 		if err != nil {
 			log.warnf("request scanning error: %v", err)
-			clean_request_loop(l.conn, close = true)
+			clean_request_loop_err(l.conn, close = true)
 			return
 		}
 
@@ -543,7 +543,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 			return
 		case .Invalid_Version_Format, .Not_Enough_Fields:
 			log.warnf("request-line %q invalid: %s", token, err)
-			clean_request_loop(l.conn, close = true)
+			clean_request_loop_err(l.conn, close = true)
 			return
 		case .None:
 			l.req.line = rline
@@ -567,7 +567,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 	on_header_line :: proc(l: ^Loop, token: string, err: bufio.Scanner_Error) {
 		if err != nil {
 			log.warnf("request scanning error: %v", err)
-			clean_request_loop(l.conn, close = true)
+			clean_request_loop_err(l.conn, close = true)
 			return
 		}
 

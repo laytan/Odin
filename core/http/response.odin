@@ -378,14 +378,6 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 		conn.loop.res.on_sent(conn, conn.loop.res.on_sent_ud)
 	}
 
-	// If the response is informational, do not try to handle new
-	// requests yet, we are still finishing this one.
-	// NOTE: using context here, the status could have already changed for the next normal response.
-	is_informational := context.user_ptr != nil
-	if is_informational {
-		return
-	}
-
 	// blocks, size, used := allocator_free_all(&conn.temp_allocator)
 	// log.debugf("temp_allocator had %d blocks of a total size of %m of which %m was used", blocks, size, used)
 	free_all(context.temp_allocator)
@@ -398,9 +390,25 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	if c, ok := close.?; (ok && c) || conn.state == .Will_Close {
 		_connection_close(conn)
 	} else {
+		// If the response is informational, do not try to handle new
+		// requests yet, we are still finishing this one.
+		// NOTE: using context here, the status could have already changed for the next normal response.
+		// TODOO: this is not great.
+		is_informational := context.user_ptr != nil
+		if is_informational {
+			return
+		}
+
 		if !connection_set_state(conn, .Idle) { return }
 		conn_handle_req(conn, context.temp_allocator)
 	}
+}
+
+@(private)
+clean_request_loop_err :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
+	// HACK: making sure clean_request_loop doesn't think it's informational.
+	context.user_ptr = nil
+	clean_request_loop(conn, close)
 }
 
 // A server MUST NOT send a Content-Length header field in any response
