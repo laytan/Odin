@@ -684,12 +684,13 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 			// TODO: max header size.
 
-			headers_init(&r.headers, r.c.allocator)
+			headers_init(&r.conn.headers, r.c.allocator)
 
 			scanner_scan(&r.conn.scanner, r, on_header_line)
 		}
 
 		on_header_line :: proc(r: ^In_Flight, token: string, err: bufio.Scanner_Error) {
+			log.info(token, err)
 			if err != nil {
 				handle_scanner_err(r, err, "failed reading header line")
 				return
@@ -709,7 +710,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				return
 			}
 
-			if key == "set-cookie" {
+			if headers_cmp(key, "set-cookie") == .Equal {
 				cookie_str := headers_get(&r.conn.headers, "set-cookie")
 				headers_delete(&r.conn.headers, "set-cookie")
 				delete(key, r.c.allocator)

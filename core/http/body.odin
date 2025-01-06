@@ -312,6 +312,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			new_te_header := strings.trim_suffix(te_header, "chunked")
 
 			s.sub.headers.readonly = false
+			headers_delete(&s.sub.headers, "transfer-encoding")
 			headers_set(&s.sub.headers, "transfer-encoding", new_te_header)
 			s.sub.headers.readonly = true
 

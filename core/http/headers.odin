@@ -92,7 +92,9 @@ headers_has :: proc(h: ^Headers, k: string) -> bool {
 	return n != nil
 }
 
-headers_delete :: proc(h: ^Headers, k: string) -> (deleted_key: string, deleted_value: string) {
+headers_delete :: proc(h: ^Headers, k: string, loc := #caller_location) -> (deleted_key: string, deleted_value: string) {
+	assert(!h.readonly, "these headers are readonly, did you accidentally try to delete a header on the server request or client response?", loc)
+
 	n := rb.find(&h._kv, k)
 	if n == nil {
 		return
