@@ -72,8 +72,8 @@ headers_next :: proc(iter: ^Headers_Iterator) -> (key: string, val: string, ok: 
 	return
 }
 
-headers_count :: #force_inline proc(h: ^Headers) -> int {
-	return rb.len(&h._kv)
+headers_count :: #force_inline proc(h: Headers) -> int {
+	return rb.len(h._kv)
 }
 
 headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) {
@@ -83,19 +83,19 @@ headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) 
 	assert(n.value == v)
 }
 
-headers_get :: proc(h: ^Headers, k: string) -> (string, bool) #optional_ok {
-	return rb.find_value(&h._kv, k)
+headers_get :: proc(h: Headers, k: string) -> (string, bool) #optional_ok {
+	return rb.find_value(h._kv, k)
 }
 
-headers_has :: proc(h: ^Headers, k: string) -> bool {
-	n := rb.find(&h._kv, k)
+headers_has :: proc(h: Headers, k: string) -> bool {
+	n := rb.find(h._kv, k)
 	return n != nil
 }
 
 headers_delete :: proc(h: ^Headers, k: string, loc := #caller_location) -> (deleted_key: string, deleted_value: string) {
 	assert(!h.readonly, "these headers are readonly, did you accidentally try to delete a header on the server request or client response?", loc)
 
-	n := rb.find(&h._kv, k)
+	n := rb.find(h._kv, k)
 	if n == nil {
 		return
 	}
@@ -105,6 +105,17 @@ headers_delete :: proc(h: ^Headers, k: string, loc := #caller_location) -> (dele
 
 	rb.remove_node(&h._kv, n, false)
 	return
+}
+
+headers_entry :: proc(h: ^Headers, k: string, loc := #caller_location) -> (val: ^string) {
+	assert(!h.readonly, "these headers are readonly, did you accidentally try to get a header on the server request or client response?", loc)
+
+	n := rb.find(h._kv, k)
+	if n == nil {
+		return
+	}
+
+	return &n.value
 }
 
 /* Common Helpers */
@@ -130,7 +141,7 @@ headers_set_close :: #force_inline proc(h: ^Headers) {
 headers_sanitize_for_server :: proc(headers: ^Headers) -> bool {
 	// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
 	// HTTP/1.1 request message that lacks a Host header field.
-	if !headers_has(headers, "host") {
+	if !headers_has(headers^, "host") {
 		return false
 	}
 
@@ -145,7 +156,7 @@ headers_sanitize :: proc(headers: ^Headers) -> bool {
 	// the final encoding, the message body length cannot be determined
 	// reliably; the server MUST respond with the 400 (Bad Request)
 	// status code and then close the connection.
-	if enc_header, ok := headers_get(headers, "transfer-encoding"); ok {
+	if enc_header, ok := headers_get(headers^, "transfer-encoding"); ok {
 		strings.has_suffix(enc_header, "chunked") or_return
 
 		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a

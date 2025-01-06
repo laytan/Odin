@@ -57,7 +57,7 @@ body :: proc(sub: ^Has_Body, max_length: int, user_data: rawptr, cb: Body_Callba
 		sub._body.cbs.cb        = cb
 		sub._body.cbs.user_data = user_data
 
-		enc_header, ok := headers_get(&sub.headers, "transfer-encoding")
+		enc_header, ok := headers_get(sub.headers, "transfer-encoding")
 		if ok && strings.has_suffix(enc_header, "chunked") {
 			_body_chunked(sub, max_length)
 		} else {
@@ -176,7 +176,7 @@ body_error_status :: proc(e: Body_Error) -> Status {
 // "Decodes" a request body based on the content length header.
 // Meant for internal usage, you should use `http.request_body`.
 _body_length :: proc(sub: ^Has_Body, max_length: int = -1) {
-	len, ok := headers_get(&sub.headers, "content-length")
+	len, ok := headers_get(sub.headers, "content-length")
 	if !ok {
 		_body_do_cbs(sub, nil, nil)
 		return
@@ -309,9 +309,8 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			headers_delete(&s.sub.headers, "trailer")
 
 			s.sub.headers.readonly = false
-			dkey, dval := headers_delete(&s.sub.headers, "transfer-encoding")
-			new_val := strings.trim_suffix(dval, "chunked")
-			headers_set(&s.sub.headers, dkey, new_val)
+			entry := headers_entry(&s.sub.headers, "transfer-encoding")
+			entry^ = strings.trim_suffix(entry^, "chunked")
 			s.sub.headers.readonly = true
 
 			_body_do_cbs(s.sub, s.buf.buf[:], nil)

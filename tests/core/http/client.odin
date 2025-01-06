@@ -69,17 +69,16 @@ test_ok :: proc(tt: ^testing.T) {
 
 	http.request(&client, req, &client, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		client := (^http.Client)(user)
-		res := res
 
 		ev(t, err, nil)
 		ev(t, res.status, http.Status.OK)
-		ev(t, http.headers_has(&res.headers, "date"), true)
-		ev(t, http.headers_has(&res.headers, "content-length"), true)
+		ev(t, http.headers_has(res.headers, "date"), true)
+		ev(t, http.headers_has(res.headers, "content-length"), true)
 		ev(t, len(res.body), 0)
 
 		log.info("cleaning up")
 
-		http.response_destroy(client, &res)
+		http.response_destroy(client, res)
 		http.client_destroy(client)
 		http.server_shutdown(&s) // NOTE: this takes a bit because of the close delay.
 	})
@@ -137,15 +136,14 @@ connection_pool :: proc(t: ^testing.T) {
 
 		on_response :: proc(res: http.Client_Response, t: rawptr, err: http.Request_Error) {
 			t := (^testing.T)(t)
-			res := res
 
 			ev(t, err, nil)
 			ev(t, res.status, http.Status.OK)
-			ev(t, http.headers_has(&res.headers, "date"), true)
-			ev(t, http.headers_has(&res.headers, "content-length"), true)
+			ev(t, http.headers_has(res.headers, "date"), true)
+			ev(t, http.headers_has(res.headers, "content-length"), true)
 			ev(t, len(res.body), 0)
 
-			http.response_destroy(&client, &res)
+			http.response_destroy(&client, res)
 		}
 
 		ev(t, nbio.run(), nil)
@@ -192,30 +190,26 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 	state.req = http.get(net.endpoint_to_string(ep))
 
 	http.request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
-		res := res
-
 		ev(state.t, err, nil)
 		ev(state.t, res.status, http.Status.OK)
-		ev(state.t, http.headers_has(&res.headers, "date"), true)
-		ev(state.t, http.headers_has(&res.headers, "content-length"), true)
+		ev(state.t, http.headers_has(res.headers, "date"), true)
+		ev(state.t, http.headers_has(res.headers, "content-length"), true)
 		ev(state.t, len(res.body), 0)
 		log.info("Got first response")
 
-		http.response_destroy(&state.client, &res)
+		http.response_destroy(&state.client, res)
 	})
 
 	send_second_request :: proc(_: rawptr) {
 		http.request(&state.client, state.req, rawptr(nil), proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
-			res := res
-
 			ev(state.t, err, nil)
 			ev(state.t, res.status, http.Status.OK)
-			ev(state.t, http.headers_has(&res.headers, "date"), true)
-			ev(state.t, http.headers_has(&res.headers, "content-length"), true)
+			ev(state.t, http.headers_has(res.headers, "date"), true)
+			ev(state.t, http.headers_has(res.headers, "content-length"), true)
 			ev(state.t, len(res.body), 0)
 			log.info("Got second response")
 
-			http.response_destroy(&state.client, &res)
+			http.response_destroy(&state.client, res)
 			http.client_destroy(&state.client)
 			http.server_shutdown(&state.s) // NOTE: this takes a bit because of the close delay.
 		})
@@ -263,14 +257,13 @@ openssl :: proc(t: ^testing.T) {
 
 	http.request(&s.client, http.get("https://www.google.com/"), &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		s := (^State)(user)
-		res := res
 
 		ev(s.t, err, nil)
 		ev(s.t, res.status, http.Status.OK)
 
 		log.debug("cleaning up")
 
-		http.response_destroy(&s.client, &res)
+		http.response_destroy(&s.client, res)
 		http.client_destroy(&s.client)
 	})
 
@@ -295,7 +288,7 @@ sync :: proc(t: ^testing.T) {
 	testing.expect_value(t, res.status, http.Status.OK)
 	testing.expect(t, len(res.body) > 0)
 
-	http.response_destroy(&c, &res)
+	http.response_destroy(&c, res)
 }
 
 @(test)
