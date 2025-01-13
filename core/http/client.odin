@@ -71,8 +71,8 @@ JS_Credentials :: enum u8 {
 	Omit,        // Never include credentials.
 }
 
-client_init :: proc(c: ^Client, allocator := context.allocator) {
-	_client_init(c, allocator)
+client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
+	return _client_init(c, allocator)
 }
 
 client_destroy :: proc(c: ^Client) {
@@ -89,7 +89,8 @@ get :: proc(url: string) -> Client_Request {
 
 // TODO: post, post_json, yada yada
 
-request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: proc(r: Client_Response, s: rawptr, err: Request_Error)) {
+request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: proc(r: Client_Response, user: rawptr, err: Request_Error)) {
+	// TODO: make sure client is initialized
 	_client_request(c, req, user, cb)
 }
 

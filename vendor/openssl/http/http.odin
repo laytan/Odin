@@ -1,3 +1,4 @@
+#+build !js
 package openssl_http
 
 import      "core:http"
@@ -7,12 +8,13 @@ import ossl "vendor:openssl"
 
 client_implementation :: proc() -> http.Client_SSL {
 	return {
-		implemented = true,
 		client_create = proc() -> http.SSL_Client {
 			method := ossl.TLS_client_method()
-			assert(method != nil)
+			if method == nil { return nil }
+
 			ctx := ossl.SSL_CTX_new(method)
-			assert(ctx != nil)
+			if ctx == nil { return nil }
+
 			return http.SSL_Client(ctx)
 		},
 		client_destroy = proc(c: http.SSL_Client) {
@@ -20,12 +22,16 @@ client_implementation :: proc() -> http.Client_SSL {
 		},
 		connection_create = proc(c: http.SSL_Client, socket: net.TCP_Socket, host: cstring) -> http.SSL_Connection {
 			conn := ossl.SSL_new((^ossl.SSL_CTX)(c))
-			assert(conn != nil)
+			if conn == nil { return nil }
+
 			ret: i32
+
 			ret = ossl.SSL_set_tlsext_host_name(conn, host)
-			assert(ret == 1)
+			if ret != 1 { return nil }
+
 			ret = ossl.SSL_set_fd(conn, i32(socket))
-			assert(ret == 1)
+			if ret != 1 { return nil }
+
 			return http.SSL_Connection(conn)
 		},
 		connection_destroy = proc(c: http.SSL_Client, conn: http.SSL_Connection) {
@@ -49,11 +55,14 @@ client_implementation :: proc() -> http.Client_SSL {
 		},
 		send = proc(c: http.SSL_Connection, buf: []byte) -> (int, http.SSL_Result) {
 			ssl := (^ossl.SSL)(c)
-			assert(len(buf) > 0)
-			assert(len(buf) <= int(max(i32)))
-			switch ret := ossl.SSL_write(ssl, raw_data(buf), i32(len(buf))); {
+
+			if len(buf) <= 0 {
+				return 0, nil
+			}
+
+			n := max(i32) if len(buf) > int(max(i32)) else i32(len(buf))
+			switch ret := ossl.SSL_write(ssl, raw_data(buf), n); {
 			case ret > 0:
-				assert(int(ret) == len(buf))
 				return int(ret), nil
 			case:
 				#partial switch ossl.SSL_get_error(ssl, ret) {
@@ -66,9 +75,13 @@ client_implementation :: proc() -> http.Client_SSL {
 		},
 		recv = proc(c: http.SSL_Connection, buf: []byte) -> (int, http.SSL_Result) {
 			ssl := (^ossl.SSL)(c)
-			assert(len(buf) > 0)
-			assert(len(buf) <= int(max(i32)))
-			switch ret := ossl.SSL_read(ssl, raw_data(buf), i32(len(buf))); {
+
+			if len(buf) <= 0 {
+				return 0, nil
+			}
+
+			n := max(i32) if len(buf) > int(max(i32)) else i32(len(buf))
+			switch ret := ossl.SSL_read(ssl, raw_data(buf), n); {
 			case ret > 0:
 				return int(ret), nil
 			case:

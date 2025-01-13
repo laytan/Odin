@@ -20,11 +20,12 @@ MAX_TTL_SECONDS :: #config(DNS_CLIENT_MAX_TTL, 60*60)
 
 Init_Error :: enum {
 	None,
-	Loading, // Internal, not returned.
 	No_Path,
 	Failed_Open,
 	Failed_Read,
 }
+
+_INIT_ERROR_LOADING :: Init_Error(-1)
 
 On_Init :: #type proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error)
 
@@ -73,8 +74,8 @@ init :: proc(c: ^Client, user_data: rawptr, on_init: On_Init, allocator := conte
 	c.init_cb = on_init
 	c.init_ud = user_data
 
-	c.name_servers_err = .Loading
-	c.hosts_err        = .Loading
+	c.name_servers_err = _INIT_ERROR_LOADING
+	c.hosts_err        = _INIT_ERROR_LOADING
 
 	load_name_servers(c)
 	load_hosts(c)
@@ -94,7 +95,7 @@ init_sync :: proc(c: ^Client, allocator := context.allocator) -> (name_servers_e
 			return
 		}
 
-		if name_servers_err != .Loading && hosts_err != .Loading {
+		if name_servers_err != _INIT_ERROR_LOADING && hosts_err != _INIT_ERROR_LOADING {
 			ok = true
 			return
 		}
@@ -447,7 +448,7 @@ load_name_servers_done :: proc(c: ^Client, err: Init_Error, msg: string = "", ar
 
 	c.name_servers_err = err
 
-	if c.hosts_err != .Loading && c.init_cb != nil {
+	if c.hosts_err != _INIT_ERROR_LOADING && c.init_cb != nil {
 		c.init_cb(c, c.init_ud, c.name_servers_err, c.hosts_err)
 	}
 }
@@ -460,7 +461,7 @@ load_hosts_done :: proc(c: ^Client, err: Init_Error, msg: string = "", args: ..a
 
 	c.hosts_err = err
 
-	if c.name_servers_err != .Loading && c.init_cb != nil {
+	if c.name_servers_err != _INIT_ERROR_LOADING && c.init_cb != nil {
 		c.init_cb(c, c.init_ud, c.name_servers_err, c.hosts_err)
 	}
 }
@@ -468,7 +469,7 @@ load_hosts_done :: proc(c: ^Client, err: Init_Error, msg: string = "", args: ..a
 // Loads the name servers from the OS, this is called implicitly during `init`.
 @(private)
 load_name_servers :: proc(c: ^Client) {
-	assert(c.name_servers_err == .Loading)
+	assert(c.name_servers_err == _INIT_ERROR_LOADING)
 
 	resolv_conf := net.DEFAULT_DNS_CONFIGURATION.resolv_conf
 	if resolv_conf == "" {
@@ -506,7 +507,7 @@ load_name_servers :: proc(c: ^Client) {
 // Loads the hosts file from the OS, this is implicitly called during `init`.
 @(private)
 load_hosts :: proc(c: ^Client) {
-	assert(c.hosts_err == .Loading)
+	assert(c.hosts_err == _INIT_ERROR_LOADING)
 
 	hosts_file := net.DEFAULT_DNS_CONFIGURATION.hosts_file
 	if hosts_file == "" {

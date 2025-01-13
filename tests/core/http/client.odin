@@ -8,6 +8,7 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
+import "core:fmt"
 
 import ssl_http "vendor:openssl/http"
 
@@ -271,7 +272,7 @@ openssl :: proc(t: ^testing.T) {
 }
 
 @(test)
-sync :: proc(t: ^testing.T) {
+one_sync :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, time.Second * 10)
 
 	http.set_client_ssl(ssl_http.client_implementation())

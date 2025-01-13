@@ -13,8 +13,10 @@ _Client :: struct {
 	allocator: runtime.Allocator,
 }
 
-_client_init :: proc(c: ^Client, allocator := context.allocator) {
+_client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	c.allocator = allocator
+	// TODO: do a health check?
+	return true
 }
 
 _client_destroy :: proc(c: ^Client) {
@@ -23,6 +25,20 @@ _client_destroy :: proc(c: ^Client) {
 
 _response_destroy :: proc(c: ^Client, res: Client_Response) {
 	unimplemented()
+}
+
+@(private="file", rodata)
+CORS_MODE_STRINGS := [JS_CORS_Mode]string{
+	.CORS        = "cors",
+	.No_CORS     = "no-cors",
+	.Same_Origin = "same-origin",
+}
+
+@(private="file", rodata)
+CREDENTIAL_STRINGS := [JS_Credentials]string{
+	.Same_Origin = "same-origin",
+	.Include     = "include",
+	.Omit        = "omit",
 }
 
 @(private="file")
@@ -61,26 +77,27 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 	r.method  = method_string(req.method)
 	r.url = req.url
-	// AFAIK iterating a map in JS land is pretty much impossible (without much work).
-	r.headers, _ = slice.map_entries(req.headers._kv, /* allocator */)
+
+	// TODO/PERF: iterating the rbtree from within JS to skip this work.
+	headers := req.headers
+	r.headers = make([]slice.Map_Entry(string, string), headers_count(headers), /* allocator */)
+	i: int
+	iter := headers_iterator(&headers)
+	for k, v in headers_next(&iter) {
+		r.headers[i] = {k, v}
+		i += 1
+	}
+
 	r.body = req.body
 	r.ignore_redirects = req.ignore_redirects
 
-	switch req.js_cors {
-	case .CORS:        r.cors = "cors"
-	case .No_CORS:     r.cors = "no-cors"
-	case .Same_Origin: r.cors = "same-origin"
-	case:              unreachable()
-	}
-
-	switch req.js_credentials {
-	case .Same_Origin: r.credentials = "same-origin"
-	case .Include:     r.credentials = "include"
-	case .Omit:        r.credentials = "omit"
-	}
+	r.cors = CORS_MODE_STRINGS[req.js_cors]
+	r.credentials = CREDENTIAL_STRINGS[req.js_credentials]
 
 	r.user = user
 	r.cb = cb
+
+	headers_init(&r.res.headers)
 
 	http_request(c, r, on_response)
 
@@ -104,5 +121,5 @@ http_alloc :: proc "contextless" (r: ^In_Flight, size: i32) -> rawptr {
 @(private="file", export)
 http_res_header_set :: proc "contextless" (r: ^In_Flight, key: string, value: string) {
 	context = r.ctx
-	headers_set_unsafe(&r.res.headers, key, value)
+	headers_set(&r.res.headers, key, value)
 }

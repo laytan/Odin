@@ -1,3 +1,4 @@
+#+build !js
 package openssl
 
 import "core:c"
