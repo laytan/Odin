@@ -19,7 +19,7 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	c.allocator = allocator
 	c.conns.allocator = allocator
 
-	// NOTE: this is "blocking"
+	// PERF: this is "blocking"
 	ns_err, hosts_err, ok := dns.init_sync(&c.dnsc, allocator)
 	if ns_err != nil {
 		log.errorf("DNS client init: name servers error: %v", ns_err)
@@ -31,8 +31,7 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 		return false
 	}
 
-	if client_ssl.implemented {
-		assert(client_ssl.client_create != nil)
+	if client_ssl.client_create != nil {
 		assert(client_ssl.client_destroy != nil)
 		assert(client_ssl.connection_create != nil)
 		assert(client_ssl.connection_destroy != nil)
@@ -328,7 +327,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				r.conn.state = .Connected
 				on_connected(r, nil)
 			case .HTTPS:
-				if !client_ssl.implemented || r.c.ssl == nil {
+				if r.c.ssl == nil {
 					panic("HTTP client can't make HTTPS request without an SSL implementation, set it using `set_client_ssl`")
 				}
 
@@ -417,15 +416,9 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				ws(buf, "\r\n")
 			}
 
-			// TODO: escaping headers and cookies.
+			// TODO: escaping headers and cookies as needed.
 
-			iter := headers_iterator(&r.headers)
-			for header, value in headers_next(&iter) {
-				ws(buf, header)
-				ws(buf, ": ")
-				ws(buf, value)
-				ws(buf, "\r\n")
-			}
+			headers_write(buf, &r.headers)
 
 			if len(r.cookies) > 0 {
 				ws(buf, "cookie: ")
@@ -490,6 +483,13 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			switch n, res := client_ssl.send(r.conn.ssl, r.conn.buf.buf[:]); res {
 			case .None:
 				log.debugf("Successfully written request line and headers of %m to connection", n)
+
+				if n < len(r.conn.buf.buf) {
+					remove_range(&r.conn.buf.buf, 0, n) // PERF: O(N); not hit often
+					ssl_write_req(r, nil)
+					return
+				}
+
 				r.conn.state = .Sent_Headers
 				ssl_write_body(r, nil)
 			case .Want_Read:
@@ -522,6 +522,13 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			switch n, res := client_ssl.send(r.conn.ssl, r.body); res {
 			case .None:
 				log.debugf("Successfully written body of %m to connection", n)
+
+				if n < len(r.body) {
+					r.body = r.body[n:]
+					ssl_write_body(r, nil)
+					return
+				}
+
 				r.conn.state = .Sent_Request
 				on_sent_request(r, nil)
 			case .Want_Read:

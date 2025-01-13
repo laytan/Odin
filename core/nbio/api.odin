@@ -1,9 +1,11 @@
 package nbio
 
+import "base:intrinsics"
+
 import "core:time"
 
 /*
-The place where the magic happens, each time you call this the IO implementation checks its state
+Each time you call this the IO implementation checks its state
 and calls any callbacks which are ready. You would typically call this in a loop.
 
 Blocks for up-to 10ms waiting for events if there is nothing to do.
@@ -31,7 +33,7 @@ run :: proc() -> General_Error {
 
 run_until :: proc(done: ^bool) -> General_Error {
 	if !g_io.initialized { return nil }
-	for _num_waiting(&g_io) > 0 && !done^ {
+	for _num_waiting(&g_io) > 0 && !intrinsics.volatile_load(done) {
 		if errno := _tick(&g_io); errno != nil {
 			return errno
 		}

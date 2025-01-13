@@ -5,13 +5,7 @@ import    "core:strings"
 import    "core:unicode/utf8"
 import    "core:unicode"
 
-// I want custom hash functions on maps :((((((
-
-// PERF: could make a custom hash map that does a case-insensitive (ASCII) hash & compare.
-
-// A case-insensitive ASCII map for storing headers.
 Headers :: struct {
-	// _kv:      map[string]string,
 	_kv:      rb.Tree(string, string),
 	readonly: bool,
 }
@@ -168,4 +162,22 @@ headers_sanitize :: proc(headers: ^Headers) -> bool {
 	}
 
 	return true
+}
+
+// TODO: escaping?, streams (slow?)?
+headers_write :: proc(sb: ^strings.Builder, headers: ^Headers) {
+	iter := headers_iterator(headers)
+	for header, value in headers_next(&iter) {
+		strings.write_string(sb, header)
+		strings.write_string(sb, ": ")
+		strings.write_string(sb, value)
+		strings.write_string(sb, "\r\n")
+	}
+}
+
+// TODO: allocator
+headers_to_string :: proc(headers: ^Headers) -> string {
+	sb: strings.Builder
+	headers_write(&sb, headers)
+	return strings.to_string(sb)
 }
