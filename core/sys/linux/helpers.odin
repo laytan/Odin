@@ -152,3 +152,13 @@ when size_of(int) == 4 {
 	}
 }
 
+@(private)
+io_uring_register_op :: #force_inline proc "contextless" (op: IO_Uring_Register_Opcode, use_registered_ring := false) -> uintptr {
+	op := op
+
+	if use_registered_ring {
+		op |= IO_Uring_Register_Opcode.REGISTER_USE_REGISTERED_RING
+	}
+
+	return uintptr(op)
+}

@@ -509,7 +509,7 @@ sendfile :: proc "contextless" (out_fd: Fd, in_fd: Fd, offset: ^i64, count: uint
 	Available since Linux 2.0.
 */
 socket :: proc "contextless" (domain: Address_Family, socktype: Socket_Type, sockflags: Socket_FD_Flags, protocol: Protocol) -> (Fd, Errno) {
-	sock_type_flags: int = cast(int) socktype | transmute(int) sockflags
+	sock_type_flags: int = cast(int) socktype | cast(int) transmute(i32) sockflags
 	ret := syscall(SYS_socket, domain, sock_type_flags, protocol)
 	return errno_unwrap(ret, Fd)
 }
@@ -2926,11 +2926,169 @@ statx :: proc "contextless" (dir: Fd, pathname: cstring, flags: FD_Flags, mask: 
 
 // TODO(flysand): pidfd_send_signal
 
-// TODO(flysand): io_uring_setup
+/*
+	Setup a context for performing asynchronous I/O.
 
-// TODO(flysand): io_uring_enter
+	Available since Linux 5.1
+*/
+io_uring_setup :: proc "contextless" (entries: u32, params: ^IO_Uring_Params) -> (Fd, Errno) {
+	ret := syscall(SYS_io_uring_setup, entries, params)
+	return errno_unwrap(ret, Fd)
+}
 
-// TODO(flysand): io_uring_register
+/*
+	Initiate and/or complete I/O using the shared submission and completion queues.
+
+	Available since Linux 5.1
+*/
+io_uring_enter_noext :: proc "contextless" (fd: Fd, to_submit: u32, min_complete: u32, flags: IO_Uring_Enter_Flags, sig: ^Sig_Set) -> (int, Errno) {
+	ret := syscall(SYS_io_uring_enter, fd, to_submit, min_complete, transmute(u32)flags, sig, size_of(Sig_Set) if sig != nil else 0)
+	return errno_unwrap(ret, int)
+}
+
+/*
+	Initiate and.or complete I/O using the shared submission and completion queues.
+
+	Available since Linux 5.11
+*/
+io_uring_enter_ext :: proc "contextless" (fd: Fd, to_submit: u32, min_complete: u32, flags: IO_Uring_Enter_Flags, arg: ^IO_Uring_Getevents_Arg) -> (int, Errno) {
+	assert_contextless(.EXT_ARG in flags)
+	ret := syscall(SYS_io_uring_enter, fd, to_submit, min_complete, transmute(u32)flags, arg, size_of(IO_Uring_Getevents_Arg))
+	return errno_unwrap(ret, int)
+}
+
+/*
+	Initiate and/or complete I/O using the shared submission and completion queues.
+
+	Available since Linux 5.1
+*/
+io_uring_enter :: proc {
+	io_uring_enter_noext,
+	io_uring_enter_ext,
+}
+
+/*
+	Register buffers for I/O.
+
+	Available since Linux 5.1
+*/
+io_uring_register_buffers1 :: proc "contextless" (fd: Fd, arg: []IO_Vec, use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_BUFFERS, use_registered_ring), raw_data(arg), len(arg))
+	return Errno(-ret)
+}
+
+/*
+	Register buffers for I/O. Similar to io_uring_register_buffers but aims to have a more extensible ABI.
+
+	Available since Linux 5.13
+*/
+io_uring_register_buffers2 :: proc "contextless" (fd: Fd, arg: ^IO_Uring_Rsrc_Register(IO_Vec), use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_BUFFERS2, use_registered_ring), arg, size_of(arg^))
+	return Errno(-ret)
+}
+
+io_uring_register_buffers :: proc {
+	io_uring_register_buffers1,
+	io_uring_register_buffers2,
+}
+
+/*
+	Updates registered buffers with new ones.
+
+	Available since Linux 5.13
+*/
+io_uring_register_buffers_update :: proc "contextless" (fd: Fd, arg: ^IO_Uring_Rsrc_Update2(IO_Vec), use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_BUFFERS_UPDATE, use_registered_ring), arg, size_of(arg^))
+	return Errno(-ret)
+}
+
+/*
+	All previously registered buffers associated with the instance will be released synchronously.
+
+	Available since Linux 5.1
+*/
+io_uring_unregister_buffers :: proc "contextless" (fd: Fd, use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.UNREGISTER_BUFFERS, use_registered_ring), 0, 0)
+	return Errno(-ret)
+}
+
+/*
+	Register files for I/O.
+
+	Available since Linux 5.1
+*/
+io_uring_register_files1 :: proc "contextless" (fd: Fd, files: []Fd, use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_FILES, use_registered_ring), raw_data(files), len(files))
+	return Errno(-ret)
+}
+
+/*
+	Register files for I/O.
+
+	Available since Linux 5.13
+*/
+io_uring_register_files2 :: proc "contextless" (fd: Fd, arg: ^IO_Uring_Rsrc_Register(Fd), use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_FILES2, use_registered_ring), arg, size_of(arg^))
+	return Errno(-ret)
+}
+
+io_uring_register_files :: proc {
+	io_uring_register_files1,
+	io_uring_register_files2,
+}
+
+/*
+	Replaces existing files in the registered file set with new ones.
+
+	Available since Linux 5.13
+*/
+io_uring_register_files_update2 :: proc "contextless" (fd: Fd, arg: ^IO_Uring_Rsrc_Update2(Fd), use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.REGISTER_FILES_UPDATE, use_registered_ring), arg, size_of(arg^))
+	return Errno(-ret)
+}
+
+io_uring_register_files_update :: proc {
+	io_uring_register_files_update2,
+}
+
+/*
+	All previously registered files associated with the instance will be released synchronously.
+
+	Available since Linux 5.1
+*/
+io_uring_unregister_files :: proc "contextless" (fd: Fd, use_registered_ring := false) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, io_uring_register_op(.UNREGISTER_FILES, use_registered_ring), 0, 0)
+	return Errno(-ret)
+}
+
+// TODO(laytan): io_uring_register_files_update
+// TODO(laytan): io_uring_register_eventfd
+// TODO(laytan): io_uring_register_eventfd_async
+// TODO(laytan): io_uring_unregister_eventfd
+// TODO(laytan): io_uring_register_probe
+// TODO(laytan): io_uring_register_personality
+// TODO(laytan): io_uring_unregister_personality
+// TODO(laytan): io_uring_register_enable_rings
+// TODO(laytan): io_uring_register_restrictions
+// TODO(laytan): io_uring_register_iowq_aff
+// TODO(laytan): io_uring_unregister_iowq_aff
+// TODO(laytan): io_uring_register_iowq_max_workers
+// TODO(laytan): io_uring_register_ring_fds
+// TODO(laytan): io_uring_unregister_ring_fds
+// TODO(laytan): io_uring_register_pbuf_ring
+// TODO(laytan): io_uring_unregister_pbuf_ring
+// TODO(laytan): io_uring_register_sync_cancel
+// TODO(laytan): io_uring_register_file_alloc_range
+
+/*
+	Register files or user buffers for asynchronous I/O.
+
+	Available since Linux 5.1
+*/
+io_uring_register :: proc "contextless" (fd: Fd, opcode: IO_Uring_Register_Opcode, arg: rawptr, nr_args: u32) -> Errno {
+	ret := syscall(SYS_io_uring_register, fd, opcode, arg, nr_args)
+	return Errno(-ret)
+}
 
 // TODO(flysand): open_tree
 
