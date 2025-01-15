@@ -4,74 +4,83 @@ Wrapper/convenience package over the raw io_uring syscalls, providing help with 
 The following example shows a simple `cat` program implementation using the package.
 
 Example:
-    package main
+	package main
 
-    import       "base:runtime"
+	import       "base:runtime"
 
-    import       "core:fmt"
-    import       "core:os"
-    import       "core:sys/linux"
-    import uring "core:nbio/io_uring"
+	import       "core:fmt"
+	import       "core:os"
+	import       "core:sys/linux"
+	import uring "core:nbio/io_uring"
 
-    main :: proc() {
-        if len(os.args) < 2 {
-            fmt.eprintfln("Usage: %s [file name] <[file name] ...>", os.args[0])
-            os.exit(1)
-        }
+	Request :: struct {
+		path:       cstring,
+		buffer:     []byte,
+		completion: linux.IO_Uring_CQE,
+	}
 
-        buffers := make([][]byte, len(os.args)-1)
-        defer delete(buffers)
+	main :: proc() {
+		if len(os.args) < 2 {
+			fmt.eprintfln("Usage: %s [file name] <[file name] ...>", os.args[0])
+			os.exit(1)
+		}
 
-        ring, err := uring.make(&{})
-        fmt.assertf(err == nil, "uring.make: %v", err)
-        defer uring.destroy(&ring)
+		requests := make_soa(#soa []Request, len(os.args)-1)
+		defer delete(requests)
 
-        for _, i in os.args[1:] {
-            submit_read_request(runtime.args__[i], &buffers[i], &ring)
-            get_completion_and_print(&ring)
-        }
-    }
+		ring, err := uring.make(&{})
+		fmt.assertf(err == nil, "uring.make: %v", err)
+		defer uring.destroy(&ring)
 
-    submit_read_request :: proc(path: cstring, buffer: ^[]byte, ring: ^uring.IO_Uring) {
-        fd, err := linux.open(path, {})
-        fmt.assertf(err == nil, "open(%q): %v", path, err)
+		for &request, i in requests {
+			request.path = runtime.args__[i+1]
+			// sets up a read requests and adds it to the ring buffer.
+			submit_read_request(request.path, &request.buffer, &ring)
+		}
 
-        file_sz := get_file_size(fd)
+		ulen := u32(len(requests))
 
-        buf := make([]byte, file_sz)
-        buffer^ = buf
+		// submit the requests and wait for them to complete right away.
+		n, serr := uring.submit(&ring, ulen)
+		fmt.assertf(serr == nil, "submit: %v", serr)
+		assert(n == ulen)
 
-        _, ok := uring.read(ring, u64(uintptr(buffer)), fd, buf, 0)
-        assert(ok, "could not get read sqe")
+		// copy the completed requests out of the ring buffer.
+		cn := uring.copy_cqes_ready(&ring, requests.completion[:ulen])
+		assert(cn == ulen)
 
-        _, err = uring.submit(ring)
-        fmt.assertf(err == nil, "uring.submit: %v", err)
-    }
+		for request in requests {
+			// check result of the requests.
+			fmt.assertf(request.completion.res >= 0, "read %q failed: %v", request.path, linux.Errno(-request.completion.res))
+			// print out.
+			fmt.print(string(request.buffer))
 
-    get_completion_and_print :: proc(ring: ^uring.IO_Uring) {
-        cqes: [1]linux.IO_Uring_CQE
-        n, err := uring.copy_cqes(ring, cqes[:], 1)
-        fmt.assertf(err == nil, "copy_cqes: %v", err)
-        assert(n == 1)
-        cqe := cqes[0]
+			delete(request.buffer)
+		}
+	}
 
-        fmt.assertf(cqe.res >= 0, "read failed: %v", linux.Errno(-cqe.res))
+	submit_read_request :: proc(path: cstring, buffer: ^[]byte, ring: ^uring.IO_Uring) {
+		fd, err := linux.open(path, {})
+		fmt.assertf(err == nil, "open(%q): %v", path, err)
 
-        buffer := (^[]byte)(uintptr(cqe.user_data))
-        fmt.println(string(buffer^))
-        delete(buffer^)
-    }
+		file_sz := get_file_size(fd)
 
-    get_file_size :: proc(fd: linux.Fd) -> uint {
-        st: linux.Stat
-        err := linux.fstat(fd, &st)
-        fmt.assertf(err == nil, "fstat: %v", err)
+		buffer^ = make([]byte, file_sz)
 
-        if linux.S_ISREG(st.mode) {
-            return uint(st.size)
-        }
+		_, ok := uring.read(ring, 0, fd, buffer^, 0)
+		assert(ok, "could not get read sqe")
+	}
 
-        panic("not a regular file")
-    }
+	get_file_size :: proc(fd: linux.Fd) -> uint {
+		st: linux.Stat
+		err := linux.fstat(fd, &st)
+		fmt.assertf(err == nil, "fstat: %v", err)
+
+		if linux.S_ISREG(st.mode) {
+			return uint(st.size)
+		}
+
+		panic("not a regular file")
+	}
 */
 package io_uring

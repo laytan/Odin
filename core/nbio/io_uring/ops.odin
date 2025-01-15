@@ -10,6 +10,8 @@ fsync :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, flags: linux.IO_Uri
 	sqe.fsync_flags = flags
 	sqe.fd = fd
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -22,12 +24,14 @@ nop :: proc(ring: ^IO_Uring, user_data: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: b
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .NOP
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
 // Queues (but does not submit) an SQE to perform a `read(2)`.
 read :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, buf: []u8, offset: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-    assert(len(buf) < int(max(u32)))
+	assert(len(buf) < int(max(u32)))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .READ
@@ -36,12 +40,14 @@ read :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, buf: []u8, offset: u
 	sqe.len = u32(len(buf))
 	sqe.off = offset
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
 // Queues (but does not submit) an SQE to perform a `write(2)`.
 write :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, buf: []u8, offset: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-    assert(len(buf) < int(max(u32)))
+	assert(len(buf) < int(max(u32)))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .WRITE
@@ -50,6 +56,8 @@ write :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, buf: []u8, offset: 
 	sqe.len = u32(len(buf))
 	sqe.off = offset
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -57,7 +65,7 @@ write :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, buf: []u8, offset: 
 accept :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, addr: ^$T, flags: linux.Socket_FD_Flags) -> (sqe: ^linux.IO_Uring_SQE, ok: bool)
     where T == linux.Sock_Addr_In || T == linux.Sock_Addr_In6 || T == linux.Sock_Addr_Un || T == linux.Sock_Addr_Any {
 
-    addr_len := i32(size_of(T))
+	addr_len := i32(size_of(T))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .ACCEPT
@@ -66,6 +74,8 @@ accept :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, addr: ^$T, fla
 	sqe.off = cast(u64)uintptr(&addr_len)
 	sqe.accept_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -79,12 +89,14 @@ connect :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, addr: ^$T) ->
 	sqe.addr = cast(u64)uintptr(addr)
 	sqe.off = size_of(T)
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
 // Queues (but does not submit) an SQE to perform a `recv(2)`.
 recv :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: linux.Socket_Msg) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-    assert(len(buf) < int(max(u32)))
+	assert(len(buf) < int(max(u32)))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .RECV
@@ -93,12 +105,14 @@ recv :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, buf: []byte, fla
 	sqe.len = cast(u32)uintptr(len(buf))
 	sqe.msg_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
 // Queues (but does not submit) an SQE to perform a `send(2)`.
 send :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: linux.Socket_Msg) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-    assert(len(buf) < int(max(u32)))
+	assert(len(buf) < int(max(u32)))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .SEND
@@ -107,6 +121,8 @@ send :: proc(ring: ^IO_Uring, user_data: u64, sockfd: linux.Fd, buf: []byte, fla
 	sqe.len = u32(len(buf))
 	sqe.msg_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -119,6 +135,8 @@ openat :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, path: cstring, mod
 	sqe.len = mode
 	sqe.open_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -128,6 +146,8 @@ close :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd) -> (sqe: ^linux.IO_
 	sqe.opcode = .CLOSE
 	sqe.fd = fd
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -153,6 +173,8 @@ timeout :: proc(ring: ^IO_Uring, user_data: u64, ts: ^linux.Time_Spec, count: u3
 	sqe.off = u64(count)
 	sqe.timeout_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -171,6 +193,8 @@ timeout_remove :: proc(ring: ^IO_Uring, user_data: u64, timeout_user_data: u64, 
 	sqe.addr = timeout_user_data
 	sqe.timeout_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -198,6 +222,8 @@ link_timeout :: proc(ring: ^IO_Uring, user_data: u64, ts: ^linux.Time_Spec, flag
 	sqe.len = 1
 	sqe.timeout_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -208,6 +234,8 @@ poll_add :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, events: linux.Fd
 	sqe.poll_events = events
 	sqe.poll_flags = flags
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
@@ -217,6 +245,8 @@ poll_remove :: proc(ring: ^IO_Uring, user_data: u64, fd: linux.Fd, events: linux
 	sqe.fd = fd
 	sqe.poll_events = events
 	sqe.user_data = user_data
+
+	ok = true
 	return
 }
 
