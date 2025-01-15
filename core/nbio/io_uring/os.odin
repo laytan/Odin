@@ -41,11 +41,10 @@ init :: proc(ring: ^IO_Uring, entries: u32, params: ^linux.IO_Uring_Params) -> (
 
 	fd := linux.io_uring_setup(entries, params) or_return
 
-	// PERF: investigate this feature.
-	assert(.SINGLE_MMAP not_in params.features, "unsupported feature") // NOTE: Could support this, but currently isn't.
+	assert(.SINGLE_MMAP in params.features, "required feature SINGLE_MMAP not supported")
 
-	assert(.CQE32       not_in params.flags,    "unsupported flag")    // NOTE: Could support this by making IO_Uring generic.
-	assert(.SQE128      not_in params.flags,    "unsupported flag")    // NOTE: Could support this by making IO_Uring generic.
+	assert(.CQE32       not_in params.flags,    "unsupported flag") // NOTE: Could support this by making IO_Uring generic.
+	assert(.SQE128      not_in params.flags,    "unsupported flag") // NOTE: Could support this by making IO_Uring generic.
 
 	sq := submission_queue_make(fd, params) or_return
 
@@ -154,9 +153,10 @@ cq_ready :: proc(ring: ^IO_Uring) -> (n_ready: u32) {
 // If none are available, enters into the kernel to wait for at most `wait_nr` CQEs.
 // Returns the number of CQEs copied, advancing the CQ ring.
 // Provides all the wait/peek methods found in liburing, but with batching and a single method.
+// TODO: allow for timeout.
 copy_cqes :: proc(ring: ^IO_Uring, cqes: []linux.IO_Uring_CQE, wait_nr: u32) -> (n_copied: u32, err: linux.Errno) {
 	n_copied = copy_cqes_ready(ring, cqes)
-	if n_copied > 0 { return }
+	if n_copied > 0 { return } // TODO: should this only return if it has satisfied wait_nr?
 	if wait_nr > 0 || cq_ring_needs_flush(ring) {
 		_ = linux.io_uring_enter_noext(ring.fd, 0, wait_nr, {.GETEVENTS}, nil) or_return
 		n_copied = copy_cqes_ready(ring, cqes)
@@ -221,7 +221,7 @@ Submission_Queue :: struct {
 
 submission_queue_make :: proc(fd: linux.Fd, params: ^linux.IO_Uring_Params) -> (sq: Submission_Queue, err: linux.Errno) {
 	assert(fd >= 0, "uninitialized queue fd")
-	assert(.SINGLE_MMAP not_in params.features, "unsupported feature") // NOTE: Could support this, but currently isn't.
+	assert(.SINGLE_MMAP in params.features, "unsupported feature") // NOTE: Could support this, but currently isn't.
 
 	sq_size := params.sq_off.array + params.sq_entries * size_of(u32)
 	cq_size := params.cq_off.cqes + params.cq_entries * size_of(linux.IO_Uring_CQE)
@@ -267,7 +267,7 @@ Completion_Queue :: struct {
 
 completion_queue_make :: proc(fd: linux.Fd, params: ^linux.IO_Uring_Params, sq: ^Submission_Queue) -> Completion_Queue {
 	assert(fd >= 0, "uninitialized queue fd")
-	assert(.SINGLE_MMAP not_in params.features, "unsupported feature") // NOTE: Could support this, but currently isn't.
+	assert(.SINGLE_MMAP in params.features, "required feature SINGLE_MMAP not supported")
 
 	mmap := sq.mmap
 	cqes := cast([^]linux.IO_Uring_CQE)&mmap[params.cq_off.cqes]

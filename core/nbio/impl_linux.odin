@@ -55,6 +55,8 @@ _tick :: proc(io: ^IO) -> os.Errno {
 	unix.clock_gettime(unix.CLOCK_MONOTONIC, &t)
 	t.tv_nsec += i64(time.Millisecond * 10)
 
+	// TODO: you can actually give the io_uring_enter syscall a timeout, instead of doing it manually here.
+
 	for !etime {
 		// Queue the timeout, if there is an error, flush (cause its probably full) and try again.
 		sqe, err := io_uring.timeout(&io.ring, 0, &t, 1, io_uring.IORING_TIMEOUT_ABS)
