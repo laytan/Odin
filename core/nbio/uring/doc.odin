@@ -6,12 +6,12 @@ The following example shows a simple `cat` program implementation using the pack
 Example:
 	package main
 
-	import       "base:runtime"
+	import "base:runtime"
 
-	import       "core:fmt"
-	import       "core:os"
-	import       "core:sys/linux"
-	import uring "core:nbio/io_uring"
+	import "core:fmt"
+	import "core:os"
+	import "core:sys/linux"
+	import "core:nbio/uring"
 
 	Request :: struct {
 		path:       cstring,
@@ -28,7 +28,9 @@ Example:
 		requests := make_soa(#soa []Request, len(os.args)-1)
 		defer delete(requests)
 
-		ring, err := uring.make(&{})
+        ring: uring.Ring
+        params := uring.DEFAULT_PARAMS
+		err := uring.init(&ring, &params)
 		fmt.assertf(err == nil, "uring.make: %v", err)
 		defer uring.destroy(&ring)
 
@@ -83,4 +85,7 @@ Example:
 		panic("not a regular file")
 	}
 */
-package io_uring
+package uring
+
+// TODO: io_uring_register wrappers
+// TODO: implement all the ops

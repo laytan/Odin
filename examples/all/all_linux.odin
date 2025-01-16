@@ -1,8 +1,8 @@
 #+build linux
 package all
 
-import linux    "core:sys/linux"
-import io_uring "core:nbio/io_uring"
+import linux "core:sys/linux"
+import uring "core:nbio/uring"
 
 _ :: linux
-_ :: io_uring
+_ :: uring

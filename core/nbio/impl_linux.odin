@@ -8,6 +8,8 @@ import "core:os"
 import "core:sys/unix"
 import "core:time"
 
+// TODO: use uring.link_timeout for with_timeout
+
 _init :: proc(io: ^IO, alloc := context.allocator) -> (err: os.Errno) {
 	flags: u32 = 0
 	entries: u32 = 256
