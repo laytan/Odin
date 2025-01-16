@@ -1587,6 +1587,7 @@ IO_Uring_SQE :: struct {
 			cmd_op: u32,
 			__pad1: u32,
 		},
+		statx: ^Statx,
 	},
 	using __iovecs:   struct #raw_union {
 		// Pointer to buffer or iovecs.
@@ -1599,8 +1600,11 @@ IO_Uring_SQE :: struct {
 	},
 	using __len: struct #raw_union {
 		// Buffer size or number of iovecs.
-		len:        u32,
-		poll_flags: IO_Uring_Poll_Add_Flags,
+		len:          u32,
+		poll_flags:   IO_Uring_Poll_Add_Flags,
+		statx_mask:   Statx_Mask,
+		epoll_ctl_op: EPoll_Ctl_Opcode,
+		shutdown_how: Shutdown_How,
 	},
 	using __contents: struct #raw_union {
 		rw_flags:         i32,
@@ -1615,7 +1619,7 @@ IO_Uring_SQE :: struct {
 		accept_flags:     Socket_FD_Flags,
 		cancel_flags:     u32,
 		open_flags:       Open_Flags,
-		statx_flags:      u32,
+		statx_flags:      FD_Flags,
 		fadvise_advice:   u32,
 		splice_flags:     IO_Uring_Splice_Flags,
 		rename_flags:     u32,

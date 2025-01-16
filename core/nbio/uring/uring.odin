@@ -1,16 +1,14 @@
-package io_uring
+package uring
 
 import "core:math"
 import "core:sync"
 import "core:sys/linux"
 
-// TODO: do we need all the atomic operations, even when this is not accessed in multithreaded fashion from our side?
-
 DEFAULT_THREAD_IDLE_MS :: 1000
 DEFAULT_ENTRIES        :: 32
 MAX_ENTRIES            :: 4096
 
-IO_Uring :: struct {
+Ring :: struct {
 	fd:       linux.Fd,
 	sq:       Submission_Queue,
 	cq:       Completion_Queue,
@@ -18,23 +16,12 @@ IO_Uring :: struct {
 	features: linux.IO_Uring_Features,
 }
 
-// Set up an IO_Uring with default parameters, `entries` must be a power of 2 between 1 and 4096.
-make :: proc(
-	params: ^linux.IO_Uring_Params,
-	entries: u32 = DEFAULT_ENTRIES,
-	flags: linux.IO_Uring_Setup_Flags = {},
-) -> (
-	ring: IO_Uring,
-	err: linux.Errno,
-) {
-	params.flags = flags
-	params.sq_thread_idle = DEFAULT_THREAD_IDLE_MS
-	err = init(&ring, entries, params)
-	return
+DEFAULT_PARAMS :: linux.IO_Uring_Params {
+	sq_thread_idle = DEFAULT_THREAD_IDLE_MS,
 }
 
-// Initialize and setup a io_uring with more control than io_uring_make.
-init :: proc(ring: ^IO_Uring, entries: u32, params: ^linux.IO_Uring_Params) -> (err: linux.Errno) {
+// Initialize and setup an uring, `entries` must be a power of 2 between 1 and 4096.
+init :: proc(ring: ^Ring, params: ^linux.IO_Uring_Params, entries: u32 = DEFAULT_ENTRIES) -> (err: linux.Errno) {
 	assert(entries < MAX_ENTRIES,              "too many entries")
 	assert(entries != 0,                       "entries must be positive")
 	assert(math.is_power_of_two(int(entries)), "entries must be a power of two")
@@ -57,7 +44,7 @@ init :: proc(ring: ^IO_Uring, entries: u32, params: ^linux.IO_Uring_Params) -> (
 	return
 }
 
-destroy :: proc(ring: ^IO_Uring) {
+destroy :: proc(ring: ^Ring) {
 	assert(ring.fd >= 0)
 	submission_queue_destroy(&ring.sq)
 	linux.close(ring.fd)
@@ -65,7 +52,7 @@ destroy :: proc(ring: ^IO_Uring) {
 }
 
 // Returns a pointer to a vacant submission queue entry, or nil if the submission queue is full.
-get_sqe :: proc(ring: ^IO_Uring) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
+get_sqe :: proc(ring: ^Ring) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
 	sq := &ring.sq
 	head: u32 = sync.atomic_load_explicit(sq.head, .Acquire)
 	next := sq.sqe_tail + 1
@@ -77,7 +64,7 @@ get_sqe :: proc(ring: ^IO_Uring) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
 	}
 
 	sqe = &sq.sqes[sq.sqe_tail & sq.mask]
-	sqe^ = {} // Zero's it, PERF: check impact and maybe be smarter?
+	sqe^ = {}
 
 	sq.sqe_tail = next
 	ok = true
@@ -87,7 +74,7 @@ get_sqe :: proc(ring: ^IO_Uring) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
 // Sync internal state with kernel ring state on the submission queue side.
 // Returns the number of all pending events in the submission queue.
 // Rationale is to determine that an enter call is needed.
-flush_sq :: proc(ring: ^IO_Uring) -> (n_pending: u32) {
+flush_sq :: proc(ring: ^Ring) -> (n_pending: u32) {
 	sq := &ring.sq
 	to_submit := sq.sqe_tail - sq.sqe_head
 	if to_submit != 0 {
@@ -108,7 +95,7 @@ flush_sq :: proc(ring: ^IO_Uring) -> (n_pending: u32) {
 // or if IORING_SQ_NEED_WAKEUP is set and the SQ thread must be explicitly awakened.
 // For the latter case, we set the SQ thread wakeup flag.
 // Matches the implementation of sq_ring_needs_enter() in liburing.
-sq_ring_needs_enter :: proc(ring: ^IO_Uring, flags: ^linux.IO_Uring_Enter_Flags) -> bool {
+sq_ring_needs_enter :: proc(ring: ^Ring, flags: ^linux.IO_Uring_Enter_Flags) -> bool {
 	assert(flags^ == {})
 	if .SQPOLL in ring.flags { return true }
 	if .NEED_WAKEUP in sync.atomic_load_explicit(ring.sq.flags, .Relaxed) {
@@ -122,7 +109,7 @@ sq_ring_needs_enter :: proc(ring: ^IO_Uring, flags: ^linux.IO_Uring_Enter_Flags)
 // Submits the submission queue entries acquired via get_sqe().
 // Returns the number of entries submitted.
 // Optionally wait for a number of events by setting wait_nr.
-submit :: proc(ring: ^IO_Uring, wait_nr: u32 = 0) -> (n_submitted: u32, err: linux.Errno) {
+submit :: proc(ring: ^Ring, wait_nr: u32 = 0) -> (n_submitted: u32, err: linux.Errno) {
 	n_submitted = flush_sq(ring)
 	flags: linux.IO_Uring_Enter_Flags
 	if sq_ring_needs_enter(ring, &flags) || wait_nr > 0 {
@@ -130,7 +117,7 @@ submit :: proc(ring: ^IO_Uring, wait_nr: u32 = 0) -> (n_submitted: u32, err: lin
 			flags += {.GETEVENTS}
 		}
 		n_submitted_: int
-		n_submitted_, err = linux.io_uring_enter_noext(ring.fd, n_submitted, wait_nr, flags, nil)
+		n_submitted_, err = linux.io_uring_enter(ring.fd, n_submitted, wait_nr, flags, nil)
 		assert(n_submitted_ >= 0)
 		n_submitted = u32(n_submitted_)
 	}
@@ -138,14 +125,14 @@ submit :: proc(ring: ^IO_Uring, wait_nr: u32 = 0) -> (n_submitted: u32, err: lin
 }
 
 // Returns the number of submission queue entries in the submission queue.
-sq_ready :: proc(ring: ^IO_Uring) -> u32 {
+sq_ready :: proc(ring: ^Ring) -> u32 {
 	// Always use the shared ring state (i.e. head and not sqe_head) to avoid going out of sync,
 	// see https://github.com/axboe/liburing/issues/92.
 	return ring.sq.sqe_tail - sync.atomic_load_explicit(ring.sq.head, .Acquire)
 }
 
 // Returns the number of completion queue entries in the completion queue (yet to consume).
-cq_ready :: proc(ring: ^IO_Uring) -> (n_ready: u32) {
+cq_ready :: proc(ring: ^Ring) -> (n_ready: u32) {
 	return sync.atomic_load_explicit(ring.cq.tail, .Acquire) - ring.cq.head^
 }
 
@@ -154,17 +141,17 @@ cq_ready :: proc(ring: ^IO_Uring) -> (n_ready: u32) {
 // Returns the number of CQEs copied, advancing the CQ ring.
 // Provides all the wait/peek methods found in liburing, but with batching and a single method.
 // TODO: allow for timeout.
-copy_cqes :: proc(ring: ^IO_Uring, cqes: []linux.IO_Uring_CQE, wait_nr: u32) -> (n_copied: u32, err: linux.Errno) {
+copy_cqes :: proc(ring: ^Ring, cqes: []linux.IO_Uring_CQE, wait_nr: u32) -> (n_copied: u32, err: linux.Errno) {
 	n_copied = copy_cqes_ready(ring, cqes)
 	if n_copied > 0 { return } // TODO: should this only return if it has satisfied wait_nr?
 	if wait_nr > 0 || cq_ring_needs_flush(ring) {
-		_ = linux.io_uring_enter_noext(ring.fd, 0, wait_nr, {.GETEVENTS}, nil) or_return
+		_ = linux.io_uring_enter(ring.fd, 0, wait_nr, {.GETEVENTS}, nil) or_return
 		n_copied = copy_cqes_ready(ring, cqes)
 	}
 	return
 }
 
-copy_cqes_ready :: proc(ring: ^IO_Uring, cqes: []linux.IO_Uring_CQE) -> (n_copied: u32) {
+copy_cqes_ready :: proc(ring: ^Ring, cqes: []linux.IO_Uring_CQE) -> (n_copied: u32) {
 	n_ready := cq_ready(ring)
 	n_copied = min(u32(len(cqes)), n_ready)
 	head := ring.cq.head^
@@ -180,7 +167,7 @@ copy_cqes_ready :: proc(ring: ^IO_Uring, cqes: []linux.IO_Uring_CQE) -> (n_copie
 	return
 }
 
-cq_ring_needs_flush :: proc(ring: ^IO_Uring) -> bool {
+cq_ring_needs_flush :: proc(ring: ^Ring) -> bool {
 	return .CQ_OVERFLOW in sync.atomic_load_explicit(ring.sq.flags, .Relaxed)
 }
 
@@ -189,13 +176,13 @@ cq_ring_needs_flush :: proc(ring: ^IO_Uring) -> bool {
 // Must be called exactly once after a zero-copy CQE has been processed by your application.
 // Not idempotent, calling more than once will result in other CQEs being lost.
 // Matches the implementation of cqe_seen() in liburing.
-cqe_seen :: proc(ring: ^IO_Uring) {
+cqe_seen :: proc(ring: ^Ring) {
 	cq_advance(ring, 1)
 }
 
 // For advanced use cases only that implement custom completion queue methods.
 // Matches the implementation of cq_advance() in liburing.
-cq_advance :: proc(ring: ^IO_Uring, count: u32) {
+cq_advance :: proc(ring: ^Ring, count: u32) {
 	if count == 0 do return
 	sync.atomic_store_explicit(ring.cq.head, ring.cq.head^ + count, .Release)
 }

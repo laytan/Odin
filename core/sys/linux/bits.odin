@@ -2105,6 +2105,24 @@ IO_Uring_OP :: enum u8 {
 	MKDIRAT,
 	SYMLINKAT,
 	LINKAT,
+	MSG_RING,
+	FSETXATTR,
+	SETXATTR,
+	FGETXATTR,
+	GETXATTR,
+	SOCKET,
+	URING_CMD,
+	SEND_ZC,
+	SENDMSG_ZC,
+	READ_MULTISHOT,
+	WAITID,
+	FUTEX_WAIT,
+	FUTEX_WAKE,
+	FUTEX_WAITV,
+	FIXED_FD_INSTALL,
+	FTRUNCATE,
+	BIND,
+	LISTEN,
 }
 
 IO_Uring_SQE_Flags_Bits :: enum {
@@ -2150,10 +2168,10 @@ IO_Uring_Cmd_Flags_Bits :: enum {
 }
 
 IO_Uring_Splice_Flags_Bits :: enum {
-	MOVE          = 0x01,
-	NONBLOCK      = 0x02,
-	MORE          = 0x04,
-	GIFT          = 0x08,
+	MOVE,
+	NONBLOCK,
+	MORE,
+	GIFT,
 	F_FD_IN_FIXED = 31,
 }
 
