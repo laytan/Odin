@@ -12,9 +12,6 @@ struct LinkerData {
 #endif
 };
 
-gb_internal i32 system_exec_command_line_app(char const *name, char const *fmt, ...);
-gb_internal bool system_exec_command_line_app_output(char const *command, gbString *output);
-
 #if defined(GB_SYSTEM_OSX)
 gb_internal void linker_enable_system_library_linking(LinkerData *ld) {
 	ld->needs_system_library_linked = 1;
