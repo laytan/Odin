@@ -284,7 +284,7 @@ make_dns_packet :: proc(buf: []byte, id: u16be, hostname: string, type: DNS_Reco
 		response_code = DNS_Response_Code.No_Error,
 	}
 
-	id, bits := pack_dns_header(hdr)
+	_, bits := pack_dns_header(hdr)
 	dns_hdr := [6]u16be{}
 	dns_hdr[0] = id
 	dns_hdr[1] = bits

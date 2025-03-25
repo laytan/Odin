@@ -263,7 +263,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	req.hostname = host
 	req.family   = .IP4
 
-	packet, err := net.make_dns_packet(req.packet[:], hostname, .IP4)
+	packet, err := net.make_dns_packet(req.packet[:], 0, hostname, .IP4)
 	if err != nil {
 		free(req, req.client.allocator)
 		cb(user, {}, err)
