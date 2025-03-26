@@ -8,7 +8,6 @@ import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
-import "core:fmt"
 
 import ssl_http "vendor:openssl/http"
 
