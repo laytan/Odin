@@ -1,9 +1,9 @@
 package http
 
+import    "base:intrinsics"
 import rb "core:container/rbtree"
 import    "core:strings"
-import    "core:unicode/utf8"
-import    "core:unicode"
+import    "core:simd"
 
 Headers :: struct {
 	_kv:      rb.Tree(string, string),
@@ -15,29 +15,94 @@ headers_init :: proc(h: ^Headers, allocator := context.allocator) {
 }
 
 headers_cmp :: proc(a, b: string) -> rb.Ordering #no_bounds_check {
-	// TODO: can headers be utf8, or can we just say ascii?
-	// TODO: characters exist where lowercase is more bytes than uppercase.
-
 	if len(a) < len(b) {
 		return .Less
 	} else if len(a) > len(b) {
 		return .Greater
 	}
 
-	a, b := a, b
-	for len(a) > 0 {
-		ar, aw := utf8.decode_rune(a)
-		ar = unicode.to_lower(ar)
-		a = a[aw:]
+	if true {
+		// TODO: test if this is actually faster in practice, keys aren't long in practice.
 
-		br, bw := utf8.decode_rune(b)
-		br = unicode.to_lower(br)
-		b = b[bw:]
+		// NOTE: vectorized version
 
-		if ar < br {
-			return .Less
-		} else if ar > br {
-			return .Greater
+		LANES :: 8
+
+		check: #simd [LANES]byte: 'A' - 1
+		mask:  #simd [LANES]byte: 0x20
+
+		i: int
+		for ; i + LANES < len(a); i += LANES {
+			a_chars := intrinsics.unaligned_load((^#simd [LANES]byte)(raw_data(a)[i:]))
+			b_chars := intrinsics.unaligned_load((^#simd [LANES]byte)(raw_data(b)[i:]))
+
+			a_lower := simd.bit_or(
+				a_chars,
+				simd.bit_and(
+					simd.lanes_gt(
+						a_chars,
+						check,
+					),
+					mask,
+				),
+			)
+			b_lower := simd.bit_or(
+				b_chars,
+				simd.bit_and(
+					simd.lanes_gt(
+						b_chars,
+						check,
+					),
+					mask,
+				),
+			)
+
+			ne_set := simd.extract_msbs(simd.lanes_ne(a_lower, b_lower))
+			ne     := transmute(intrinsics.type_bit_set_underlying_type(type_of(ne_set)))ne_set
+			if ne == 0 {
+				continue
+			}
+
+			off := intrinsics.count_trailing_zeros(ne)
+			return a[i + int(off)] > b[i + int(off)] ? .Greater : .Less
+		}
+
+		for ; i < len(a); i += 1 {
+			ac := a[i]
+			if ac >= 'A' && ac <= 'Z' {
+				ac |= 0x20
+			}
+
+			bc := b[i]
+			if bc >= 'A' && bc <= 'Z' {
+				bc |= 0x20
+			}
+
+			if ac < bc {
+				return .Less
+			} else if ac > bc {
+				return .Greater
+			}
+		}
+	} else {
+		// NOTE: scalar version
+
+		for i in 0 ..< len(a) {
+			ac := a[i]
+			if ac >= 'A' && ac <= 'Z' {
+				ac |= 0x20
+			}
+
+			bc := b[i]
+			if bc >= 'A' && bc <= 'Z' {
+				bc |= 0x20
+			}
+
+			if ac < bc {
+				return .Less
+			} else if ac > bc {
+				return .Greater
+			}
 		}
 	}
 
