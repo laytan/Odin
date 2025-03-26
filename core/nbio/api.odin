@@ -112,7 +112,7 @@ with_timeout :: proc(dur: time.Duration, target: ^Completion, loc := #caller_loc
 Handle :: _Handle
 
 // TODO: should this be configurable, with a minimum of course for the use of core?
-MAX_USER_ARGUMENTS :: size_of(rawptr) * 5
+MAX_USER_ARGUMENTS :: 5
 
 Completion :: struct {
 	// Implementation specifics, don't use outside of implementation/os.
@@ -121,5 +121,5 @@ Completion :: struct {
 	user_data: rawptr,
 
 	// Callback pointer and user args passed in poly variants.
-	user_args: [MAX_USER_ARGUMENTS + size_of(rawptr)]byte,
+	user_args: [MAX_USER_ARGUMENTS + 1]rawptr,
 }

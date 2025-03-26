@@ -26,7 +26,7 @@ read_entire_file_alloc :: proc(io: ^IO, fd: Handle, allocator: runtime.Allocator
 }
 
 read_entire_file :: proc(fd: Handle, p: $T, callback: $C/proc(p: T, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
-	where size_of(T) + size_of([]byte) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of([]byte) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	io := io()
 
@@ -55,7 +55,7 @@ read_entire_file :: proc(fd: Handle, p: $T, callback: $C/proc(p: T, buf: []byte,
 }
 
 read_entire_file2 :: proc(fd: Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of([]byte) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) + size_of([]byte) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	io := io()
 
@@ -86,7 +86,7 @@ read_entire_file2 :: proc(fd: Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2
 }
 
 read_entire_file3 :: proc(fd: Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, buf: []byte, err: FS_Error), allocator := context.allocator) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) + size_of([]byte) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) + size_of(T3) + size_of([]byte) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	io := io()
 
@@ -119,16 +119,16 @@ read_entire_file3 :: proc(fd: Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc
 }
 
 write_entire_file :: #force_inline proc(fd: Handle, buf: []byte, p: $T, callback: $C/proc(p: T, written: int, err: FS_Error)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
+	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	return write_at_all_poly(fd, 0, buf, p, callback)
 }
 
 write_entire_file2 :: #force_inline proc(fd: Handle, buf: []byte, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, written: int, err: FS_Error)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	return write_at_all_poly2(fd, 0, buf, p, p2, callback)
 }
 
 write_entire_file3 :: #force_inline proc(fd: Handle, buf: []byte, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, written: int, err: FS_Error)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	return write_at_all_poly3(fd, 0, buf, p, p2, p3, callback)
 }

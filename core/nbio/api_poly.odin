@@ -10,7 +10,7 @@ unall :: intrinsics.unaligned_load
 unals :: intrinsics.unaligned_store
 
 timeout_poly :: proc(dur: time.Duration, p: $T, callback: $C/proc(p: T)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
+	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -29,7 +29,7 @@ timeout_poly :: proc(dur: time.Duration, p: $T, callback: $C/proc(p: T)) -> ^Com
 }
 
 timeout_poly2 :: proc(dur: time.Duration, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -50,7 +50,7 @@ timeout_poly2 :: proc(dur: time.Duration, p: $T, p2: $T2, callback: $C/proc(p: T
 }
 
 timeout_poly3 :: proc(dur: time.Duration, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 
 	completion := _timeout(io(), dur, nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
@@ -73,7 +73,7 @@ timeout_poly3 :: proc(dur: time.Duration, p: $T, p2: $T2, p3: $T3, callback: $C/
 }
 
 next_tick_poly :: proc(p: $T, callback: $C/proc(p: T)) -> ^Completion
-	where size_of(T) <= MAX_USER_ARGUMENTS {
+	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
@@ -91,7 +91,7 @@ next_tick_poly :: proc(p: $T, callback: $C/proc(p: T)) -> ^Completion
 }
 
 next_tick_poly2 :: proc(p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Completion
-	where size_of(T) + size_of(T2) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
@@ -111,7 +111,7 @@ next_tick_poly2 :: proc(p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2)) -> ^Com
 }
 
 next_tick_poly3 :: proc(p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3)) -> ^Completion
-	where size_of(T) + size_of(T2) + size_of(T3) <= MAX_USER_ARGUMENTS {
+	where size_of(T) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
 	completion := _next_tick(io(), nil, proc(completion: rawptr) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
