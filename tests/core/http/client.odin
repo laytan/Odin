@@ -23,28 +23,17 @@ require_value :: proc(t: ^testing.T, val: $T, test: T, format := "", args: ..any
 rv :: require_value
 
 listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts := http.Default_Server_Opts, loc := #caller_location) -> (ep: net.Endpoint) {
-	@static mu: sync.Mutex
-	sync.guard(&mu)
-
-	for {
-		PORT_START :: 1999
-		@static port := PORT_START
-
-		port += 1
-		ep = {net.IP4_Loopback, port}
-
-		err := http.listen(s, ep, opts)
-		if err != nil {
-			if err == net.Dial_Error.Address_In_Use || err == net.Listen_Error.Address_In_Use || err == net.Bind_Error.Address_In_Use {
-				log.infof("endpoint %v in use, trying next port", ep, location=loc)
-				continue
-			}
-
-			log.panicf("http.listen failed: %v", err, location=loc)
-		}
-
-		return
+	err := http.listen(s, {net.IP4_Loopback, 0}, opts)
+	if err != nil {
+		log.panicf("http.listen failed: %v", err, location=loc)
 	}
+
+	ep, err = net.bound_endpoint(s.tcp_sock)
+	if err != nil {
+		log.panicf("net.bound_endpoint failed: %v", err, location=loc)
+	}
+
+	return
 }
 
 // Send a simple request and expect OK.

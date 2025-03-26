@@ -18,12 +18,13 @@
 - [ ] Make sure everything runs under `-sanitize:address`
 - [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
 - [x] Build/update openssl using CI (on a cron?)
-- [ ] move tests to listening on port 0 (which gets a port assigned by kernel) and query the actual port
+- [x] move tests to listening on port 0 (which gets a port assigned by kernel) and query the actual port
 - [ ] Get on framework benchmarks (can leave out DB tests (if I can't figure out why what I was doing is slow) I think)
 	- [ ] benchmark the difference between the various nbio things with a callback vs taking over the event loop until an operation completes (http.body vs http.body_cb), if looping is fine, do that everywhere by default
 - [x] Support the BSDs
 	- [x] verify kqueue against bsd headers
 - [ ] Investigate sendfile and splice for Linux (if it can be used and where)
+- [ ] Investigate timeouts on Windows?
 
 ## HTTP Server
 
@@ -78,9 +79,12 @@
 - [x] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
     - [x] Darwin
+	- [x] Can you use the queue to get the current time? No
     - [ ] Linux
+	- [ ] Can you use the queue to get the current time?
     - [ ] Windows
-- [ ] check if some of the calls need to take a flags bitset.
+	- [ ] Can you use the queue to get the current time?
+- [x] check if some of the calls need to take a flags bitset. No
 - [ ] don't use os.Errno or os package at all
 	- [x] Darwin
 	- [ ] Linux
@@ -91,6 +95,8 @@
 	- [x] Darwin
 	- [?] Windows
 - [ ] A way to tick without blocking
+- [x] unaligned copy in core:thread poly procs
+- [ ] nbio.timeouts using the event loop instead of manually checking?
 
 ## WASM
 

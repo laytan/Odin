@@ -7,6 +7,7 @@ import    "base:runtime"
 import    "core:container/queue"
 import    "core:log"
 import    "core:net"
+import    "core:reflect"
 import    "core:sys/posix"
 import    "core:time"
 import kq "core:sys/kqueue"
@@ -178,7 +179,8 @@ flush :: proc(io: ^IO) -> General_Error {
 		for event in events[:new_events] {
 			completion := cast(^Completion)event.udata
 			if .Error in event.flags {
-				log.warnf("error on %v fd %v: %v", completion, event.ident, posix.strerror(posix.Errno(event.data)))
+				// TODO: remove, I think this only happens on poll, and is fine.
+				log.warnf("error on %v fd %v: %v", reflect.union_variant_typeid(completion.operation), event.ident, posix.strerror(posix.Errno(event.data)))
 			}
 			completion.in_kernel = false
 			push_completed(io, completion)

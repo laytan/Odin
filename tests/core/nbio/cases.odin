@@ -11,33 +11,25 @@ import "core:thread"
 import "core:time"
 
 open_next_available_local_port :: proc(t: ^testing.T, loc := #caller_location) -> (sock: net.TCP_Socket, ep: net.Endpoint) {
-	@static mu: sync.Mutex
-	sync.guard(&mu)
-
-	for {
-		PORT_START :: 1999
-		@static port := PORT_START
-
-		port += 1
-		ep = {net.IP4_Loopback, port}
-
-		err: net.Network_Error
-		sock, err = nbio.open_and_listen_tcp(ep)
-		if err != nil {
-			if err == net.Dial_Error.Address_In_Use || err == net.Listen_Error.Address_In_Use || err == net.Bind_Error.Address_In_Use {
-				log.infof("endpoint %v in use, trying next port", ep, location=loc)
-				continue
-			}
-
-			log.panicf("nbio.open_and_listen_tcp failed: %v", err, location=loc)
-		}
-
+	err: net.Network_Error
+	sock, err = nbio.open_and_listen_tcp({net.IP4_Loopback, 0})
+	if err != nil {
+		log.errorf("open_and_listen_tcp: %v", err, location=loc)
 		return
 	}
+
+	ep, err = net.bound_endpoint(sock)
+	if err != nil {
+		log.errorf("bound_endpoint: %v", err, location=loc)
+	}
+
+	return
 }
 
 @(test)
 close_invalid_handle_works :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	nbio.close_poly(nbio.Handle(os.INVALID_HANDLE), t, proc(t: ^testing.T, err: nbio.FS_Error) {
 		e(t, err != nil)
 	})
@@ -47,6 +39,8 @@ close_invalid_handle_works :: proc(t: ^testing.T) {
 
 @(test)
 timeout_runs_in_reasonable_time :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	start := time.now()
 
 	nbio.timeout(time.Millisecond * 10, rawptr(nil), proc(_: rawptr) {})
@@ -59,6 +53,8 @@ timeout_runs_in_reasonable_time :: proc(t: ^testing.T) {
 
 @(test)
 write_read_close :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	handle, errno := nbio.open(
 		"test_write_read_close",
 		{.Read, .Write, .Create, .Trunc},
@@ -99,6 +95,8 @@ write_read_close :: proc(t: ^testing.T) {
 
 @(test)
 client_and_server_send_recv :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	server, ep := open_next_available_local_port(t)
 
 	CONTENT :: [20]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
@@ -155,6 +153,8 @@ client_and_server_send_recv :: proc(t: ^testing.T) {
 
 @(test)
 close_and_remove_accept :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	server, _ := open_next_available_local_port(t)
 
 	accept := nbio.accept_poly(server, t, proc(t: ^testing.T, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
@@ -174,6 +174,8 @@ close_and_remove_accept :: proc(t: ^testing.T) {
 
 @(test)
 close_errors_recv :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	server, ep := open_next_available_local_port(t)
 
 	nbio.accept_poly(server, t, proc(t: ^testing.T, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
@@ -199,6 +201,8 @@ close_errors_recv :: proc(t: ^testing.T) {
 
 @(test)
 close_errors_send :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Second)
+
 	server, ep := open_next_available_local_port(t)
 
 	nbio.accept_poly(server, t, proc(t: ^testing.T, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
@@ -224,7 +228,7 @@ close_errors_send :: proc(t: ^testing.T) {
 
 @(test)
 usage_across_threads :: proc(t: ^testing.T) {
-	testing.set_fail_timeout(t, time.Second * 10)
+	testing.set_fail_timeout(t, time.Second)
 
 	handle: nbio.Handle
 	thread_done: sync.One_Shot_Event
@@ -233,8 +237,7 @@ usage_across_threads :: proc(t: ^testing.T) {
 		fd, errno := nbio.open(#file)
 		ev(t, errno, nil)
 
-		handle^ = fd
-
+		sync.atomic_store(handle, fd)
 		sync.one_shot_event_signal(thread_done)
 	}, init_context=context)
 
