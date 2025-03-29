@@ -5,7 +5,7 @@ foreign import CoreFoundation "system:CoreFoundation.framework"
 TypeID      :: distinct uint
 OptionFlags :: distinct uint
 HashCode    :: distinct uint
-Index       :: distinct int
+Index       :: int
 TypeRef     :: distinct rawptr
 
 Range :: struct {
@@ -22,6 +22,7 @@ foreign CoreFoundation {
 Release :: proc {
 	ReleaseObject,
 	ReleaseString,
+	ReleaseArray,
 }
 
 ReleaseObject :: #force_inline proc(cf: TypeRef) {
@@ -31,4 +32,8 @@ ReleaseObject :: #force_inline proc(cf: TypeRef) {
 // Releases a Core Foundation string.
 ReleaseString :: #force_inline proc(theString: String) {
 	CFRelease(TypeRef(theString))
+}
+
+ReleaseArray :: #force_inline proc(theArray: ArrayRef) {
+	CFRelease(TypeRef(theArray))
 }
