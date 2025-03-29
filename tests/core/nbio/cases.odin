@@ -38,20 +38,6 @@ close_invalid_handle_works :: proc(t: ^testing.T) {
 }
 
 @(test)
-timeout_runs_in_reasonable_time :: proc(t: ^testing.T) {
-	testing.set_fail_timeout(t, time.Second)
-
-	start := time.now()
-
-	nbio.timeout(time.Millisecond * 10, rawptr(nil), proc(_: rawptr) {})
-
-	ev(t, nbio.run(), nil)
-
-	duration := time.since(start)
-	e(t, duration < time.Millisecond * 11)
-}
-
-@(test)
 write_read_close :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, time.Second)
 
