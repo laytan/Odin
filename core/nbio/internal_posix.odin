@@ -196,7 +196,7 @@ flush :: proc(io: ^IO) -> General_Error {
 		if completed.timeout == (^Completion)(REMOVED) {
 			pool_put(&io.completion_pool, completed)
 			continue
-        }
+		}
 
 		assert(completed.timeout != (^Completion)(TIMED_OUT))
 
@@ -387,11 +387,12 @@ do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	}
 
 	if err == nil {
-		err = _prepare_socket(client)
+		if err = _prepare_socket(client); err != nil {
+			net.close(client)
+		}
 	}
 
 	if err != nil {
-		net.close(client)
 		op.callback(completion.user_data, {}, {}, err.(net.Accept_Error))
 	} else {
 		op.callback(completion.user_data, client, source, nil)

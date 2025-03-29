@@ -65,18 +65,18 @@ all_poly_work :: proc(tt: ^testing.T) {
 
 	nbio.connect_poly({net.IP4_Address{127, 0, 0, 1}, 80}, 1, proc(one: int, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, one, 1)
-		nbio.close(socket)
+		e(t, err != nil)
 	})
 	nbio.connect_poly2({net.IP4_Address{127, 0, 0, 1}, 80}, 1, 2, proc(one: int, two: int, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, one, 1)
 		ev(t, two, 2)
-		nbio.close(socket)
+		e(t, err != nil)
 	})
 	nbio.connect_poly3({net.IP4_Address{127, 0, 0, 1}, 80}, 1, 2, 3, proc(one: int, two: int, three: int, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, one, 1)
 		ev(t, two, 2)
 		ev(t, three, 3)
-		nbio.close(socket)
+		e(t, err != nil)
 	})
 
 	on_recv_tcp1 :: proc(one: int, received: int, err: net.TCP_Recv_Error) {
