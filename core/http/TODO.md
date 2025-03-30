@@ -71,7 +71,13 @@
 ## nbio
 
 - [ ] Implement `with_timeout` everywhere
+	- [x] Darwin
+	- [ ] Linux
+	- [ ] Windows
 - [ ] Make sure all procs are implemented everywhere (UDP & TCP, all platforms)
+	- [x] Darwin
+	- [ ] Linux
+	- [ ] Windows
 - [x] Move the sub /poly package into the main one
 - [x] Remove toggling the poly API
 - [x] JS implementation
@@ -96,7 +102,6 @@
 	- [?] Windows
 - [ ] A way to tick without blocking
 - [x] unaligned copy in core:thread poly procs
-- [ ] nbio.timeouts using the event loop instead of manually checking?
 
 ## WASM
 
