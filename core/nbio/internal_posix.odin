@@ -5,9 +5,7 @@ package nbio
 import    "base:runtime"
 
 import    "core:container/queue"
-import    "core:log"
 import    "core:net"
-import    "core:reflect"
 import    "core:sys/posix"
 import    "core:time"
 import kq "core:sys/kqueue"
@@ -178,10 +176,10 @@ flush :: proc(io: ^IO) -> General_Error {
 		queue.reserve(&io.completed, int(new_events))
 		for event in events[:new_events] {
 			completion := cast(^Completion)event.udata
-			if .Error in event.flags {
-				// TODO: remove, I think this only happens on poll, and is fine.
-				log.warnf("error on %v fd %v: %v", reflect.union_variant_typeid(completion.operation), event.ident, posix.strerror(posix.Errno(event.data)))
-			}
+			// if .Error in event.flags {
+			// 	// TODO: remove, I think this only happens on poll, and is fine.
+			// 	log.warnf("error on %v fd %v: %v", reflect.union_variant_typeid(completion.operation), event.ident, posix.strerror(posix.Errno(event.data)))
+			// }
 			completion.in_kernel = false
 			push_completed(io, completion)
 		}
