@@ -335,8 +335,6 @@ _remove :: proc(io: ^IO, target: ^Completion) {
 		}
 
 		return
-	case Op_Next_Tick:
-		panic("can't remove a next_tick event") // NOTE: I mean we could?
 	case Op_Remove:
 		panic("can't remove a remove event")
 	}
