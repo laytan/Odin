@@ -2,9 +2,9 @@ package http
 
 import "core:fmt"
 import "core:io"
-import "core:path/filepath"
 import "core:reflect"
 import "core:slice"
+import "core:os/os2"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -511,21 +511,22 @@ Mime_Type :: enum {
 }
 
 mime_from_extension :: proc(s: string) -> Mime_Type {
-	switch filepath.ext(s) {
-	case ".html": return .Html
-	case ".js":   return .Js
-	case ".css":  return .Css
-	case ".csv":  return .Csv
-	case ".xml":  return .Xml
-	case ".zip":  return .Zip
-	case ".json": return .Json
-	case ".ico":  return .Ico
-	case ".gif":  return .Gif
-	case ".jpeg": return .Jpeg
-	case ".png":  return .Png
-	case ".svg":  return .Svg
-	case ".wasm": return .Wasm
-	case:         return .Plain
+	_, ext := os2.split_filename(s)
+	switch ext {
+	case "html": return .Html
+	case "js":   return .Js
+	case "css":  return .Css
+	case "csv":  return .Csv
+	case "xml":  return .Xml
+	case "zip":  return .Zip
+	case "json": return .Json
+	case "ico":  return .Ico
+	case "gif":  return .Gif
+	case "jpeg": return .Jpeg
+	case "png":  return .Png
+	case "svg":  return .Svg
+	case "wasm": return .Wasm
+	case:        return .Plain
 	}
 }
 

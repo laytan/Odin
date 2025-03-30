@@ -12,7 +12,8 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:nbio"
 import "core:net"
-import "core:os"
+import "core:os" // NOTE: os.processor_core_count has no alternative yet
+import "core:os/os2"
 import "core:slice"
 import "core:sync"
 import "core:thread"
@@ -304,7 +305,7 @@ server_shutdown_on_interrupt :: proc(s: ^Server) {
 
 			// Force close on second signal.
 			if td.state == .Closing {
-				os.exit(1)
+				os2.exit(1)
 			}
 
 			server_shutdown(on_interrupt_server)
@@ -506,8 +507,10 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 		if err != nil {
 			if err == .EOF {
 				log.infof("[%i] client disconnected (EOF)", l.conn.socket)
+			} else if err == .No_Progress {
+				log.infof("[%i] connection timed out", l.conn.socket)
 			} else {
-				log.warnf("[%i] request scanner error: %v", err, l.conn.socket)
+				log.warnf("[%i] request scanner error: %v", l.conn.socket, err)
 			}
 
 			clean_request_loop_err(l.conn, close = true)

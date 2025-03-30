@@ -6,9 +6,8 @@ import "core:encoding/json"
 import "core:io"
 import "core:log"
 import "core:nbio"
-import "core:os"
-import "core:path/filepath"
 import "core:strings"
+import "core:os/os2"
 
 // Sets the response to one that sends the given HTML.
 respond_html :: proc(r: ^Response, html: string, status: Status = .OK, loc := #caller_location) {
@@ -25,9 +24,6 @@ respond_plain :: proc(r: ^Response, text: string, status: Status = .OK, loc := #
 	body_set(r, text, loc)
 	respond(r, loc)
 }
-
-@(private)
-ENOENT :: os.ERROR_FILE_NOT_FOUND when ODIN_OS == .Windows else os.ENOENT
 
 /*
 Sends the content of the file at the given path as the response.
@@ -52,7 +48,7 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 		if errno == .Not_Exist {
 			log.debugf("respond_file, open %q, no such file or directory", path)
 		} else {
-			log.warnf("respond_file, open %q error: %i", path, errno)
+			log.warnf("respond_file, open %q error: %v", path, errno)
 		}
 
 		respond(r, Status.Not_Found)
@@ -61,7 +57,7 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 
 	size, err := nbio.file_size(handle)
 	if err != nil || int(size) < 0 {
-		log.errorf("Could not seek the file size of file at %q, error number: %i", path, err)
+		log.errorf("Could not seek the file size of file at %q, error number: %v", path, err)
 		respond(r, Status.Internal_Server_Error)
 		nbio.close(handle)
 		return
@@ -83,7 +79,7 @@ respond_file :: proc(r: ^Response, path: string, content_type: Maybe(Mime_Type) 
 		dynamic_add_len(&r._buf.buf, read)
 
 		if err != nil {
-			log.errorf("Reading file from respond_file failed, error number: %i", err)
+			log.errorf("Reading file from respond_file failed, error number: %v", err)
 			respond(r, Status.Internal_Server_Error)
 			nbio.close(handle)
 			return
@@ -129,16 +125,24 @@ respond_dir :: proc(r: ^Response, base, target, request: string, loc := #caller_
 		return
 	}
 
-	// Detect path traversal attacks.
-	req_clean := filepath.clean(request, context.temp_allocator)
-	base_clean := filepath.clean(base, context.temp_allocator)
-	if !strings.has_prefix(req_clean, base_clean) {
+	full_request, err := os2.join_path({target, request}, context.temp_allocator)
+	if err != nil {
 		respond(r, Status.Not_Found)
 		return
 	}
 
-	file_path := filepath.join({"./", target, strings.trim_prefix(req_clean, base_clean)}, context.temp_allocator)
-	respond_file(r, file_path, loc = loc)
+	full_path, rerr := os2.get_relative_path(base, full_request, context.temp_allocator)
+	if rerr != nil || !strings.has_prefix(full_path, target) {
+		respond(r, Status.Not_Found)
+		return
+	}
+
+	// TODO: there are more types of index files.
+	if os2.is_dir(full_path) {
+		full_path, _ = os2.join_path({full_path, "index.html"}, context.temp_allocator)
+	}
+
+	respond_file(r, full_path, loc = loc)
 }
 
 // Sets the response to one that returns the JSON representation of the given value.
