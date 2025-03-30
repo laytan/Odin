@@ -151,7 +151,7 @@ flush :: proc(io: ^IO) -> General_Error {
 			return nil
 		}
 
-		max_timeout := time.Millisecond * 10
+		max_timeout := time.Millisecond
 		timeout: posix.timespec
 		timeout.tv_nsec = min(min_timeout.? or_else i64(max_timeout), i64(max_timeout))
 		new_events: i32
