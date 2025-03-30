@@ -28,10 +28,10 @@ Example:
 		requests := make_soa(#soa []Request, len(os.args)-1)
 		defer delete(requests)
 
-        ring: uring.Ring
-        params := uring.DEFAULT_PARAMS
+		ring: uring.Ring
+		params := uring.DEFAULT_PARAMS
 		err := uring.init(&ring, &params)
-		fmt.assertf(err == nil, "uring.make: %v", err)
+		fmt.assertf(err == nil, "uring.init: %v", err)
 		defer uring.destroy(&ring)
 
 		for &request, i in requests {
@@ -44,7 +44,7 @@ Example:
 
 		// submit the requests and wait for them to complete right away.
 		n, serr := uring.submit(&ring, ulen)
-		fmt.assertf(serr == nil, "submit: %v", serr)
+		fmt.assertf(serr == nil, "uring.submit: %v", serr)
 		assert(n == ulen)
 
 		// copy the completed requests out of the ring buffer.
