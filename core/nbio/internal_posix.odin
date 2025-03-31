@@ -151,7 +151,7 @@ flush :: proc(io: ^IO) -> General_Error {
 			return nil
 		}
 
-		max_timeout := time.Millisecond
+		max_timeout := IDLE_TIME
 		timeout: posix.timespec
 		timeout.tv_nsec = min(min_timeout.? or_else i64(max_timeout), i64(max_timeout))
 		new_events: i32
@@ -377,6 +377,13 @@ flush_timeouts :: proc(io: ^IO) -> (min_timeout: Maybe(i64)) {
 	return
 }
 
+maybe_cancel_timeout :: #force_inline proc(completion: ^Completion) {
+	if completion.timeout != nil {
+		timeout := &completion.timeout.operation.(Op_Timeout)
+		timeout.expires = { _nsec = -1 }
+	}
+}
+
 do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	client, source, err := net.accept_tcp(op.sock)
 	if err == net.Accept_Error.Would_Block {
@@ -391,7 +398,7 @@ do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	}
 
 	if err != nil {
-		op.callback(completion.user_data, {}, {}, err.(net.Accept_Error))
+		op.callback(completion.user_data, {}, {}, (^net.Accept_Error)(&err)^)
 	} else {
 		op.callback(completion.user_data, client, source, nil)
 	}
@@ -520,13 +527,6 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		maybe_cancel_timeout(completion)
 		op.callback.(On_Recv_UDP)(completion.user_data, op.received, remote_endpoint, nil)
 		pool_put(&io.completion_pool, completion)
-	}
-}
-
-maybe_cancel_timeout :: #force_inline proc(completion: ^Completion) {
-	if completion.timeout != nil {
-		timeout := &completion.timeout.operation.(Op_Timeout)
-		timeout.expires = { _nsec = -1 }
 	}
 }
 

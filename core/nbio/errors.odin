@@ -17,7 +17,7 @@ Error :: intrinsics.type_merge(
 General_Error :: enum i32 {
 	None,
 
-	Allocation_Failed,
+	Allocation_Failed = PLATFORM_ERR_ALLOCATION_FAILED,
 	Unsupported       = PLATFORM_ERR_UNSUPPORTED,
 }
 

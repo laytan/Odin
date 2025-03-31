@@ -175,7 +175,7 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 	}
 
 	if err = _prepare_socket(sock); err != nil {
-		_close(io, net.any_socket_to_socket(sock), nil, empty_on_close)
+		_close(io, net.any_socket_to_socket(sock))
 		return nil, err
 	}
 

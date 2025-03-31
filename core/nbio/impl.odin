@@ -4,10 +4,14 @@ package nbio
 import "base:runtime"
 import "base:intrinsics"
 
+import "core:time"
+
 IO :: struct {
 	using impl:  _IO,
 	initialized: bool,
 }
+
+IDLE_TIME :: time.Millisecond
 
 @(thread_local)
 g_io: IO

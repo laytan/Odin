@@ -1,4 +1,5 @@
 #+build darwin, openbsd, netbsd, freebsd
+#+private
 package nbio
 
 import "core:sys/posix"
