@@ -12,7 +12,7 @@ import "core:time"
 _init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
 	io.allocator = alloc
 
-	if perr := pool_init(&io.completion_pool, allocator = alloc); err != nil {
+	if perr := pool_init(&io.completion_pool, allocator = alloc); perr != nil {
 		err = .Allocation_Failed
 		return
 	}
@@ -84,7 +84,7 @@ _tick :: proc(io: ^IO) -> (err: General_Error) {
 				return General_Error(errno)
 			}
 
-			if _, ok := uring.timeout(&io.ring, 0, &t, 1, { .ABS }); !ok {
+			if _, ok2 := uring.timeout(&io.ring, 0, &t, 1, { .ABS }); !ok2 {
 				return .Allocation_Failed
 			}
 		}
@@ -105,14 +105,64 @@ _tick :: proc(io: ^IO) -> (err: General_Error) {
 }
 
 _open :: proc(_: ^IO, path: string, flags: File_Flags, perm: int) -> (handle: Handle, err: FS_Error) {
-	unimplemented()
+	if path == "" {
+		err = .Invalid_Argument
+		return
+	}
+
+	// TODO: arbitrarily long paths.
+	PATH_MAX :: 4096
+
+	if len(path) > PATH_MAX {
+		err = .Overflow
+		return
+	}
+
+	buf: [PATH_MAX+1]byte = ---
+	n := copy(buf[:], path)
+	buf[n] = 0
+
+	sys_flags := linux.Open_Flags{.NOCTTY, .CLOEXEC, .NONBLOCK}
+
+	if .Write in flags {
+		if .Read in flags {
+			sys_flags += {.RDWR}
+		} else {
+			sys_flags += {.WRONLY}
+		}
+	}
+
+	if .Append      in flags { sys_flags += {.APPEND} }
+	if .Create      in flags { sys_flags += {.CREAT} }
+	if .Excl        in flags { sys_flags += {.EXCL} }
+	if .Sync        in flags { sys_flags += {.DSYNC} }
+	if .Trunc       in flags { sys_flags += {.TRUNC} }
+	if .Inheritable in flags { sys_flags -= {.CLOEXEC} }
+
+	errno: linux.Errno
+	handle, errno = linux.open(cstring(raw_data(buf[:])), sys_flags, transmute(linux.Mode)i32(perm))
+	if errno != nil {
+		err = FS_Error(errno)
+	}
+
+	return
 }
 
 _file_size :: proc(_: ^IO, fd: Handle) -> (i64, FS_Error) {
-	unimplemented()
+	s: linux.Stat
+	errno := linux.fstat(fd, &s)
+	if errno != nil {
+		return 0, FS_Error(errno)
+	}
+
+	if linux.S_ISREG(s.mode) {
+		return i64(s.size), nil
+	}
+
+	return 0, .Invalid_Argument
 }
 
-_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Network_Error {
+_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {
 	err := linux.listen(linux.Fd(socket), i32(backlog))
 	return net.Listen_Error(err)
 }
@@ -166,7 +216,7 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 	}
 
 	if preperr := _prepare_socket(sock); err != nil {
-		close(io, net.any_socket_to_socket(sock))
+		close(net.any_socket_to_socket(sock))
 		return nil, preperr
 	}
 
@@ -235,12 +285,10 @@ _send :: proc(
 	buf: []byte,
 	user: rawptr,
 	callback: On_Sent,
-	_: Maybe(net.Endpoint) = nil,
+	endpoint: Maybe(net.Endpoint) = nil,
 	all := false,
 ) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
-
-	// TODO: UDP
 
 	completion.ctx = context
 	completion.user_data = user
@@ -250,6 +298,10 @@ _send :: proc(
 		buf      = buf,
 		all      = all,
 		len      = len(buf),
+	}
+
+	if _, ok := socket.(net.UDP_Socket); ok {
+		(&completion.operation.(Op_Send)).endpoint = endpoint_to_sockaddr(endpoint.?)
 	}
 
 	send_enqueue(io, completion, &completion.operation.(Op_Send))

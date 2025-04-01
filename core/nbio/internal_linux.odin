@@ -3,7 +3,6 @@ package nbio
 
 import "base:runtime"
 
-import "core:c"
 import "core:container/queue"
 import "core:fmt"
 import "core:mem"
@@ -34,9 +33,10 @@ _Completion :: struct {
 }
 
 Op_Accept :: struct {
-	callback:    On_Accept,
-	socket:      net.TCP_Socket,
-	sockaddr:    linux.Sock_Addr_Any,
+	callback:     On_Accept,
+	socket:       net.TCP_Socket,
+	sockaddr:     linux.Sock_Addr_Any,
+	sockaddr_len: i32,
 }
 
 Op_Close :: struct {
@@ -71,6 +71,7 @@ Op_Write :: struct {
 }
 
 Op_Send :: struct {
+	endpoint: linux.Sock_Addr_Any,
 	callback: On_Sent,
 	socket:   net.Any_Socket,
 	buf:      []byte,
@@ -86,6 +87,8 @@ Op_Recv :: struct {
 	all:      bool,
 	received: int,
 	len:      int,
+
+	endpoint_out: net.Endpoint,
 }
 
 Op_Timeout :: struct {
@@ -102,6 +105,10 @@ Op_Poll :: struct {
 	fd:       linux.Fd,
 	event:    Poll_Event,
 	multi:    bool,
+}
+
+Op_Remove :: struct {
+	target: ^Completion,
 }
 
 flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Errno {
@@ -127,7 +134,10 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 		case Op_Write:       write_enqueue  (io, unqueued, &op)
 		case Op_Timeout:     timeout_enqueue(io, unqueued, &op)
 		case Op_Poll:        poll_enqueue   (io, unqueued, &op)
-		case Op_Next_Tick:   unreachable()
+		case Op_Remove, Op_Next_Tick: // todo
+			unreachable()
+		case:
+			unreachable()
 		}
 	}
 
@@ -147,7 +157,10 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 		case Op_Timeout:     timeout_callback  (io, completed, &op)
 		case Op_Poll:        poll_callback     (io, completed, &op)
 		case Op_Next_Tick:   next_tick_callback(io, completed, &op)
-		case: unreachable()
+		case Op_Remove:
+			unreachable()
+		case:
+			unreachable()
 		}
 	}
 
@@ -229,11 +242,13 @@ enqueue :: proc(io: ^IO, completion: ^Completion, ok: bool) {
 }
 
 accept_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
+	op.sockaddr_len = size_of(op.sockaddr)
 	_, ok := uring.accept(
 		&io.ring,
 		u64(uintptr(completion)),
 		linux.Fd(op.socket),
 		&op.sockaddr,
+		&op.sockaddr_len,
 		{},
 	)
 	enqueue(io, completion, ok)
@@ -328,14 +343,32 @@ read_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 }
 
 recv_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
-	tcpsock, is_tcp := op.socket.(net.TCP_Socket)
-	if !is_tcp {
-		// TODO: figure out and implement.
-		unimplemented("UDP recv is unimplemented for linux nbio")
-	}
+	switch sock in op.socket {
+	case net.TCP_Socket:
+		_, ok := uring.recv(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {})
+		enqueue(io, completion, ok)
 
-	_, ok := uring.recv(&io.ring, u64(uintptr(completion)), linux.Fd(tcpsock), op.buf, {})
-	enqueue(io, completion, ok)
+	case net.UDP_Socket:
+		// TODO: recv from udp is not possible with uring, surely not?
+
+		// NOTE: emulation via poll.
+
+		_poll(io, linux.Fd(sock), .Read, false, completion, proc(completion: rawptr, _: Poll_Event) {
+			completion := (^Completion)(completion)
+			op         := &completion.operation.(Op_Recv)
+
+			addr: linux.Sock_Addr_Any
+			recv, err := linux.recvfrom(linux.Fd(op.socket.(net.UDP_Socket)), op.buf, {}, &addr)
+			if err != nil {
+				completion.result = -i32(err)
+			} else {
+				completion.result = i32(recv)
+				op.endpoint_out   = sockaddr_storage_to_endpoint(&addr)
+			}
+
+			recv_callback(io(), completion, op)
+		})
+	}
 }
 
 recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
@@ -345,7 +378,10 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		case .EINTR, .EWOULDBLOCK:
 			recv_enqueue(io, completion, op)
 		case:
-			op.callback.(On_Recv_TCP)(completion.user_data, op.received, net.TCP_Recv_Error(errno))
+			switch cb in op.callback {
+			case On_Recv_TCP: cb(completion.user_data, op.received, net.TCP_Recv_Error(errno))
+			case On_Recv_UDP: cb(completion.user_data, op.received, {}, net.UDP_Recv_Error(errno))
+			}
 			pool_put(&io.completion_pool, completion)
 		}
 		return
@@ -359,19 +395,23 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		return
 	}
 
-	op.callback.(On_Recv_TCP)(completion.user_data, op.received, nil)
+	switch cb in op.callback {
+	case On_Recv_TCP: cb(completion.user_data, op.received, nil)
+	case On_Recv_UDP: cb(completion.user_data, op.received, op.endpoint_out, nil)
+	}
+
 	pool_put(&io.completion_pool, completion)
 }
 
 send_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
-	tcpsock, is_tcp := op.socket.(net.TCP_Socket)
-	if !is_tcp {
-		// TODO: figure out and implement.
-		unimplemented("UDP send is unimplemented for linux nbio")
+	switch sock in op.socket {
+	case net.TCP_Socket:
+		_, ok := uring.send(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {.NOSIGNAL})
+		enqueue(io, completion, ok)
+	case net.UDP_Socket:
+		_, ok := uring.sendto(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {.NOSIGNAL}, &op.endpoint)
+		enqueue(io, completion, ok)
 	}
-
-	_, ok := uring.send(&io.ring, u64(uintptr(completion)), linux.Fd(tcpsock), op.buf, {.NOSIGNAL})
-	enqueue(io, completion, ok)
 }
 
 send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
@@ -384,8 +424,10 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 			errno = .ECONNRESET
 			fallthrough
 		case:
-			// TODO: could be a DNS socket / error.
-			op.callback.(On_Sent_TCP)(completion.user_data, op.sent, net.TCP_Send_Error(errno))
+			switch cb in op.callback {
+			case On_Sent_TCP: cb(completion.user_data, op.sent, net.TCP_Send_Error(errno))
+			case On_Sent_UDP: cb(completion.user_data, op.sent, net.UDP_Send_Error(errno))
+			}
 			pool_put(&io.completion_pool, completion)
 		}
 		return
@@ -399,7 +441,10 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		return
 	}
 
-	op.callback.(On_Sent_TCP)(completion.user_data, op.sent, nil)
+	switch cb in op.callback {
+	case On_Sent_TCP: cb(completion.user_data, op.sent, nil)
+	case On_Sent_UDP: cb(completion.user_data, op.sent, nil)
+	}
 	pool_put(&io.completion_pool, completion)
 }
 
@@ -487,12 +532,12 @@ poll_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
 sockaddr_storage_to_endpoint :: proc(addr: ^linux.Sock_Addr_Any) -> (ep: net.Endpoint) {
 	#partial switch addr.family {
 	case .INET:
-		ep = net.Endpoint {
-			address = net.IP4_Address(transmute([4]byte) addr.sin_addr),
+		return net.Endpoint {
+			address = net.IP4_Address(addr.sin_addr),
 			port    = int(addr.sin_port),
 		}
 	case .INET6:
-		ep = net.Endpoint {
+		return net.Endpoint {
 			address = net.IP6_Address(transmute([8]u16be)addr.sin6_addr),
 			port    = int(addr.sin6_port),
 		}
@@ -506,7 +551,7 @@ endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: linux.Sock_Addr_Any
 	case net.IP4_Address:
 		sockaddr.sin_family = .INET
 		sockaddr.sin_port = u16be(ep.port)
-		sockaddr.sin_addr = transmute([4]u8)a
+		sockaddr.sin_addr = cast([4]u8)a
 		return
 	case net.IP6_Address:
 		sockaddr.sin6_family = .INET6

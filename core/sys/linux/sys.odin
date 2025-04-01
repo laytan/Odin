@@ -543,7 +543,7 @@ where
 	T == Sock_Addr_Any
 {
 	addr_len: i32 = size_of(T)
-	ret := syscall(SYS_accept4, sock, addr, &addr_len, transmute(int) sockflags)
+	ret := syscall(SYS_accept4, sock, addr, &addr_len, transmute(i32) sockflags)
 	return errno_unwrap(ret, Fd)
 }
 

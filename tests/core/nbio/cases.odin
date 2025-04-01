@@ -4,7 +4,7 @@ import "core:log"
 import "core:mem"
 import "core:nbio"
 import "core:net"
-import "core:os"
+import os "core:os/os2"
 import "core:sync"
 import "core:testing"
 import "core:thread"
@@ -30,7 +30,7 @@ open_next_available_local_port :: proc(t: ^testing.T, loc := #caller_location) -
 close_invalid_handle_works :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, time.Second)
 
-	nbio.close_poly(nbio.Handle(os.INVALID_HANDLE), t, proc(t: ^testing.T, err: nbio.FS_Error) {
+	nbio.close_poly(max(nbio.Handle), t, proc(t: ^testing.T, err: nbio.FS_Error) {
 		e(t, err != nil)
 	})
 
@@ -154,7 +154,6 @@ close_and_remove_accept :: proc(t: ^testing.T) {
 	})
 
 	nbio.remove(accept)
-
 	ev(t, nbio.run(), nil)
 }
 
@@ -237,4 +236,22 @@ usage_across_threads :: proc(t: ^testing.T) {
 	})
 
 	nbio.run()
+}
+
+@(test)
+poll_already_ready :: proc(t: ^testing.T) {
+	fd, err := nbio.open(#file)
+	ev(t, err, nil)
+
+	hit: bool
+	nbio.poll_poly(fd, .Read, false, &hit, proc(hit: ^bool, _: nbio.Poll_Event) {
+		hit^ = true
+	})
+
+	ev(t, nbio.run(), nil)
+
+	e(t, hit)
+
+	nbio.close(fd)
+	ev(t, nbio.run(), nil)
 }

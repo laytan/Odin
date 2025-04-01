@@ -116,7 +116,11 @@ _file_size :: proc(_: ^IO, fd: Handle) -> (i64, FS_Error) {
 		return 0, FS_Error(posix.errno())
 	}
 
-	return i64(stat.st_size), nil
+	if posix.S_ISREG(stat.st_mode) {
+		return i64(stat.st_size), nil
+	}
+
+	return 0, .Invalid_Argument
 }
 
 _listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {

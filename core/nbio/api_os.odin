@@ -42,6 +42,8 @@ open_and_listen_tcp :: proc(ep: net.Endpoint) -> (socket: net.TCP_Socket, err: n
 	sock := _open_socket(io, family, .TCP) or_return
 	socket = sock.(net.TCP_Socket)
 
+	// TODO: bind has a io_uring operation, should it be used?
+
 	if err = net.bind(socket, ep); err != nil {
 		_close(io, socket, nil, empty_on_close)
 		return

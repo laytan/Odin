@@ -17,22 +17,22 @@ Error :: intrinsics.type_merge(
 General_Error :: enum i32 {
 	None,
 
-	Allocation_Failed = PLATFORM_ERR_ALLOCATION_FAILED,
-	Unsupported       = PLATFORM_ERR_UNSUPPORTED,
+	Allocation_Failed = i32(PLATFORM_ERR_ALLOCATION_FAILED),
+	Unsupported       = i32(PLATFORM_ERR_UNSUPPORTED),
 }
 
 // Errors gotten from file system operations.
 FS_Error :: enum i32 {
 	None,
-	Allocation_Failed  = PLATFORM_ERR_ALLOCATION_FAILED,
-	Timeout            = PLATFORM_ERR_TIMEOUT,
-	Invalid_Argument   = PLATFORM_ERR_INVALID_ARGUMENT,
-	Overflow           = PLATFORM_ERR_OVERFLOW,
+	Allocation_Failed  = i32(PLATFORM_ERR_ALLOCATION_FAILED),
+	Timeout            = i32(PLATFORM_ERR_TIMEOUT),
+	Invalid_Argument   = i32(PLATFORM_ERR_INVALID_ARGUMENT),
+	Overflow           = i32(PLATFORM_ERR_OVERFLOW),
 
 	// TODO:
 	// Permission_Denied = PLATFORM_ERR_PERMISSION_DENIED,
 	// Exist             = PLATFORM_ERR_EXISTS,
-	Not_Exist         = PLATFORM_ERR_NOT_EXIST,
+	Not_Exist         = i32(PLATFORM_ERR_NOT_EXIST),
 }
 
 Platform_Error :: _Platform_Error
@@ -40,7 +40,7 @@ Platform_Error :: _Platform_Error
 /*
 Returns the error as the underlying platform's error type.
 
-NOTE: usage of this means code is no longer cross-platform.
+NOTE: return value is not cross platform.
 */
 platform_error :: proc(err: Error) -> Platform_Error {
 	err := err

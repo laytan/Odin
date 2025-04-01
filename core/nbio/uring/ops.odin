@@ -265,6 +265,17 @@ send :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: 
 	return
 }
 
+sendto :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: linux.Socket_Msg, dest: ^$T, poll_first := false) -> (sqe: ^linux.IO_Uring_SQE, ok: bool)
+	where T == linux.Sock_Addr_In || T == linux.Sock_Addr_In6 || T == linux.Sock_Addr_Un || T == linux.Sock_Addr_Any {
+
+	sqe = send(ring, user_data, sockfd, buf, flags, poll_first) or_return
+	sqe.addr2 = u64(uintptr(dest))
+	sqe.addr_len = u16(size_of(T))
+
+	ok = true
+	return
+}
+
 /*
 Works just like send, but receives instead of sends.
 
@@ -354,16 +365,14 @@ Please note that only uring has access to such files and no other syscall can us
 
 Available since 5.5.
 */
-accept :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, addr: ^$T, flags: linux.Socket_FD_Flags, file_index: u32 = 0) -> (sqe: ^linux.IO_Uring_SQE, ok: bool)
+accept :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, addr: ^$T, addr_len: ^i32, flags: linux.Socket_FD_Flags, file_index: u32 = 0) -> (sqe: ^linux.IO_Uring_SQE, ok: bool)
 where T == linux.Sock_Addr_In || T == linux.Sock_Addr_In6 || T == linux.Sock_Addr_Un || T == linux.Sock_Addr_Any {
-
-	addr_len := i32(size_of(T))
 
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .ACCEPT
 	sqe.fd = sockfd
 	sqe.addr = cast(u64)uintptr(addr)
-	sqe.addr2 = cast(u64)uintptr(&addr_len)
+	sqe.off = cast(u64)uintptr(addr_len)
 	sqe.accept_flags = flags
 	sqe.user_data = user_data
 	sqe.file_index = file_index
@@ -500,7 +509,7 @@ openat :: proc(ring: ^Ring, user_data: u64, dirfd: linux.Fd, path: cstring, mode
 	sqe.opcode = .OPENAT
 	sqe.fd = dirfd
 	sqe.addr = cast(u64)transmute(uintptr)path
-	sqe.len = mode
+	sqe.len = transmute(u32)mode
 	sqe.open_flags = flags
 	sqe.user_data = user_data
 	sqe.file_index = file_index
