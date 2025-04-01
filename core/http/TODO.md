@@ -37,9 +37,11 @@
 - [ ] Add an API to set a custom temp allocator
 - [x] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
 - [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
+	- [ ] Use it in respond_file things and maybe other places
 - [ ] An API to read in a streamed fashion, maybe expose the scanner API used internally
 - [x] Regex router
 - [ ] Remove rate limit middleware; it's kinda bad/basic and easy to add userland
+- [ ] Use SetConsoleCtrlHandler instead of catching signals on Windows
 
 ## HTTP Client
 
