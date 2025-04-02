@@ -22,9 +22,11 @@ import "core:io"
 import "core:math/rand"
 import "core:mem"
 import "core:os"
+import "core:os/os2"
 import "core:slice"
 @require import "core:strings"
 import "core:sync/chan"
+import "core:sync"
 import "core:thread"
 import "core:time"
 
@@ -181,6 +183,12 @@ run_test_task :: proc(task: thread.Task) {
 	})
 }
 
+Std_Output :: struct {
+	mu:   sync.Mutex,
+	buf:  [dynamic]byte,
+	orig: ^os2.File,
+}
+
 runner :: proc(internal_tests: []Internal_Test) -> bool {
 	BATCH_BUFFER_SIZE     :: 32 * mem.Kilobyte
 	POOL_BLOCK_SIZE       :: 16 * mem.Kilobyte
@@ -202,6 +210,28 @@ runner :: proc(internal_tests: []Internal_Test) -> bool {
 		case:
 			delete(s, allocator)
 		}
+	}
+
+	stdout_output: Std_Output
+	stdout_output.buf.allocator = context.allocator
+	stdout_output.orig = os2.stdout
+	os2.stdout = &os2.File{
+		stream = {
+			procedure = std_stream_proc,
+			data      = &stdout_output,
+		},
+		fstat  = os2.fstat,
+	}
+
+	stderr_output: Std_Output
+	stderr_output.buf.allocator = context.allocator
+	stderr_output.orig = os2.stderr
+	os2.stderr = &os2.File{
+		stream = {
+			procedure = std_stream_proc,
+			data      = &stderr_output,
+		},
+		fstat  = os2.fstat,
 	}
 
 	when ODIN_OS == .Windows {
@@ -795,6 +825,24 @@ runner :: proc(internal_tests: []Internal_Test) -> bool {
 		for message in log_messages {
 			fmt.wprintln(batch_writer, message.text)
 			delete(message.text, message.allocator)
+		}
+
+		{
+			sync.guard(&stdout_output.mu)
+			if len(stdout_output.buf) > 0 {
+				// todo error
+				io.write_full(bytes.buffer_to_stream(&batch_buffer), stdout_output.buf[:])
+				clear(&stdout_output.buf)
+			}
+		}
+
+		{
+			sync.guard(&stderr_output.mu)
+			if len(stderr_output.buf) > 0 {
+				// todo error
+				io.write_full(bytes.buffer_to_stream(&batch_buffer), stderr_output.buf[:])
+				clear(&stderr_output.buf)
+			}
 		}
 
 		fmt.wprint(stderr, bytes.buffer_to_string(&batch_buffer))

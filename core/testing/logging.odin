@@ -15,7 +15,9 @@ import "core:fmt"
 import "core:log"
 import "core:strings"
 import "core:sync/chan"
+import "core:sync"
 import "core:time"
+import "core:io"
 
 when USING_SHORT_LOGS {
 	Default_Test_Logger_Opts :: runtime.Logger_Options {
@@ -86,4 +88,18 @@ format_log_text :: proc(level: runtime.Logger_Level, text: string, options: runt
 	log.do_location_header(options, &buf, location)
 
 	return fmt.aprintf("%s%s", strings.to_string(buf), text, allocator = allocator)
+}
+
+std_stream_proc :: proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
+	std := (^Std_Output)(stream_data)
+
+	#partial switch mode {
+	case .Write:
+		sync.guard(&std.mu)
+		n_, _ := append(&std.buf, ..p)
+		n = i64(n_)
+		return
+	}
+
+	return std.orig.stream.procedure(std.orig.stream.data, mode, p, offset, whence)
 }
