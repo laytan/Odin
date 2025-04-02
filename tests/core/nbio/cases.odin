@@ -269,3 +269,41 @@ remove_timeout :: proc(t: ^testing.T) {
 
 	e(t, !hit)
 }
+
+@(test)
+with_timeout :: proc(t: ^testing.T) {
+	sock, _ := open_next_available_local_port(t)
+
+	hit: bool
+	accept := nbio.accept_poly2(sock, t, &hit, proc(t: ^testing.T, hit: ^bool, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
+		hit^ = true
+		ev(t, err, net.Accept_Error.Would_Block)
+	})
+	nbio.with_timeout(time.Millisecond, accept)
+
+	ev(t, nbio.run(), nil)
+
+	e(t, hit)
+}
+
+@(test)
+remove_a_completion_with_a_timeout :: proc(t: ^testing.T) {
+	sock, _ := open_next_available_local_port(t)
+
+	hit_accept: bool
+	accept := nbio.accept_poly(sock, &hit_accept, proc(hit_accept: ^bool, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
+		hit_accept^ = true
+	})
+	timed_out_accept := nbio.with_timeout(time.Second, accept)
+
+	hit_timeout: bool
+	nbio.timeout_poly2(time.Millisecond, timed_out_accept, &hit_timeout, proc(timed_out_accept: ^nbio.Completion, hit_timeout: ^bool) {
+		hit_timeout^ = true
+		nbio.remove(timed_out_accept)
+	})
+
+	ev(t, nbio.run(), nil)
+
+	e(t, !hit_accept)
+	e(t, hit_timeout)
+}

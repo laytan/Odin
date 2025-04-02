@@ -104,6 +104,8 @@ remove :: proc(target: ^Completion) {
 }
 
 // TODO: document.
+// TODO: enforce target being the last added completion. You can only timeout the previously added completion.
+// Maybe even not take a target at all.
 with_timeout :: proc(dur: time.Duration, target: ^Completion, loc := #caller_location) -> ^Completion {
 	if target == nil || dur == 0 { return nil }
 	return _timeout_completion(io(), dur, target)

@@ -33,6 +33,7 @@ _Completion :: struct {
 	operation: Operation,
 	ctx:       runtime.Context,
 	removal:   ^Completion,
+	sqe:       ^linux.IO_Uring_SQE,
 }
 
 Op_Accept :: struct {
@@ -96,7 +97,7 @@ Op_Recv :: struct {
 
 Op_Timeout :: struct {
 	callback: On_Timeout,
-	expires:  linux.Time_Spec,
+	expires:  linux.Time_Spec, // NOTE: should prob be absolute, cause we could be queueing it and it doesn't reach the kernel until later.
 }
 
 Op_Next_Tick :: struct {
@@ -112,6 +113,11 @@ Op_Poll :: struct {
 
 Op_Remove :: struct {
 	target: ^Completion,
+}
+
+_Op_Link_Timeout :: struct {
+	expires: linux.Time_Spec, // NOTE: should prob be absolute, cause we could be queueing it and it doesn't reach the kernel until later.
+	target:  ^Completion,
 }
 
 flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Errno {
@@ -144,7 +150,7 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 		case Op_Timeout:   timeout_enqueue(io, unqueued, &op)
 		case Op_Poll:      poll_enqueue   (io, unqueued, &op)
 		case Op_Remove:    remove_enqueue (io, unqueued, &op)
-		case Op_Next_Tick: unreachable()
+		case Op_Next_Tick, _Op_Link_Timeout: unreachable()
 		}
 	}
 
@@ -194,17 +200,18 @@ flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 				context = completed.ctx
 
 				#partial switch &op in completed.operation {
-				case Op_Accept:      accept_callback   (io, completed, &op)
-				case Op_Close:       close_callback    (io, completed, &op)
-				case Op_Connect:     connect_callback  (io, completed, &op)
-				case Op_Read:        read_callback     (io, completed, &op)
-				case Op_Recv:        recv_callback     (io, completed, &op)
-				case Op_Send:        send_callback     (io, completed, &op)
-				case Op_Write:       write_callback    (io, completed, &op)
-				case Op_Timeout:     timeout_callback  (io, completed, &op)
-				case Op_Poll:        poll_callback     (io, completed, &op)
-				case Op_Remove:      remove_callback   (io, completed, &op)
-				case:                unreachable()
+				case Op_Accept:        accept_callback      (io, completed, &op)
+				case Op_Close:         close_callback       (io, completed, &op)
+				case Op_Connect:       connect_callback     (io, completed, &op)
+				case Op_Read:          read_callback        (io, completed, &op)
+				case Op_Recv:          recv_callback        (io, completed, &op)
+				case Op_Send:          send_callback        (io, completed, &op)
+				case Op_Write:         write_callback       (io, completed, &op)
+				case Op_Timeout:       timeout_callback     (io, completed, &op)
+				case Op_Poll:          poll_callback        (io, completed, &op)
+				case Op_Remove:        remove_callback      (io, completed, &op)
+				case _Op_Link_Timeout: link_timeout_callback(io, completed, &op)
+				case:                  unreachable()
 				}
 			}
 		}
@@ -238,7 +245,7 @@ flush_submissions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 	return nil
 }
 
-enqueue :: proc(io: ^IO, completion: ^Completion, ok: bool) {
+enqueue :: proc(io: ^IO, completion: ^Completion, sqe: ^linux.IO_Uring_SQE, ok: bool) {
 	if !ok {
 		pok, _ := queue.push_back(&io.unqueued, completion)
 		if !pok {
@@ -247,20 +254,20 @@ enqueue :: proc(io: ^IO, completion: ^Completion, ok: bool) {
 		return
 	}
 
+	completion.sqe = sqe
 	io.ios_queued += 1	
 }
 
 accept_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	op.sockaddr_len = size_of(op.sockaddr)
-	_, ok := uring.accept(
+	enqueue(io, completion, uring.accept(
 		&io.ring,
 		u64(uintptr(completion)),
 		linux.Fd(op.socket),
 		&op.sockaddr,
 		&op.sockaddr_len,
 		{},
-	)
-	enqueue(io, completion, ok)
+	))
 }
 
 accept_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
@@ -269,6 +276,11 @@ accept_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 		#partial switch errno {
 		case .EINTR, .EWOULDBLOCK:
 			accept_enqueue(io, completion, op)
+		case .ECANCELED:
+			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
+			// see posix implementation at time_out_op for reference.
+			errno = .EWOULDBLOCK
+			fallthrough
 		case:
 			op.callback(completion.user_data, 0, {}, net.Accept_Error(errno))
 			pool_put(&io.completion_pool, completion)
@@ -285,8 +297,11 @@ accept_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 }
 
 close_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
-	_, ok := uring.close(&io.ring, u64(uintptr(completion)), op.fd)
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.close(
+		&io.ring,
+		u64(uintptr(completion)),
+		op.fd,
+	))
 }
 
 close_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
@@ -296,13 +311,12 @@ close_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
 }
 
 connect_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
-	_, ok := uring.connect(
+	enqueue(io, completion, uring.connect(
 		&io.ring,
 		u64(uintptr(completion)),
 		linux.Fd(op.socket),
 		&op.sockaddr,
-	)
-	enqueue(io, completion, ok)
+	))
 }
 
 connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
@@ -313,6 +327,11 @@ connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 		return
 	case .NONE:
 		op.callback(completion.user_data, op.socket, nil)
+	case .ECANCELED:
+		// NOTE: to return a consistent accept error for the implementations on a timed out completion.
+		// see posix implementation at time_out_op for reference.
+		errno = .ETIMEDOUT
+		fallthrough
 	case:
 		close(op.socket)
 		op.callback(completion.user_data, {}, net.Dial_Error(errno))
@@ -321,8 +340,13 @@ connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 }
 
 read_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
-	_, ok := uring.read(&io.ring, u64(uintptr(completion)), op.fd, op.buf, u64(op.offset))
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.read(
+		&io.ring,
+		u64(uintptr(completion)),
+		op.fd,
+		op.buf,
+		u64(op.offset),
+	))
 }
 
 read_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
@@ -354,8 +378,13 @@ read_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 recv_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		_, ok := uring.recv(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {})
-		enqueue(io, completion, ok)
+		enqueue(io, completion, uring.recv(
+			&io.ring,
+			u64(uintptr(completion)),
+			linux.Fd(sock),
+			op.buf,
+			{},
+		))
 
 	case net.UDP_Socket:
 		// TODO: recv from udp is not possible with uring, surely not?
@@ -386,6 +415,11 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		#partial switch errno {
 		case .EINTR, .EWOULDBLOCK:
 			recv_enqueue(io, completion, op)
+		case .ECANCELED:
+			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
+			// see posix implementation at time_out_op for reference.
+			errno = .EWOULDBLOCK
+			fallthrough
 		case:
 			switch cb in op.callback {
 			case On_Recv_TCP: cb(completion.user_data, op.received, net.TCP_Recv_Error(errno))
@@ -415,11 +449,22 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 send_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		_, ok := uring.send(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {.NOSIGNAL})
-		enqueue(io, completion, ok)
+		enqueue(io, completion, uring.send(
+			&io.ring,
+			u64(uintptr(completion)),
+			linux.Fd(sock),
+			op.buf,
+			{.NOSIGNAL},
+		))
 	case net.UDP_Socket:
-		_, ok := uring.sendto(&io.ring, u64(uintptr(completion)), linux.Fd(sock), op.buf, {.NOSIGNAL}, &op.endpoint)
-		enqueue(io, completion, ok)
+		enqueue(io, completion, uring.sendto(
+			&io.ring,
+			u64(uintptr(completion)),
+			linux.Fd(sock),
+			op.buf,
+			{.NOSIGNAL},
+			&op.endpoint,
+		))
 	}
 }
 
@@ -433,6 +478,12 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 			errno = .ECONNRESET
 			fallthrough
 		case:
+			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
+			// see posix implementation at time_out_op for reference.
+			if errno == .ECANCELED {
+				errno = .EWOULDBLOCK
+			}
+
 			switch cb in op.callback {
 			case On_Sent_TCP: cb(completion.user_data, op.sent, net.TCP_Send_Error(errno))
 			case On_Sent_UDP: cb(completion.user_data, op.sent, net.UDP_Send_Error(errno))
@@ -458,8 +509,13 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 }
 
 write_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
-	_, ok := uring.write(&io.ring, u64(uintptr(completion)), op.fd, op.buf, u64(op.offset))
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.write(
+		&io.ring,
+		u64(uintptr(completion)),
+		op.fd,
+		op.buf,
+		u64(op.offset),
+	))
 }
 
 write_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
@@ -489,15 +545,20 @@ write_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
 }
 
 timeout_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Timeout) {
-	_, ok := uring.timeout(&io.ring, u64(uintptr(completion)), &op.expires, 0, {})
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.timeout(
+		&io.ring,
+		u64(uintptr(completion)),
+		&op.expires,
+		0,
+		{},
+	))
 }
 
 timeout_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Timeout) {
 	if completion.result < 0 {
 		errno := linux.Errno(-completion.result)
 		#partial switch errno {
-		case .ETIME: // OK.
+		case .ETIME, .ECANCELED: // OK.
 		case .EINTR, .EWOULDBLOCK:
 			timeout_enqueue(io, completion, op)
 			return
@@ -527,11 +588,29 @@ poll_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
 		flags += { .ADD_MULTI }
 	}
 
-	_, ok := uring.poll_add(&io.ring, u64(uintptr(completion)), op.fd, events, flags)
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.poll_add(
+		&io.ring,
+		u64(uintptr(completion)),
+		op.fd,
+		events,
+		flags,
+	))
 }
 
 poll_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
+	errno := linux.Errno(completion.result)
+	#partial switch errno {
+	case .NONE:
+	case .EINTR, .EWOULDBLOCK:
+		if !op.multi {
+			poll_enqueue(io, completion, op)
+		}
+	case .ECANCELED:
+		return
+	case:
+		// TODO: might want to give the user this error.
+	}
+
 	op.callback(completion.user_data, op.event)
 	if !op.multi {
 		pool_put(&io.completion_pool, completion)
@@ -539,14 +618,46 @@ poll_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
 }
 
 remove_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
-	_, ok := uring.async_cancel(&io.ring, u64(uintptr(op.target)), u64(uintptr(completion)))
-	enqueue(io, completion, ok)
+	enqueue(io, completion, uring.async_cancel(
+		&io.ring,
+		u64(uintptr(op.target)),
+		u64(uintptr(completion)),
+	))
 }
 
 remove_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
 	err := linux.Errno(-completion.result)
 	if err != nil && err != .ENOENT {
 		fmt.panicf("unexpected nbio.remove() error: %v", err)
+	}
+
+	pool_put(&io.completion_pool, completion)
+}
+
+link_timeout_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Timeout) {
+	// If the last op was queued because kernel is full, also queue this op.
+	if queue.len(io.unqueued) > 0 && queue.peek_back(&io.unqueued)^ == op.target {
+		enqueue(io, completion, nil, false)
+		return
+	}
+
+	sqe, ok := uring.link_timeout(
+		&io.ring,
+		u64(uintptr(completion)),
+		&op.expires,
+		{},
+	)
+	// If the target wasn't queued, the link timeout should not need to be queued, because uring
+	// leaves one spot specifically for a link_timeout.
+	assert(ok)
+
+	enqueue(io, completion, sqe, ok)
+}
+
+link_timeout_callback :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Timeout) {
+	err := linux.Errno(-completion.result)
+	if err != nil && err != .ETIME && err != .ECANCELED {
+		fmt.panicf("unexpected nbio.link_timeout() error: %v", err)
 	}
 
 	pool_put(&io.completion_pool, completion)

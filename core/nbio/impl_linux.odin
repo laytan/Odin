@@ -353,17 +353,38 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 }
 
 _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) -> ^Completion {
-	unimplemented()
+	target.sqe.flags += {.IO_LINK}
+
+	completion := pool_get(&io.completion_pool)
+	completion.ctx = context
+
+	nsec := time.duration_nanoseconds(dur)
+	completion.operation = _Op_Link_Timeout {
+		target = target,
+		expires = linux.Time_Spec {
+			time_sec  = uint(nsec / NANOSECONDS_PER_SECOND),
+			time_nsec = uint(nsec % NANOSECONDS_PER_SECOND),
+		},
+	}
+
+	link_timeout_enqueue(io, completion, &completion.operation.(_Op_Link_Timeout))
+	return completion
 }
 
 _remove :: proc(io: ^IO, target: ^Completion) {
+	target := target
 	assert(target != nil)
 
-	if _, is_remove := target.operation.(Op_Remove); is_remove {
+	#partial switch &op in target.operation {
+	case Op_Remove:
 		panic("can't remove a remove event")
+	case _Op_Link_Timeout: 
+		target = op.target
 	}
 
 	completion := pool_get(&io.completion_pool)
+	completion.ctx = context
+
 	completion.operation = Op_Remove {
 		target = target,
 	}

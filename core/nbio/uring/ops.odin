@@ -427,7 +427,7 @@ be `-ECANCELED`), or
 Available since 5.5.
 */
 link_timeout :: proc(ring: ^Ring, user_data: u64, ts: ^linux.Time_Spec, flags: linux.IO_Uring_Timeout_Flags) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	sqe = get_sqe(ring) or_return
+	sqe = get_sqe(ring, 0) or_return
 	sqe.opcode = .LINK_TIMEOUT
 	sqe.fd = -1
 	sqe.addr = cast(u64)uintptr(ts)

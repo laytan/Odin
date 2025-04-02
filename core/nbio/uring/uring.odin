@@ -52,12 +52,14 @@ destroy :: proc(ring: ^Ring) {
 }
 
 // Returns a pointer to a vacant submission queue entry, or nil if the submission queue is full.
-get_sqe :: proc(ring: ^Ring) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
+// NOTE: extra is so you can make sure there is space for related entries, defaults to 1 so
+// a link timeout op can always be added after another.
+get_sqe :: proc(ring: ^Ring, extra: int = 1) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
 	sq := &ring.sq
 	head: u32 = sync.atomic_load_explicit(sq.head, .Acquire)
 	next := sq.sqe_tail + 1
 
-	if int(next - head) > len(sq.sqes) {
+	if int(next - head) > len(sq.sqes)-extra {
 		sqe = nil
 		ok = false
 		return
