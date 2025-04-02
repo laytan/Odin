@@ -255,3 +255,17 @@ poll_already_ready :: proc(t: ^testing.T) {
 	nbio.close(fd)
 	ev(t, nbio.run(), nil)
 }
+
+@(test)
+remove_timeout :: proc(t: ^testing.T) {
+	hit: bool
+	timeout := nbio.timeout_poly(time.Second, &hit, proc(hit: ^bool) {
+		hit^ = true
+	})
+
+	nbio.remove(timeout)
+
+	ev(t, nbio.run(), nil)
+
+	e(t, !hit)
+}

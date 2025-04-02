@@ -12,12 +12,14 @@ import "core:sys/linux"
 
 NANOSECONDS_PER_SECOND :: 1e+9
 
+REMOVED :: rawptr(max(uintptr)-1)
+
 _IO :: struct #no_copy {
 	ring:            uring.Ring,
 	completion_pool: Pool,
-	// Ready to be submitted to kernel.
+	// Ready to be submitted to kernel, if kernel is full.
 	unqueued:        queue.Queue(^Completion),
-	// Ready to run callbacks.
+	// Ready to run callbacks. NOTE: only has next tick events now. shouldn't need a queue for that.
 	completed:       queue.Queue(^Completion),
 	ios_queued:      u64,
 	ios_in_kernel:   u64,
@@ -30,6 +32,7 @@ _Completion :: struct {
 	result:    i32,
 	operation: Operation,
 	ctx:       runtime.Context,
+	removal:   ^Completion,
 }
 
 Op_Accept :: struct {
@@ -124,20 +127,24 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 
 	for _ in 0..<n {
 		unqueued := queue.pop_front(&io.unqueued)
+
+		if unqueued.removal != nil {
+			remove_callback(io, unqueued.removal, &unqueued.removal.operation.(Op_Remove))
+			continue
+		}
+
 		switch &op in unqueued.operation {
-		case Op_Accept:      accept_enqueue (io, unqueued, &op)
-		case Op_Close:       close_enqueue  (io, unqueued, &op)
-		case Op_Connect:     connect_enqueue(io, unqueued, &op)
-		case Op_Read:        read_enqueue   (io, unqueued, &op)
-		case Op_Recv:        recv_enqueue   (io, unqueued, &op)
-		case Op_Send:        send_enqueue   (io, unqueued, &op)
-		case Op_Write:       write_enqueue  (io, unqueued, &op)
-		case Op_Timeout:     timeout_enqueue(io, unqueued, &op)
-		case Op_Poll:        poll_enqueue   (io, unqueued, &op)
-		case Op_Remove, Op_Next_Tick: // todo
-			unreachable()
-		case:
-			unreachable()
+		case Op_Accept:    accept_enqueue (io, unqueued, &op)
+		case Op_Close:     close_enqueue  (io, unqueued, &op)
+		case Op_Connect:   connect_enqueue(io, unqueued, &op)
+		case Op_Read:      read_enqueue   (io, unqueued, &op)
+		case Op_Recv:      recv_enqueue   (io, unqueued, &op)
+		case Op_Send:      send_enqueue   (io, unqueued, &op)
+		case Op_Write:     write_enqueue  (io, unqueued, &op)
+		case Op_Timeout:   timeout_enqueue(io, unqueued, &op)
+		case Op_Poll:      poll_enqueue   (io, unqueued, &op)
+		case Op_Remove:    remove_enqueue (io, unqueued, &op)
+		case Op_Next_Tick: unreachable()
 		}
 	}
 
@@ -146,21 +153,9 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 		completed := queue.pop_front(&io.completed)
 		context = completed.ctx
 
-		switch &op in completed.operation {
-		case Op_Accept:      accept_callback   (io, completed, &op)
-		case Op_Close:       close_callback    (io, completed, &op)
-		case Op_Connect:     connect_callback  (io, completed, &op)
-		case Op_Read:        read_callback     (io, completed, &op)
-		case Op_Recv:        recv_callback     (io, completed, &op)
-		case Op_Send:        send_callback     (io, completed, &op)
-		case Op_Write:       write_callback    (io, completed, &op)
-		case Op_Timeout:     timeout_callback  (io, completed, &op)
-		case Op_Poll:        poll_callback     (io, completed, &op)
-		case Op_Next_Tick:   next_tick_callback(io, completed, &op)
-		case Op_Remove:
-			unreachable()
-		case:
-			unreachable()
+		#partial switch &op in completed.operation {
+		case Op_Next_Tick: next_tick_callback(io, completed, &op)
+		case:              unreachable()
 		}
 	}
 
@@ -176,10 +171,6 @@ flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 		wait_remaining = max(0, wait_remaining - completed)
 
 		if completed > 0 {
-			if err := queue.reserve(&io.completed, int(completed)); err != nil {
-				return .ENOMEM
-			}
-
 			for cqe in cqes[:completed] {
 				io.ios_in_kernel -= 1
 
@@ -192,11 +183,29 @@ flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 					continue
 				}
 
-				completion := cast(^Completion)uintptr(cqe.user_data)
-				completion.result = cqe.res
+				completed := cast(^Completion)uintptr(cqe.user_data)
 
-				ok, _ := queue.push_back(&io.completed, completion)
-				assert(ok) // Reserved above.
+				if completed.removal != nil {
+					pool_put(&io.completion_pool, completed)
+					continue
+				}
+
+				completed.result = cqe.res
+				context = completed.ctx
+
+				#partial switch &op in completed.operation {
+				case Op_Accept:      accept_callback   (io, completed, &op)
+				case Op_Close:       close_callback    (io, completed, &op)
+				case Op_Connect:     connect_callback  (io, completed, &op)
+				case Op_Read:        read_callback     (io, completed, &op)
+				case Op_Recv:        recv_callback     (io, completed, &op)
+				case Op_Send:        send_callback     (io, completed, &op)
+				case Op_Write:       write_callback    (io, completed, &op)
+				case Op_Timeout:     timeout_callback  (io, completed, &op)
+				case Op_Poll:        poll_callback     (io, completed, &op)
+				case Op_Remove:      remove_callback   (io, completed, &op)
+				case:                unreachable()
+				}
 			}
 		}
 
@@ -527,6 +536,20 @@ poll_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
 	if !op.multi {
 		pool_put(&io.completion_pool, completion)
 	}
+}
+
+remove_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
+	_, ok := uring.async_cancel(&io.ring, u64(uintptr(op.target)), u64(uintptr(completion)))
+	enqueue(io, completion, ok)
+}
+
+remove_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
+	err := linux.Errno(-completion.result)
+	if err != nil && err != .ENOENT {
+		fmt.panicf("unexpected nbio.remove() error: %v", err)
+	}
+
+	pool_put(&io.completion_pool, completion)
 }
 
 sockaddr_storage_to_endpoint :: proc(addr: ^linux.Sock_Addr_Any) -> (ep: net.Endpoint) {

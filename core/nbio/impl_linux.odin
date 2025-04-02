@@ -357,7 +357,20 @@ _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) ->
 }
 
 _remove :: proc(io: ^IO, target: ^Completion) {
-	unimplemented()
+	assert(target != nil)
+
+	if _, is_remove := target.operation.(Op_Remove); is_remove {
+		panic("can't remove a remove event")
+	}
+
+	completion := pool_get(&io.completion_pool)
+	completion.operation = Op_Remove {
+		target = target,
+	}
+
+	target.removal = completion
+
+	remove_enqueue(io, completion, &completion.operation.(Op_Remove))
 }
 
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
