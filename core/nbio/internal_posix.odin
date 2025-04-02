@@ -360,6 +360,12 @@ flush_timeouts :: proc(io: ^IO) -> (min_timeout: Maybe(i64)) {
 		expires := time.to_unix_nanoseconds(timeout.expires)
 		if unow >= expires {
 			ordered_remove(&io.timeouts, i)
+
+			if completion.timeout == (^Completion)(REMOVED) {
+				pool_put(&io.completion_pool, completion)
+				continue
+			}
+
 			do_timeout(io, completion, timeout)
 			continue
 		}

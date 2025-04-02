@@ -333,6 +333,7 @@ _remove :: proc(io: ^IO, target: ^Completion) {
 	#partial switch &op in target.operation {
 	case Op_Timeout:
 		op.expires = { _nsec = -1 }
+		target.timeout = (^Completion)(REMOVED)
 
 		if op.callback == cast(On_Timeout)INTERNAL_TIMEOUT {
 			_remove(io, (^Completion)(target.user_data))
