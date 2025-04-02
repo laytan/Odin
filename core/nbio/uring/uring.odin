@@ -185,7 +185,7 @@ cqe_seen :: proc(ring: ^Ring) {
 // For advanced use cases only that implement custom completion queue methods.
 // Matches the implementation of cq_advance() in liburing.
 cq_advance :: proc(ring: ^Ring, count: u32) {
-	if count == 0 do return
+	if count == 0 { return }
 	sync.atomic_store_explicit(ring.cq.head, ring.cq.head^ + count, .Release)
 }
 
