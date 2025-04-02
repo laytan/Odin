@@ -20,9 +20,6 @@ _init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
 
 	params := uring.DEFAULT_PARAMS
 
-	// Make read, write etc. increment and use the file cursor.
-	params.features += {.RW_CUR_POS}
-
 	ENTRIES :: 256
 	uerr := uring.init(&io.ring, &params, ENTRIES)
 	if uerr != nil {
