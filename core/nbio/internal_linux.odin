@@ -14,6 +14,8 @@ NANOSECONDS_PER_SECOND :: 1e+9
 
 REMOVED :: rawptr(max(uintptr)-1)
 
+// TODO: link_timeout is not enqueued again after a callback requeues because of EINTR or EWOULDBLOCK.
+
 _IO :: struct #no_copy {
 	ring:            uring.Ring,
 	completion_pool: Pool,
@@ -390,8 +392,7 @@ recv_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		// TODO: recv from udp is not possible with uring, surely not?
 
 		// NOTE: emulation via poll.
-
-		_poll(io, linux.Fd(sock), .Read, false, completion, proc(completion: rawptr, _: Poll_Event) {
+		poll := _poll(io, linux.Fd(sock), .Read, false, completion, proc(completion: rawptr, _: Poll_Event) {
 			completion := (^Completion)(completion)
 			op         := &completion.operation.(Op_Recv)
 
@@ -406,6 +407,7 @@ recv_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 
 			recv_callback(io(), completion, op)
 		})
+		completion.sqe = poll.sqe
 	}
 }
 

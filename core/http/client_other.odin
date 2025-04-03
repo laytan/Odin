@@ -698,7 +698,6 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 		}
 
 		on_header_line :: proc(r: ^In_Flight, token: string, err: bufio.Scanner_Error) {
-			log.info(token, err)
 			if err != nil {
 				handle_scanner_err(r, err, "failed reading header line")
 				return
