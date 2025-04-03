@@ -258,7 +258,6 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 		} else {
 			ws(b, "content-length: ")
 
-			assert(content_length < 1000000000000000000 && content_length > -1000000000000000000)
 			buf: [20]byte
 			ws(b, strconv.itoa(buf[:], content_length))
 			ws(b, "\r\n")
