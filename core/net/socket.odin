@@ -20,6 +20,37 @@ package net
 		Feoramund:       FreeBSD platform code
 */
 
+Shutdown_Manner :: enum i32 {
+	Receive = i32(_SHUTDOWN_MANNER_RECEIVE),
+	Send    = i32(_SHUTDOWN_MANNER_SEND),
+	Both    = i32(_SHUTDOWN_MANNER_BOTH),
+}
+
+// TODO: add docs and values.
+Socket_Option :: enum i32 {
+	// All:
+	Broadcast,
+	Reuse_Address,
+	Keep_Alive,
+	Linger,
+	Out_Of_Bounds_Data_Inline,
+	Send_Buffer_Size,
+	Receive_Buffer_Size,
+	Send_Timeout,
+	Receive_Timeout,
+	// Darwin & Linux & Windows:
+	TCP_Nodelay,
+	// FreeBSD:
+	Use_Loopback              = i32(_SOCKET_OPTION_USE_LOOPBACK),
+	Reuse_Port                = i32(_SOCKET_OPTION_REUSE_PORT),
+	No_SIGPIPE_From_EPIPE     = i32(_SOCKET_OPTION_NO_SIGPIPE_FROM_EPIPE),
+	Reuse_Port_Load_Balancing = i32(_SOCKET_OPTION_REUSE_PORT_LOAD_BALANCING),
+	// Windows:
+	Exclusive_Addr_Use,
+	Conditional_Accept,
+	Dont_Linger,
+}
+
 any_socket_to_socket :: proc "contextless" (socket: Any_Socket) -> Socket {
 	switch s in socket {
 	case TCP_Socket:  return Socket(s)

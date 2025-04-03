@@ -29,7 +29,7 @@ Create_Socket_Error :: enum c.int {
 	Family_Not_Supported_For_This_Socket = c.int(linux.Errno.EAFNOSUPPORT),
 	No_Socket_Descriptors_Available      = c.int(linux.Errno.EMFILE),
 	No_Buffer_Space_Available            = c.int(linux.Errno.ENOBUFS),
-	No_Memory_Available_Available        = c.int(linux.Errno.ENOMEM),
+	No_Memory_Available                  = c.int(linux.Errno.ENOMEM),
 	Protocol_Unsupported_By_System       = c.int(linux.Errno.EPROTONOSUPPORT),
 	Wrong_Protocol_For_Socket            = c.int(linux.Errno.EPROTONOSUPPORT),
 	Family_And_Socket_Type_Mismatch      = c.int(linux.Errno.EPROTONOSUPPORT),

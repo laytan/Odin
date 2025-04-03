@@ -24,6 +24,53 @@ import "core:c"
 import win "core:sys/windows"
 import "core:time"
 
+Socket_Option :: enum c.int {
+	// bool: Whether the address that this socket is bound to can be reused by other sockets.
+	//       This allows you to bypass the cooldown period if a program dies while the socket is bound.
+	Reuse_Address             = win.SO_REUSEADDR,
+
+	// bool: Whether other programs will be inhibited from binding the same endpoint as this socket.
+	Exclusive_Addr_Use        = win.SO_EXCLUSIVEADDRUSE,
+
+	// bool: When true, keepalive packets will be automatically be sent for this connection. TODO: verify this understanding
+	Keep_Alive                = win.SO_KEEPALIVE, 
+
+	// bool: When true, client connections will immediately be sent a TCP/IP RST response, rather than being accepted.
+	Conditional_Accept        = win.SO_CONDITIONAL_ACCEPT,
+
+	// bool: If true, when the socket is closed, but data is still waiting to be sent, discard that data.
+	Dont_Linger               = win.SO_DONTLINGER,
+
+	// bool: When true, 'out-of-band' data sent over the socket will be read by a normal net.recv() call, the same as normal 'in-band' data.
+	Out_Of_Bounds_Data_Inline = win.SO_OOBINLINE,   
+
+	// bool: When true, disables send-coalescing, therefore reducing latency.
+	TCP_Nodelay               = win.TCP_NODELAY, 
+
+	// win.LINGER: Customizes how long (if at all) the socket will remain open when there
+	// is some remaining data waiting to be sent, and net.close() is called.
+	Linger                    = win.SO_LINGER, 
+
+	// win.DWORD: The size, in bytes, of the OS-managed receive-buffer for this socket.
+	Receive_Buffer_Size       = win.SO_RCVBUF, 
+
+	// win.DWORD: The size, in bytes, of the OS-managed send-buffer for this socket.
+	Send_Buffer_Size          = win.SO_SNDBUF,
+
+	// win.DWORD: For blocking sockets, the time in milliseconds to wait for incoming data to be received, before giving up and returning .Timeout.
+	//            For non-blocking sockets, ignored.
+	//            Use a value of zero to potentially wait forever.
+	Receive_Timeout           = win.SO_RCVTIMEO,
+
+	// win.DWORD: For blocking sockets, the time in milliseconds to wait for outgoing data to be sent, before giving up and returning .Timeout.
+	//            For non-blocking sockets, ignored.
+	//            Use a value of zero to potentially wait forever.
+	Send_Timeout              = win.SO_SNDTIMEO,
+
+	// bool: Allow sending to, receiving from, and binding to, a broadcast address.
+	Broadcast                 = win.SO_BROADCAST, 
+}
+
 @(init, private)
 ensure_winsock_initialized :: proc() {
 	win.ensure_winsock_initialized()
