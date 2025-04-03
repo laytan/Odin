@@ -14,8 +14,6 @@ nop :: proc(ring: ^Ring, user_data: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool)
 
 // Vectored read operation, see also readv(2).
 readv :: proc(ring: ^Ring, user_data: u64, fd: linux.Fd, iovs: []linux.IO_Vec, off: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(iovs) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .READV
 	sqe.fd = fd
@@ -30,8 +28,6 @@ readv :: proc(ring: ^Ring, user_data: u64, fd: linux.Fd, iovs: []linux.IO_Vec, o
 
 // Vectored write operation, see also writev(2).
 writev :: proc(ring: ^Ring, user_data: u64, fd: linux.Fd, iovs: []linux.IO_Vec, off: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(iovs) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .WRITEV
 	sqe.fd = fd
@@ -250,8 +246,6 @@ If poll does indicate that data can be sent, the operation will proceed.
 Available since 5.6.
 */
 send :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: linux.Socket_Msg, poll_first := false) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(buf) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .SEND
 	sqe.fd = sockfd
@@ -287,8 +281,6 @@ If poll does indicate that data is ready to be received, the operation will proc
 Available since 5.6.
 */
 recv :: proc(ring: ^Ring, user_data: u64, sockfd: linux.Fd, buf: []byte, flags: linux.Socket_Msg, poll_first := false) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(buf) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .RECV
 	sqe.fd = sockfd
@@ -576,8 +568,6 @@ See also read(2) for the general description of the related system call.
 Available since 5.6.
 */
 read :: proc(ring: ^Ring, user_data: u64, fd: linux.Fd, buf: []u8, offset: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(buf) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .READ
 	sqe.fd = fd
@@ -600,8 +590,6 @@ See also write(2) for the general description of the related system call.
 Available since 5.6.
 */
 write :: proc(ring: ^Ring, user_data: u64, fd: linux.Fd, buf: []u8, offset: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(buf) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .WRITE
 	sqe.fd = fd
@@ -669,8 +657,6 @@ Note that the array of file descriptors pointed to in addr must remain valid unt
 Available since 5.6.
 */
 files_update :: proc(ring: ^Ring, user_data: u64, fds: []linux.Fd, off: u64) -> (sqe: ^linux.IO_Uring_SQE, ok: bool) {
-	assert(len(fds) < int(max(u32)))
-
 	sqe = get_sqe(ring) or_return
 	sqe.opcode = .FILES_UPDATE
 	sqe.addr = cast(u64)uintptr(raw_data(fds))

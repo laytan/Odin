@@ -1967,7 +1967,7 @@ IO_Uring_Enter_Flags_Bits :: enum {
 	REGISTERED_RING,
 }
 
-IO_Uring_Register_Opcode :: enum {
+IO_Uring_Register_Opcode :: enum uint {
 	REGISTER_BUFFERS = 0,
 	UNREGISTER_BUFFERS = 1,
 	REGISTER_FILES = 2,
