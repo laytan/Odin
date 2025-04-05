@@ -275,18 +275,19 @@ accept_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 accept_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 	if completion.result < 0 {
 		errno := linux.Errno(-completion.result)
+		err: net.Accept_Error
 		#partial switch errno {
 		case .EINTR, .EWOULDBLOCK:
 			accept_enqueue(io, completion, op)
+			return
 		case .ECANCELED:
-			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
-			// see posix implementation at time_out_op for reference.
-			errno = .EWOULDBLOCK
-			fallthrough
+			err = .Timeout
 		case:
-			op.callback(completion.user_data, 0, {}, net._accept_error(errno))
-			pool_put(&io.completion_pool, completion)
+			err = net._accept_error(errno)
 		}
+
+		op.callback(completion.user_data, 0, {}, err)
+		pool_put(&io.completion_pool, completion)
 		return
 	}
 
@@ -323,21 +324,21 @@ connect_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 
 connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 	errno := linux.Errno(-completion.result)
-	#partial switch errno {
-	case .EINTR, .EWOULDBLOCK:
-		connect_enqueue(io, completion, op)
-		return
-	case .NONE:
-		op.callback(completion.user_data, op.socket, nil)
-	case .ECANCELED:
-		// NOTE: to return a consistent accept error for the implementations on a timed out completion.
-		// see posix implementation at time_out_op for reference.
-		errno = .ETIMEDOUT
-		fallthrough
-	case:
+	err: net.Dial_Error
+	if errno != nil {
+		#partial switch errno {
+		case .EINTR, .EWOULDBLOCK:
+			connect_enqueue(io, completion, op)
+			return
+		case .ECANCELED:
+			err = .Timeout
+		case:
+			err = net._dial_error(errno)
+		}
 		close(op.socket)
-		op.callback(completion.user_data, {}, net._dial_error(errno))
 	}
+
+	op.callback(completion.user_data, {}, err)
 	pool_put(&io.completion_pool, completion)
 }
 
@@ -417,18 +418,31 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		#partial switch errno {
 		case .EINTR, .EWOULDBLOCK:
 			recv_enqueue(io, completion, op)
-		case .ECANCELED:
-			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
-			// see posix implementation at time_out_op for reference.
-			errno = .EWOULDBLOCK
-			fallthrough
-		case:
-			switch cb in op.callback {
-			case On_Recv_TCP: cb(completion.user_data, op.received, net._tcp_recv_error(errno))
-			case On_Recv_UDP: cb(completion.user_data, op.received, {}, net._udp_recv_error(errno))
-			}
-			pool_put(&io.completion_pool, completion)
+			return
 		}
+
+		switch cb in op.callback {
+		case On_Recv_TCP:
+			err: net.TCP_Recv_Error
+			#partial switch errno {
+			case .ECANCELED:
+				err = .Timeout
+			case:
+				err = net._tcp_recv_error(errno)
+			}
+			cb(completion.user_data, op.received, err)
+		case On_Recv_UDP:
+			err: net.UDP_Recv_Error
+			#partial switch errno {
+			case .ECANCELED:
+				err = .Timeout
+			case:
+				err = net._udp_recv_error(errno)
+			}
+			cb(completion.user_data, op.received, {}, err)
+		}
+
+		pool_put(&io.completion_pool, completion)
 		return
 	}
 
@@ -476,22 +490,31 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		#partial switch errno {
 		case .EINTR, .EWOULDBLOCK:
 			send_enqueue(io, completion, op)
-		case .EPIPE:
-			errno = .ECONNRESET
-			fallthrough
-		case:
-			// NOTE: to return a consistent accept error for the implementations on a timed out completion.
-			// see posix implementation at time_out_op for reference.
-			if errno == .ECANCELED {
-				errno = .EWOULDBLOCK
-			}
-
-			switch cb in op.callback {
-			case On_Sent_TCP: cb(completion.user_data, op.sent, net._tcp_send_error(errno))
-			case On_Sent_UDP: cb(completion.user_data, op.sent, net._udp_send_error(errno))
-			}
-			pool_put(&io.completion_pool, completion)
+			return
 		}
+
+		switch cb in op.callback {
+		case On_Sent_TCP:
+			err: net.TCP_Send_Error
+			#partial switch errno {
+			case .ECANCELED:
+				err = .Timeout
+			case:
+				err = net._tcp_send_error(errno)
+			}
+			cb(completion.user_data, op.sent, err)
+		case On_Sent_UDP:
+			err: net.UDP_Send_Error
+			#partial switch errno {
+			case .ECANCELED:
+				err = .Timeout
+			case:
+				err = net._udp_send_error(errno)
+			}
+			cb(completion.user_data, op.sent, err)
+		}
+
+		pool_put(&io.completion_pool, completion)
 		return
 	}
 
