@@ -13,7 +13,7 @@ import "core:time"
 
 Scan_Callback   :: #type proc(s: ^Scanner, token: string, err: bufio.Scanner_Error)
 Split_Proc      :: #type proc(split_data: rawptr, data: []byte, at_eof: bool) -> (advance: int, token: []byte, err: bufio.Scanner_Error, final_token: bool)
-On_Scanner_Read :: #type proc(s: ^Scanner, n: int, e: net.Network_Error)
+On_Scanner_Read :: #type proc(s: ^Scanner, n: int, e: net.TCP_Recv_Error)
 Recv_Proc       :: #type proc(user_data: rawptr, buf: []byte, s: ^Scanner, callback: On_Scanner_Read)
 
 scan_lines :: proc(split_data: rawptr, data: []byte, at_eof: bool) -> (advance: int, token: []byte, err: bufio.Scanner_Error, final_token: bool) {
@@ -242,27 +242,17 @@ _scanner_scan :: proc(s: ^Scanner) {
 	s.recv(s.recv_user_data, s.buf[s.end:len(s.buf)], s, scanner_on_read)
 }
 
-scanner_on_read :: proc(s: ^Scanner, n: int, e: net.Network_Error) {
+scanner_on_read :: proc(s: ^Scanner, n: int, e: net.TCP_Recv_Error) {
 	defer _scanner_scan(s)
 
 	if e != nil {
-		#partial switch ee in e {
-		case net.TCP_Recv_Error:
-			#partial switch ee {
-			case .Connection_Closed, net.TCP_Recv_Error(9):
-				// 9 for EBADF (bad file descriptor) happens when OS closes socket.
-				s._err = .EOF
-				return
-			case .Timeout:
-				s._err = .No_Progress
-				return
-			}
-		case net.UDP_Recv_Error:
-			#partial switch ee {
-			case .Timeout:
-				s._err = .No_Progress
-				return
-			}
+		#partial switch e {
+		case .Connection_Closed:
+			s._err = .EOF
+			return
+		case .Timeout:
+			s._err = .No_Progress
+			return
 		}
 
 		log.errorf("unexpected scanner recv err: %#v", e)

@@ -1,3 +1,4 @@
+#+build windows, linux, darwin, freebsd
 package tests_nbio
 
 import "core:log"
@@ -277,7 +278,7 @@ with_timeout :: proc(t: ^testing.T) {
 	hit: bool
 	accept := nbio.accept_poly2(sock, t, &hit, proc(t: ^testing.T, hit: ^bool, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
 		hit^ = true
-		ev(t, err, net.Accept_Error.Would_Block)
+		ev(t, err, net.Accept_Error.Timeout)
 	})
 	nbio.with_timeout(time.Millisecond, accept)
 

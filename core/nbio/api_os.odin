@@ -1,4 +1,4 @@
-#+build !js
+#+build linux, windows, darwin, freebsd
 package nbio
 
 import "core:net"

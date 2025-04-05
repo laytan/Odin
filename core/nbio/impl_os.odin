@@ -1,4 +1,4 @@
-#+build !js
+#+build windows, linux, darwin, freebsd
 #+private
 package nbio
 

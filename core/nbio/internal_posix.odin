@@ -1,4 +1,4 @@
-#+build darwin, openbsd, netbsd, freebsd
+#+build darwin, freebsd
 #+private
 package nbio
 
@@ -194,9 +194,11 @@ flush :: proc(io: ^IO) -> General_Error {
 		if completed.timeout == (^Completion)(REMOVED) {
 			pool_put(&io.completion_pool, completed)
 			continue
+		} else if completed.timeout == (^Completion)(TIMED_OUT) {
+			time_out_op(io, completed)
+			pool_put(&io.completion_pool, completed)
+			continue
 		}
-
-		assert(completed.timeout != (^Completion)(TIMED_OUT))
 
 		switch &op in completed.operation {
 		case Op_Accept:      do_accept     (io, completed, &op)
@@ -220,20 +222,20 @@ flush :: proc(io: ^IO) -> General_Error {
 time_out_op :: proc(io: ^IO, completed: ^Completion) {
 	context = completed.ctx
 	switch &op in completed.operation {
-	case Op_Accept:      op.callback(completed.user_data, {}, {}, net.Accept_Error.Would_Block)
+	case Op_Accept:      op.callback(completed.user_data, {}, {}, .Timeout)
 	case Op_Close:       op.callback(completed.user_data, .Timeout)
 	case Op_Connect:     op.callback(completed.user_data, {}, net.Dial_Error.Timeout)
 	case Op_Read:        op.callback(completed.user_data, 0, .Timeout)
 	case Op_Recv:
 		switch cb in op.callback {
-		case On_Recv_TCP: cb(completed.user_data, 0, net.TCP_Recv_Error.Timeout)
-		case On_Recv_UDP: cb(completed.user_data, 0, {}, net.UDP_Recv_Error.Timeout)
+		case On_Recv_TCP: cb(completed.user_data, 0, .Timeout)
+		case On_Recv_UDP: cb(completed.user_data, 0, {}, .Timeout)
 		case:             unreachable()
 		}
 	case Op_Send:
 		switch cb in op.callback {
-		case On_Sent_TCP: cb(completed.user_data, 0, net.TCP_Send_Error.Timeout)
-		case On_Sent_UDP: cb(completed.user_data, 0, net.UDP_Send_Error.Timeout)
+		case On_Sent_TCP: cb(completed.user_data, 0, .Timeout)
+		case On_Sent_UDP: cb(completed.user_data, 0, .Timeout)
 		case:             unreachable()
 		}
 	case Op_Write:       op.callback(completed.user_data, 0, .Timeout)
@@ -391,20 +393,21 @@ maybe_cancel_timeout :: #force_inline proc(completion: ^Completion) {
 }
 
 do_accept :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
-	client, source, err := net.accept_tcp(op.sock)
-	if err == net.Accept_Error.Would_Block {
+	client, source, acc_err := net.accept_tcp(op.sock)
+	if acc_err == .Would_Block {
 		push_pending(io, completion)
 		return
 	}
 
-	if err == nil {
-		if err = _prepare_socket(client); err != nil {
+	if acc_err == nil {
+		if prep_err := _prepare_socket(client); prep_err != nil {
 			net.close(client)
+			acc_err = .Unknown
 		}
 	}
 
-	if err != nil {
-		op.callback(completion.user_data, {}, {}, (^net.Accept_Error)(&err)^)
+	if acc_err != nil {
+		op.callback(completion.user_data, {}, {}, acc_err)
 	} else {
 		op.callback(completion.user_data, client, source, nil)
 	}
@@ -439,7 +442,7 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 
 	if err != nil {
 		net.close(op.socket)
-		op.callback(completion.user_data, {}, net.Dial_Error(err))
+		op.callback(completion.user_data, {}, _dial_error(err))
 	} else {
 		op.callback(completion.user_data, op.socket, nil)
 	}
@@ -476,21 +479,17 @@ do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 }
 
 do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
-	// received: int
-	// err: net.Network_Error
-	// remote_endpoint: Maybe(net.Endpoint)
 	switch sock in op.socket {
 	case net.TCP_Socket:
 		received, err := net.recv_tcp(sock, op.buf)
 		if err != nil {
-			// NOTE: Timeout is the name for EWOULDBLOCK in net package.
-			if err == net.TCP_Recv_Error.Timeout {
+			if err == .Would_Block {
 				push_pending(io, completion)
 				return
 			}
 
 			maybe_cancel_timeout(completion)
-			op.callback.(On_Recv_TCP)(completion.user_data, op.received, err.(net.TCP_Recv_Error))
+			op.callback.(On_Recv_TCP)(completion.user_data, op.received, err)
 			pool_put(&io.completion_pool, completion)
 			return
 		}
@@ -510,14 +509,13 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 	case net.UDP_Socket:
 		received, remote_endpoint, err := net.recv_udp(sock, op.buf)
 		if err != nil {
-			// NOTE: Timeout is the name for EWOULDBLOCK in net package.
-			if err == net.UDP_Recv_Error.Timeout {
+			if err == .Would_Block {
 				push_pending(io, completion)
 				return
 			}
 
 			maybe_cancel_timeout(completion)
-			op.callback.(On_Recv_UDP)(completion.user_data, op.received, remote_endpoint, err.(net.UDP_Recv_Error))
+			op.callback.(On_Recv_UDP)(completion.user_data, op.received, remote_endpoint, err)
 			pool_put(&io.completion_pool, completion)
 			return
 		}
@@ -541,11 +539,8 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 	case net.TCP_Socket:
 		sent := posix.send(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL})
 		if sent < 0 {
-			errno := posix.errno()
-			err   := net.TCP_Send_Error(errno)
-			if errno == .EPIPE {
-				err = net.TCP_Send_Error.Connection_Closed
-			} else if errno == .EWOULDBLOCK {
+			err := _tcp_send_error()
+			if err == .Would_Block {
 				push_pending(io, completion)
 				return
 			}
@@ -570,11 +565,8 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 		toaddr := _endpoint_to_sockaddr(op.endpoint.(net.Endpoint))
 		sent := posix.sendto(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
 		if sent < 0 {
-			errno := posix.errno()
-			err   := net.UDP_Send_Error(errno)
-			if errno == .EPIPE {
-				err = net.UDP_Send_Error.Not_Socket
-			} else if errno == .EWOULDBLOCK {
+			err := _udp_send_error()
+			if err == .Would_Block {
 				push_pending(io, completion)
 				return
 			}

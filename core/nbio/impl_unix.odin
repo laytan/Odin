@@ -1,4 +1,4 @@
-#+build darwin, netbsd, openbsd, freebsd, linux
+#+build darwin, freebsd, linux
 #+private
 package nbio
 
@@ -21,8 +21,8 @@ _open_socket :: proc(
 
 // TODO: public `prepare_handle` and `prepare_socket` to take in a handle/socket from some other source?
 // (If that is possible on Windows).
-_prepare_socket :: proc(socket: net.Any_Socket) -> net.Network_Error {
-	net.set_option(socket, .Reuse_Address, true) or_return
+_prepare_socket :: proc(socket: net.Any_Socket) -> net.Set_Blocking_Error {
+	net.set_option(socket, .Reuse_Address, true)
 
 	// TODO; benchmark this, even if faster it is prob not to be turned on
 	// by default here, maybe by default for the server, but I don't think this

@@ -1,4 +1,4 @@
-#+build darwin, openbsd, netbsd, freebsd
+#+build darwin, freebsd
 #+private
 package nbio
 

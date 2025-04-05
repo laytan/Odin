@@ -430,7 +430,7 @@ on_accept :: proc(server: rawptr, sock: net.TCP_Socket, source: net.Endpoint, er
 
 	if err != nil {
 		#partial switch err {
-		case .No_Socket_Descriptors_Available_For_Client_Socket:
+		case .Insufficient_Resources:
 			log.error("Connection limit reached, trying again in a bit")
 			nbio.timeout(time.Second, server, proc(server: rawptr) {
 				server := cast(^Server)server

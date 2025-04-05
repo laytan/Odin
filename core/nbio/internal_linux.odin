@@ -284,17 +284,17 @@ accept_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Accept) {
 			errno = .EWOULDBLOCK
 			fallthrough
 		case:
-			op.callback(completion.user_data, 0, {}, net.Accept_Error(errno))
+			op.callback(completion.user_data, 0, {}, net._accept_error(errno))
 			pool_put(&io.completion_pool, completion)
 		}
 		return
 	}
 
 	client := net.TCP_Socket(completion.result)
-	err    := _prepare_socket(client)
+	_prepare_socket(client)
 	source := sockaddr_storage_to_endpoint(&op.sockaddr)
 
-	op.callback(completion.user_data, client, source, (^net.Accept_Error)(&err)^)
+	op.callback(completion.user_data, client, source, nil)
 	pool_put(&io.completion_pool, completion)
 }
 
@@ -336,7 +336,7 @@ connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 		fallthrough
 	case:
 		close(op.socket)
-		op.callback(completion.user_data, {}, net.Dial_Error(errno))
+		op.callback(completion.user_data, {}, net._dial_error(errno))
 	}
 	pool_put(&io.completion_pool, completion)
 }
@@ -424,8 +424,8 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 			fallthrough
 		case:
 			switch cb in op.callback {
-			case On_Recv_TCP: cb(completion.user_data, op.received, net.TCP_Recv_Error(errno))
-			case On_Recv_UDP: cb(completion.user_data, op.received, {}, net.UDP_Recv_Error(errno))
+			case On_Recv_TCP: cb(completion.user_data, op.received, net._tcp_recv_error(errno))
+			case On_Recv_UDP: cb(completion.user_data, op.received, {}, net._udp_recv_error(errno))
 			}
 			pool_put(&io.completion_pool, completion)
 		}
@@ -487,8 +487,8 @@ send_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 			}
 
 			switch cb in op.callback {
-			case On_Sent_TCP: cb(completion.user_data, op.sent, net.TCP_Send_Error(errno))
-			case On_Sent_UDP: cb(completion.user_data, op.sent, net.UDP_Send_Error(errno))
+			case On_Sent_TCP: cb(completion.user_data, op.sent, net._tcp_send_error(errno))
+			case On_Sent_UDP: cb(completion.user_data, op.sent, net._udp_send_error(errno))
 			}
 			pool_put(&io.completion_pool, completion)
 		}

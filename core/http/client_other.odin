@@ -467,7 +467,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 		on_sent_body :: proc(r: ^In_Flight, sent: int, err: net.TCP_Send_Error) {
 			#partial switch r.conn.state {
-			case .Failed:       on_sent_request(r, net.TCP_Send_Error.Aborted)
+			case .Failed:       on_sent_request(r, .Unknown)
 			case .Sent_Headers: on_sent_request(r, err)
 			case:               unreachable()
 			}
@@ -500,11 +500,11 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_write_req)
 			case .Shutdown:
 				log.error("write failed, connection is closed")
-				on_sent_request(r, net.TCP_Send_Error.Connection_Closed)
+				on_sent_request(r, .Connection_Closed)
 			case: fallthrough
 			case .Fatal:
 				log.errorf("write failed due to unknown Fatal reason")
-				on_sent_request(r, net.TCP_Send_Error.Aborted)
+				on_sent_request(r, .Connection_Closed)
 			}
 		}
 
@@ -543,12 +543,12 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			case: fallthrough
 			case .Fatal:
 				log.error("write failed due to unknown Fatal reason")
-				on_sent_request(r, net.TCP_Send_Error.Aborted)
+				on_sent_request(r, .Unknown)
 			}
 		}
 	}
 
-	on_sent_request :: proc(r: ^In_Flight, err: net.Network_Error) {
+	on_sent_request :: proc(r: ^In_Flight, err: net.TCP_Send_Error) {
 		if err != nil {
 			handle_net_err(r, err, "send request failed")
 			return
@@ -594,11 +594,11 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 						nbio.poll_poly3(nbio.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
 					case .Shutdown:
 						log.error("read failed, connection is closed")
-						callback(&r.conn.scanner, 0, net.TCP_Recv_Error.Connection_Closed)
+						callback(&r.conn.scanner, 0, .Connection_Closed)
 					case: fallthrough
 					case .Fatal:
 						log.error("read failed due to unknown Fatal reason")
-						callback(&r.conn.scanner, 0, net.TCP_Recv_Error.Aborted)
+						callback(&r.conn.scanner, 0, .Unknown)
 					}
 				}
 			}

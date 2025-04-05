@@ -1,3 +1,4 @@
+#+build windows, linux, darwin, freebsd
 package tests_nbio
 
 import "core:nbio"

@@ -161,7 +161,7 @@ _file_size :: proc(_: ^IO, fd: Handle) -> (i64, FS_Error) {
 
 _listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {
 	err := linux.listen(linux.Fd(socket), i32(backlog))
-	return net.Listen_Error(err)
+	return net._listen_error(err)
 }
 
 _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {

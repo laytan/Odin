@@ -1,4 +1,3 @@
-#+build js
 package nbio
 
 import "core:reflect"

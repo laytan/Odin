@@ -1,4 +1,4 @@
-#+build darwin, netbsd, openbsd, freebsd
+#+build darwin, freebsd
 #+private
 package nbio
 
@@ -167,23 +167,23 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 	return completion
 }
 
-_connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> (^Completion, net.Network_Error) {
+_connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> (completion: ^Completion, err: net.Network_Error) {
 	if endpoint.port == 0 {
 		return nil, net.Dial_Error.Port_Required
 	}
 
-	family := net.family_from_endpoint(endpoint)
-	sock, err := net.create_socket(family, .TCP)
+	sock: net.Any_Socket
+	sock, err = net.create_socket(net.family_from_endpoint(endpoint), .TCP)
 	if err != nil {
-		return nil, err
+		return
 	}
 
 	if err = _prepare_socket(sock); err != nil {
 		_close(io, net.any_socket_to_socket(sock), nil, empty_on_close)
-		return nil, err
+		return
 	}
 
-	completion := pool_get(&io.completion_pool)
+	completion = pool_get(&io.completion_pool)
 	completion.ctx = context
 	completion.user_data = user
 	completion.operation = Op_Connect {
@@ -193,7 +193,7 @@ _connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Con
 	}
 
 	push_completed(io, completion)
-	return completion, nil
+	return
 }
 
 _read :: proc(
