@@ -8,6 +8,8 @@ import "core:container/queue"
 import "core:mem"
 import "core:mem/virtual"
 
+_IS_SUPPORTED :: true
+
 // TODO: this is a dumb thrown together pool, we should add a good one to `core` and use that.
 
 // An object pool where the objects are allocated on a growing arena.

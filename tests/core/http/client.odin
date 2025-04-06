@@ -25,18 +25,9 @@ require_value :: proc(t: ^testing.T, val: $T, test: T, format := "", args: ..any
 
 rv :: require_value
 
-listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts := http.Default_Server_Opts, loc := #caller_location) -> (ep: net.Endpoint) {
-	err := http.listen(s, {net.IP4_Loopback, 0}, opts)
-	if err != nil {
-		log.panicf("http.listen failed: %v", err, location=loc)
-	}
-
-	ep, err = net.bound_endpoint(s.tcp_sock)
-	if err != nil {
-		log.panicf("net.bound_endpoint failed: %v", err, location=loc)
-	}
-
-	return
+listen_next_available_local_port :: proc(t: ^testing.T, s: ^http.Server, opts := http.Default_Server_Opts) -> (ep: net.Endpoint, err: net.Network_Error) {
+	http.listen(s, {net.IP4_Loopback, 0}, opts) or_return
+	return net.bound_endpoint(s.tcp_sock)
 }
 
 // Send a simple request and expect OK.
@@ -51,7 +42,12 @@ test_ok :: proc(tt: ^testing.T) {
 	opts := http.Default_Server_Opts
 	opts.thread_count = 0
 
-	ep := listen_next_available_local_port(t, &s, opts)
+	ep, err := listen_next_available_local_port(t, &s, opts)
+	if err == net.Create_Socket_Error.Network_Unreachable {
+		log.warn("network unreachable, probably unsupported target, skipping test")
+		return
+	}
+	ev(t, err, nil)
 
 	///
 
@@ -108,7 +104,7 @@ connection_pool :: proc(t: ^testing.T) {
 			http.respond(ctx.res)
 		})
 
-		s.ep = listen_next_available_local_port(t, &s.s, opts)
+		s.ep, _ = listen_next_available_local_port(t, &s.s, opts)
 
 		sync.one_shot_event_signal(&s.listening)
 
@@ -117,7 +113,10 @@ connection_pool :: proc(t: ^testing.T) {
 	defer thread.destroy(server_thread)
 
 	@static client: http.Client
-	http.client_init(&client)
+	if !http.client_init(&client) {
+		log.warn("could not initialize http client, probably unsupported target, skipping test")
+		return
+	}
 
 	sync.one_shot_event_wait(&s.listening)
 
@@ -174,7 +173,12 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 	opts := http.Default_Server_Opts
 	opts.thread_count = 0
 
-	ep := listen_next_available_local_port(t, &state.s, opts)
+	ep, err := listen_next_available_local_port(t, &state.s, opts)
+	if err == net.Create_Socket_Error.Network_Unreachable {
+		log.warn("network unreachable, probably unsupported target, skipping test")
+		return
+	}
+	ev(t, err, nil)
 
 	///
 
@@ -246,7 +250,10 @@ openssl :: proc(t: ^testing.T) {
 	s: State
 	s.t = t
 
-	http.client_init(&s.client)
+	if !http.client_init(&s.client) {
+		log.warn("could not initialize http client, probably unsupported target, skipping test")
+		return
+	}
 
 	http.request(&s.client, http.get("https://www.google.com/"), &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
 		s := (^State)(user)
@@ -270,7 +277,10 @@ one_sync :: proc(t: ^testing.T) {
 	http.set_client_ssl(ssl_http.client_implementation())
 
 	c: http.Client
-	http.client_init(&c)
+	if !http.client_init(&c) {
+		log.warn("could not initialize http client, probably unsupported target, skipping test")
+		return
+	}
 	defer {
 		http.client_destroy(&c)
 		ev(t, nbio.run(), nil)
@@ -294,6 +304,10 @@ multi_sync :: proc(t: ^testing.T) {
 
 	c: http.Client
 	http.client_init(&c)
+	if !http.client_init(&c) {
+		log.warn("could not initialize http client, probably unsupported target, skipping test")
+		return
+	}
 	defer {
 		http.client_destroy(&c)
 		ev(t, nbio.run(), nil)

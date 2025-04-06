@@ -1,4 +1,3 @@
-#+build windows, linux, darwin, freebsd
 package tests_nbio
 
 import "core:log"
@@ -29,6 +28,11 @@ open_next_available_local_port :: proc(t: ^testing.T, loc := #caller_location) -
 
 @(test)
 close_invalid_handle_works :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	nbio.close_poly(max(nbio.Handle), t, proc(t: ^testing.T, err: nbio.FS_Error) {
@@ -40,6 +44,11 @@ close_invalid_handle_works :: proc(t: ^testing.T) {
 
 @(test)
 write_read_close :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	handle, errno := nbio.open(
@@ -82,6 +91,11 @@ write_read_close :: proc(t: ^testing.T) {
 
 @(test)
 client_and_server_send_recv :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	server, ep := open_next_available_local_port(t)
@@ -140,6 +154,11 @@ client_and_server_send_recv :: proc(t: ^testing.T) {
 
 @(test)
 close_and_remove_accept :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	server, _ := open_next_available_local_port(t)
@@ -160,6 +179,11 @@ close_and_remove_accept :: proc(t: ^testing.T) {
 
 @(test)
 close_errors_recv :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	server, ep := open_next_available_local_port(t)
@@ -187,6 +211,11 @@ close_errors_recv :: proc(t: ^testing.T) {
 
 @(test)
 close_errors_send :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	server, ep := open_next_available_local_port(t)
@@ -214,6 +243,11 @@ close_errors_send :: proc(t: ^testing.T) {
 
 @(test)
 usage_across_threads :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	testing.set_fail_timeout(t, time.Second)
 
 	handle: nbio.Handle
@@ -241,6 +275,11 @@ usage_across_threads :: proc(t: ^testing.T) {
 
 @(test)
 poll_already_ready :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	fd, err := nbio.open(#file)
 	ev(t, err, nil)
 
@@ -259,6 +298,12 @@ poll_already_ready :: proc(t: ^testing.T) {
 
 @(test)
 remove_timeout :: proc(t: ^testing.T) {
+	// TODO: this should be supported by everything (timeouts and removing timeouts).
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	hit: bool
 	timeout := nbio.timeout_poly(time.Second, &hit, proc(hit: ^bool) {
 		hit^ = true
@@ -273,6 +318,11 @@ remove_timeout :: proc(t: ^testing.T) {
 
 @(test)
 with_timeout :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	sock, _ := open_next_available_local_port(t)
 
 	hit: bool
@@ -289,6 +339,11 @@ with_timeout :: proc(t: ^testing.T) {
 
 @(test)
 remove_a_completion_with_a_timeout :: proc(t: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	sock, _ := open_next_available_local_port(t)
 
 	hit_accept: bool

@@ -1,6 +1,6 @@
-#+build windows, linux, darwin, freebsd
 package tests_nbio
 
+import "core:log"
 import "core:nbio"
 import "core:net"
 import "core:testing"
@@ -246,6 +246,11 @@ all_poly_work :: proc(tt: ^testing.T) {
 
 @(test)
 read_entire_file_works :: proc(tt: ^testing.T) {
+	if !nbio.IS_SUPPORTED {
+		log.info("skipping test because nbio is not supported by this target")
+		return
+	}
+
 	@static t: ^testing.T
 	t = tt
 

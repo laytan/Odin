@@ -249,3 +249,8 @@ exit :: proc "contextless" (code: int) -> ! {
 current_thread_id :: proc "contextless" () -> int {
 	return 0
 }
+
+@(require_results)
+get_env :: proc(key: string, allocator := context.allocator) -> (value: string) {
+	return
+}

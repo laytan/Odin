@@ -1,3 +1,7 @@
+#+build !darwin
+#+build !freebsd
+#+build !linux
+#+build !windows
 package nbio
 
 import "core:reflect"

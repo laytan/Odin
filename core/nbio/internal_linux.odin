@@ -38,6 +38,21 @@ _Completion :: struct {
 	sqe:       ^linux.IO_Uring_SQE,
 }
 
+Operation :: union {
+	Op_Accept,
+	Op_Close,
+	Op_Connect,
+	Op_Read,
+	Op_Recv,
+	Op_Send,
+	Op_Write,
+	Op_Timeout,
+	Op_Next_Tick,
+	Op_Poll,
+	Op_Remove,
+	_Op_Link_Timeout,
+}
+
 Op_Accept :: struct {
 	callback:     On_Accept,
 	socket:       net.TCP_Socket,

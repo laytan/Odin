@@ -24,6 +24,7 @@ General_Error :: enum i32 {
 // Errors gotten from file system operations.
 FS_Error :: enum i32 {
 	None,
+	Unsupported        = i32(PLATFORM_ERR_UNSUPPORTED),
 	Allocation_Failed  = i32(PLATFORM_ERR_ALLOCATION_FAILED),
 	Timeout            = i32(PLATFORM_ERR_TIMEOUT),
 	Invalid_Argument   = i32(PLATFORM_ERR_INVALID_ARGUMENT),
