@@ -5,8 +5,6 @@
 #+private
 package nbio
 
-import "base:runtime"
-
 import "core:net"
 import "core:time"
 

@@ -1,4 +1,3 @@
-#+build linux, windows, darwin, freebsd
 package nbio
 
 import "base:runtime"
@@ -43,6 +42,10 @@ read_entire_file :: proc(fd: Handle, p: $T, callback: $C/proc(p: T, buf: []byte,
 		p   := unall((^T)     (rawptr(ptr + size_of(C) + size_of([]byte))))
 		cb(p, buf, err)
 	}, all = true)
+	if completion == nil {
+		callback(p, nil, .Unsupported)
+		return nil
+	}
 
 	ptr := uintptr(&completion.user_args)
 
@@ -73,6 +76,10 @@ read_entire_file2 :: proc(fd: Handle, p: $T, p2: $T2, callback: $C/proc(p: T, p2
 		p2  := unall((^T2)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T))))
 		cb(p, p2, buf, err)
 	}, all = true)
+	if completion == nil {
+		callback(p, p2, nil, .Unsupported)
+		return nil
+	}
 
 	ptr := uintptr(&completion.user_args)
 
@@ -105,6 +112,10 @@ read_entire_file3 :: proc(fd: Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc
 		p3  := unall((^T3)    (rawptr(ptr + size_of(C) + size_of([]byte) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, buf, err)
 	}, all = true)
+	if completion == nil {
+		callback(p, p2, p3, nil, .Unsupported)
+		return
+	}
 
 	ptr := uintptr(&completion.user_args)
 

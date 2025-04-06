@@ -7,7 +7,6 @@ package nbio
 
 import "base:runtime"
 
-import "core:container/queue"
 import "core:time"
 
 // TODO: update with thread local stuff.
