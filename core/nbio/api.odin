@@ -6,10 +6,18 @@ import "core:net"
 import "core:time"
 
 /*
-Whether the current target has support by this package.
-This means supporting networking and file system operation, other operations are supported everywhere.
+Initialize or increment the reference counter for the current thread's nbio instance.
 */
-IS_SUPPORTED :: _IS_SUPPORTED
+init :: proc() -> General_Error {
+	return _init()
+}
+
+/*
+Destroy or decrease the reference counter for the current thread's nbio instance.
+*/
+destroy :: proc() {
+	_destroy()
+}
 
 /*
 Each time you call this the IO implementation checks its state
@@ -24,12 +32,16 @@ Returns:
 - err: An error code when something went when retrieving events, 0 otherwise
 */
 tick :: proc() -> General_Error {
-	if !g_io.initialized { return nil }
+	if g_io.refs == 0 { return nil }
 	return _tick(&g_io)
 }
 
 run :: proc() -> General_Error {
-	if !g_io.initialized { return nil }
+	if g_io.refs == 0 { return nil }
+
+	init()
+	defer destroy()
+
 	for _num_waiting(&g_io) > 0 {
 		if errno := _tick(&g_io); errno != nil {
 			return errno
@@ -39,7 +51,11 @@ run :: proc() -> General_Error {
 }
 
 run_until :: proc(done: ^bool) -> General_Error {
-	if !g_io.initialized { return nil }
+	if g_io.refs == 0 { return nil }
+
+	init()
+	defer destroy()
+
 	for _num_waiting(&g_io) > 0 && !intrinsics.volatile_load(done) {
 		if errno := _tick(&g_io); errno != nil {
 			return errno
@@ -52,7 +68,7 @@ run_until :: proc(done: ^bool) -> General_Error {
 Returns the number of in-progress IO to be completed.
 */
 num_waiting :: proc() -> int {
-	if !g_io.initialized { return 0 }
+	if g_io.refs == 0 { return 0 }
 	return _num_waiting(&g_io)
 }
 
@@ -60,7 +76,7 @@ num_waiting :: proc() -> int {
 Returns the current time (of the last tick).
 */
 now :: proc() -> time.Time {
-	if !g_io.initialized { return time.now() }
+	if g_io.refs == 0 { return time.now() }
 	return _now(&g_io)
 }
 

@@ -12,6 +12,9 @@ e  :: testing.expect
 // all procs eventually get their callback called.
 @(test)
 all_poly_work :: proc(tt: ^testing.T) {
+	if !check_support(tt) { return }
+	defer nbio.destroy()
+
 	@static t: ^testing.T
 	t = tt
 
@@ -246,10 +249,8 @@ all_poly_work :: proc(tt: ^testing.T) {
 
 @(test)
 read_entire_file_works :: proc(tt: ^testing.T) {
-	if !nbio.IS_SUPPORTED {
-		log.info("skipping test because nbio is not supported by this target")
-		return
-	}
+	if !check_support(tt) { return }
+	defer nbio.destroy()
 
 	@static t: ^testing.T
 	t = tt

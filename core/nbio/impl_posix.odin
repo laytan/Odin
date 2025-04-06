@@ -1,4 +1,4 @@
-#+build darwin, freebsd
+#+build darwin, freebsd, openbsd, netbsd
 #+private
 package nbio
 
@@ -10,7 +10,7 @@ import    "core:sys/posix"
 import    "core:time"
 import kq "core:sys/kqueue"
 
-_init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
+__init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	qerr: posix.Errno
 	io.kq, qerr = kq.kqueue()
 	if qerr != .NONE {
@@ -40,7 +40,7 @@ _num_waiting :: proc(io: ^IO) -> int {
 	return io.completion_pool.num_waiting
 }
 
-_destroy :: proc(io: ^IO) {
+__destroy :: proc(io: ^IO) {
 	delete(io.timeouts)
 	delete(io.io_pending)
 

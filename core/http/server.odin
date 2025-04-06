@@ -135,6 +135,15 @@ listen :: proc(
 	// initial_block_cap = int(s.opts.initial_temp_block_cap)
 	// max_free_blocks_queued = int(s.opts.max_free_blocks_queued)
 
+	if nbio_err := nbio.init(); nbio_err != nil {
+		if nbio_err == .Unsupported {
+			return net.Create_Socket_Error.Network_Unreachable
+		}
+
+		// TODO:
+		fmt.panicf("unexpected error initializing nbio: %v", nbio_err)
+	}
+
 	s.tcp_sock = nbio.open_and_listen_tcp(endpoint) or_return
 	td.state = .Listening
 	return
@@ -148,14 +157,14 @@ serve :: proc(s: ^Server, h: Handler) -> (err: net.Network_Error) {
 	sync.wait_group_add(&s.threads_closed, thread_count)
 	s.threads = make([]^thread.Thread, thread_count, s.conn_allocator)
 	for i in 0 ..< thread_count {
-		s.threads[i] = thread.create_and_start_with_poly_data(s, _server_thread_init, context)
+		s.threads[i] = thread.create_and_start_with_poly_data2(s, false, _server_thread_init, context)
 	}
 
 	// Start keeping track of and caching the date for the required date header.
 	server_date_start(s)
 
 	sync.wait_group_add(&s.threads_closed, 1)
-	_server_thread_init(s)
+	_server_thread_init(s, true)
 
 	sync.wait(&s.threads_closed)
 
@@ -178,9 +187,15 @@ listen_and_serve :: proc(
 	return serve(s, h)
 }
 
-_server_thread_init :: proc(s: ^Server) {
+_server_thread_init :: proc(s: ^Server, main_thread := false) {
 	td.conns = make(map[net.TCP_Socket]^Connection)
 	// td.free_temp_blocks = make(map[int]queue.Queue(^Block))
+
+	if !main_thread {
+		nbio_err := nbio.init()
+		// TODO: handle, although this happens when the main thread was able to init, but this extra thread isn't.
+		fmt.assertf(nbio_err == nil, "unexpected error initializing nbio thread: %v", nbio_err)
+	}
 
 	log.debug("accepting connections")
 
@@ -283,6 +298,7 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 	log.debug("running out remaining events")
 	nbio.run()
 	td.state = .Closed
+	nbio.destroy()
 
 	log.info("shutdown: done")
 }

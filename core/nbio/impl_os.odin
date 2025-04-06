@@ -1,4 +1,4 @@
-#+build windows, linux, darwin, freebsd
+#+build windows, linux, darwin, freebsd, netbsd, openbsd
 #+private
 package nbio
 
@@ -7,8 +7,6 @@ import "base:runtime"
 import "core:container/queue"
 import "core:mem"
 import "core:mem/virtual"
-
-_IS_SUPPORTED :: true
 
 // TODO: this is a dumb thrown together pool, we should add a good one to `core` and use that.
 

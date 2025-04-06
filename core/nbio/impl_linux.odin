@@ -9,7 +9,7 @@ import "core:time"
 
 // TODO: use uring.link_timeout for with_timeout
 
-_init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
+__init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
 	io.allocator = alloc
 
 	if perr := pool_init(&io.completion_pool, allocator = alloc); perr != nil {
@@ -46,7 +46,7 @@ _num_waiting :: proc(io: ^IO) -> int {
 	return io.completion_pool.num_waiting
 }
 
-_destroy :: proc(io: ^IO) {
+__destroy :: proc(io: ^IO) {
 	context.allocator = io.allocator
 
 	queue.destroy(&io.unqueued)

@@ -23,6 +23,7 @@ Init_Error :: enum {
 	No_Path,
 	Failed_Open,
 	Failed_Read,
+	Unsupported,
 }
 
 _INIT_ERROR_LOADING :: Init_Error(-1)
@@ -77,6 +78,14 @@ init :: proc(c: ^Client, user_data: rawptr, on_init: On_Init, allocator := conte
 	c.name_servers_err = _INIT_ERROR_LOADING
 	c.hosts_err        = _INIT_ERROR_LOADING
 
+	if err := nbio.init(); err != nil {
+		if err == .Unsupported {
+			on_init(c, user_data, .Unsupported, .Unsupported)
+			return
+		}
+		panic("unexpected error from nbio.init")
+	}
+
 	load_name_servers(c)
 	load_hosts(c)
 }
@@ -125,6 +134,7 @@ destroy_cb :: proc(c: ^Client, user: rawptr, cb: proc(user: rawptr)) {
 			delete(h.name, c.allocator)
 		}
 		delete(c.hosts, c.allocator)
+		nbio.destroy()
 		cb(user)
 	}
 }

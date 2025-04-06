@@ -27,6 +27,10 @@ Example:
 	}
 
 	main :: proc() {
+		init_err := nbio.init()
+		fmt.assertf(init_err == nil, "Could not initialize nbio: %v", init_err)
+		defer nbio.destroy()
+
 		server: Echo_Server
 		defer delete(server.connections)
 

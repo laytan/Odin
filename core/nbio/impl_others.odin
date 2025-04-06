@@ -1,5 +1,7 @@
 #+build !darwin
 #+build !freebsd
+#+build !openbsd
+#+build !netbsd
 #+build !linux
 #+build !windows
 #+private
@@ -7,8 +9,6 @@ package nbio
 
 import "core:net"
 import "core:time"
-
-_IS_SUPPORTED :: false
 
 when ODIN_OS == .JS {
 	@(export)
@@ -28,7 +28,7 @@ when ODIN_OS == .JS {
 	}
 }
 
-_init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
+__init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	io.allocator = allocator
 	io.pending.allocator = allocator
 	io.done.allocator = allocator
@@ -40,7 +40,7 @@ _num_waiting :: #force_inline proc(io: ^IO) -> int {
 	return io.num_waiting
 }
 
-_destroy :: proc(io: ^IO) {
+__destroy :: proc(io: ^IO) {
 	context.allocator = io.allocator
 	for c in io.pending {
 		free(c)

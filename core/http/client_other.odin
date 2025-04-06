@@ -89,6 +89,8 @@ _client_destroy :: proc(c: ^Client) {
 		client_ssl.client_destroy(c.ssl)
 	}
 
+	nbio.destroy()
+
 	log.debug("client destroyed")
 }
 

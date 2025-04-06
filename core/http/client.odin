@@ -71,7 +71,11 @@ JS_Credentials :: enum u8 {
 	Omit,        // Never include credentials.
 }
 
+// TODO: return error enum.
 client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
+	if err := nbio.init(); err != nil {
+		return false
+	}
 	return _client_init(c, allocator)
 }
 
