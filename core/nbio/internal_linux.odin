@@ -338,7 +338,7 @@ connect_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 		close(op.socket)
 	}
 
-	op.callback(completion.user_data, {}, err)
+	op.callback(completion.user_data, op.socket, err)
 	pool_put(&io.completion_pool, completion)
 }
 
