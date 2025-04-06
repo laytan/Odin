@@ -1,4 +1,8 @@
+#+build !riscv64
 package tests_client
+
+// TODO: make the CI able to run this test on RISCV, it should be able to run fine, besides that
+// the CI now does a static linking trick and this test needs openssl, which is dynamically linked.
 
 import "core:http"
 import "core:log"
