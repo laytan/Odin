@@ -303,7 +303,6 @@ multi_sync :: proc(t: ^testing.T) {
 	defer nbio.run()
 
 	c: http.Client
-	http.client_init(&c)
 	if !http.client_init(&c) {
 		log.warn("could not initialize http client, probably unsupported target, skipping test")
 		return
