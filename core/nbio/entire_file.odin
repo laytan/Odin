@@ -114,7 +114,7 @@ read_entire_file3 :: proc(fd: Handle, p: $T, p2: $T2, p3: $T3, callback: $C/proc
 	}, all = true)
 	if completion == nil {
 		callback(p, p2, p3, nil, .Unsupported)
-		return
+		return nil
 	}
 
 	ptr := uintptr(&completion.user_args)
