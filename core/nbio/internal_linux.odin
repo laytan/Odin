@@ -9,6 +9,7 @@ import "core:mem"
 import "core:nbio/uring"
 import "core:net"
 import "core:sys/linux"
+import "core:time"
 
 NANOSECONDS_PER_SECOND :: 1e+9
 
@@ -26,6 +27,7 @@ _IO :: struct #no_copy {
 	ios_queued:      u64,
 	ios_in_kernel:   u64,
 	allocator:       mem.Allocator,
+	now:             time.Time,
 }
 
 _Handle :: linux.Fd

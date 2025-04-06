@@ -56,19 +56,19 @@ _destroy :: proc(io: ^IO) {
 }
 
 _now :: proc(io: ^IO) -> time.Time {
-	// TODO:
-	return time.now()
+	return io.now
 }
 
 _tick :: proc(io: ^IO) -> (err: General_Error) {
 	timeouts: uint = 0
 	etime := false
 
-	t, lerr := linux.clock_gettime(.MONOTONIC) // TODO: should it be raw?
+	t, lerr := linux.clock_gettime(.MONOTONIC)
 	if lerr != nil {
 		err = General_Error(lerr)
 		return
 	}
+	io.now = time.from_nanoseconds((i64(time.Second) * i64(t.time_sec)) + i64(t.time_nsec))
 
 	t.time_nsec += uint(IDLE_TIME)
 

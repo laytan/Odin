@@ -74,11 +74,11 @@
 
 - [ ] Implement `with_timeout` everywhere
 	- [x] Darwin
-	- [ ] Linux
+	- [x] Linux
 	- [ ] Windows
 - [ ] Make sure all procs are implemented everywhere (UDP & TCP, all platforms)
 	- [x] Darwin
-	- [ ] Linux
+	- [x] Linux
 	- [ ] Windows
 - [x] Move the sub /poly package into the main one
 - [x] Remove toggling the poly API
@@ -88,14 +88,14 @@
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
     - [x] Darwin
 	- [x] Can you use the queue to get the current time? No
-    - [ ] Linux
-	- [ ] Can you use the queue to get the current time?
-    - [ ] Windows
+  - [x] Linux
+    - [ ] Can you use the queue to get the current time?
+  - [ ] Windows
 	- [ ] Can you use the queue to get the current time?
 - [x] check if some of the calls need to take a flags bitset. No
 - [ ] don't use os.Errno or os package at all
 	- [x] Darwin
-	- [ ] Linux
+	- [x] Linux
 	- [ ] Windows
 - [x] consider making the `IO` a thread local global
 - [ ] calm down the cpu use
