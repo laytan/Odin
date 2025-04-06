@@ -104,7 +104,13 @@ connection_pool :: proc(t: ^testing.T) {
 			http.respond(ctx.res)
 		})
 
-		s.ep, _ = listen_next_available_local_port(t, &s.s, opts)
+		err: net.Network_Error
+		s.ep, err = listen_next_available_local_port(t, &s.s, opts)
+		if err == net.Create_Socket_Error.Network_Unreachable {
+			log.warn("network unreachable, probably unsupported target, skipping test")
+			return
+		}
+		ev(t, err, nil)
 
 		sync.one_shot_event_signal(&s.listening)
 
@@ -299,8 +305,6 @@ multi_sync :: proc(t: ^testing.T) {
 	testing.set_fail_timeout(t, time.Second * 10)
 
 	http.set_client_ssl(ssl_http.client_implementation())
-
-	defer nbio.run()
 
 	c: http.Client
 	if !http.client_init(&c) {

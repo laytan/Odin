@@ -27,7 +27,7 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	if hosts_err != nil {
 		log.warnf("DNS client init: hosts error: %v", hosts_err)
 	}
-	if !ok {
+	if ns_err != nil || hosts_err != nil || !ok {
 		return false
 	}
 
