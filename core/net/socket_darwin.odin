@@ -20,7 +20,6 @@ package net
 		Feoramund:       FreeBSD platform code
 */
 
-import "core:c"
 import "core:sys/posix"
 import "core:time"
 
