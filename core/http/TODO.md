@@ -89,7 +89,7 @@
     - [x] Darwin
 	- [x] Can you use the queue to get the current time? No
   - [x] Linux
-    - [ ] Can you use the queue to get the current time?
+    - [x] Can you use the queue to get the current time? Yes, but it's monotonic, so not UTC, like time.Time should be
   - [ ] Windows
 	- [ ] Can you use the queue to get the current time?
 - [x] check if some of the calls need to take a flags bitset. No

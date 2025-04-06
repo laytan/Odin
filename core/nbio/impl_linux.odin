@@ -60,45 +60,7 @@ _now :: proc(io: ^IO) -> time.Time {
 }
 
 _tick :: proc(io: ^IO) -> (err: General_Error) {
-	timeouts: uint = 0
-	etime := false
-
-	t, lerr := linux.clock_gettime(.MONOTONIC)
-	if lerr != nil {
-		err = General_Error(lerr)
-		return
-	}
-	io.now = time.from_nanoseconds((i64(time.Second) * i64(t.time_sec)) + i64(t.time_nsec))
-
-	t.time_nsec += uint(IDLE_TIME)
-
-	// TODO: you can actually give the io_uring_enter syscall a timeout, instead of doing it manually here.
-
-	for !etime {
-		// Queue the timeout, if there is an error, flush (cause its probably full) and try again.
-		if _, ok := uring.timeout(&io.ring, 0, &t, 1, { .ABS }); !ok {
-			if errno := flush_submissions(io, 0, &timeouts, &etime); errno != nil {
-				return General_Error(errno)
-			}
-
-			if _, ok2 := uring.timeout(&io.ring, 0, &t, 1, { .ABS }); !ok2 {
-				return .Allocation_Failed
-			}
-		}
-
-		timeouts += 1
-		io.ios_queued += 1
-
-		ferr := flush(io, 1, &timeouts, &etime)
-		if ferr != nil { return General_Error(ferr) }
-	}
-
-	for timeouts > 0 {
-		fcerr := flush_completions(io, 0, &timeouts, &etime)
-		if fcerr != nil { return General_Error(fcerr) }
-	}
-
-	return nil
+	return General_Error(flush(io))
 }
 
 _open :: proc(_: ^IO, path: string, flags: File_Flags, perm: int) -> (handle: Handle, err: FS_Error) {

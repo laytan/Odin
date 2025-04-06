@@ -4,7 +4,6 @@ package nbio
 import "base:runtime"
 
 import "core:container/queue"
-import "core:fmt"
 import "core:mem"
 import "core:nbio/uring"
 import "core:net"
@@ -139,11 +138,13 @@ _Op_Link_Timeout :: struct {
 	target:  ^Completion,
 }
 
-flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Errno {
-	err := flush_submissions(io, wait_nr, timeouts, etime)
+flush :: proc(io: ^IO) -> linux.Errno {
+	err := flush_submissions(io)
 	if err != nil { return err }
 
-	err = flush_completions(io, 0, timeouts, etime)
+	io.now = time.now()
+
+	err = flush_completions(io, 0)
 	if err != nil { return err }
 
 	// Store length at this time, so we don't infinite loop if any of the enqueue
@@ -187,7 +188,7 @@ flush :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Err
 	return nil
 }
 
-flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Errno {
+flush_completions :: proc(io: ^IO, wait_nr: u32) -> linux.Errno {
 	cqes: [256]linux.IO_Uring_CQE
 	wait_remaining := wait_nr
 	for {
@@ -199,15 +200,7 @@ flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 			for cqe in cqes[:completed] {
 				io.ios_in_kernel -= 1
 
-				if cqe.user_data == 0 {
-					timeouts^ -= 1
-
-					if (-cqe.res == i32(linux.Errno.ETIME)) {
-						etime^ = true
-					}
-					continue
-				}
-
+				assert(cqe.user_data != 0)
 				completed := cast(^Completion)uintptr(cqe.user_data)
 
 				if completed.removal != nil {
@@ -241,15 +234,17 @@ flush_completions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) 
 	return nil
 }
 
-flush_submissions :: proc(io: ^IO, wait_nr: u32, timeouts: ^uint, etime: ^bool) -> linux.Errno {
+flush_submissions :: proc(io: ^IO) -> linux.Errno {
 	for {
-		submitted, err := uring.submit(&io.ring, wait_nr)
+		ts: linux.Time_Spec
+		ts.time_nsec = uint(IDLE_TIME)
+		submitted, err := uring.submit(&io.ring, 1, &ts)
 		#partial switch err {
-		case .NONE:
+		case .NONE, .ETIME:
 		case .EINTR:
 			continue
 		case .ENOMEM:
-			ferr := flush_completions(io, 1, timeouts, etime)
+			ferr := flush_completions(io, 1)
 			if ferr != nil { return ferr }
 			continue
 		case:
@@ -605,7 +600,8 @@ timeout_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Timeout) {
 			timeout_enqueue(io, completion, op)
 			return
 		case:
-			fmt.panicf("timeout error: %v", errno)
+			// TODO:
+			panic("timeout error")
 		}
 	}
 
@@ -670,7 +666,7 @@ remove_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
 remove_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Remove) {
 	err := linux.Errno(-completion.result)
 	if err != nil && err != .ENOENT {
-		fmt.panicf("unexpected nbio.remove() error: %v", err)
+		panic("unexpected nbio.remove() error")
 	}
 
 	pool_put(&io.completion_pool, completion)
@@ -699,7 +695,7 @@ link_timeout_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Tim
 link_timeout_callback :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Timeout) {
 	err := linux.Errno(-completion.result)
 	if err != nil && err != .ETIME && err != .ECANCELED {
-		fmt.panicf("unexpected nbio.link_timeout() error: %v", err)
+		panic("unexpected nbio.link_timeout() error")
 	}
 
 	pool_put(&io.completion_pool, completion)

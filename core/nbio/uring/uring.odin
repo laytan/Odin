@@ -110,16 +110,21 @@ sq_ring_needs_enter :: proc(ring: ^Ring, flags: ^linux.IO_Uring_Enter_Flags) -> 
 
 // Submits the submission queue entries acquired via get_sqe().
 // Returns the number of entries submitted.
-// Optionally wait for a number of events by setting wait_nr.
-submit :: proc(ring: ^Ring, wait_nr: u32 = 0) -> (n_submitted: u32, err: linux.Errno) {
+// Optionally wait for a number of events by setting `wait_nr`, and/or set a maximum wait time by setting `timeout`.
+submit :: proc(ring: ^Ring, wait_nr: u32 = 0, timeout: ^linux.Time_Spec = nil) -> (n_submitted: u32, err: linux.Errno) {
 	n_submitted = flush_sq(ring)
 	flags: linux.IO_Uring_Enter_Flags
 	if sq_ring_needs_enter(ring, &flags) || wait_nr > 0 {
 		if wait_nr > 0 || .IOPOLL in ring.flags {
 			flags += {.GETEVENTS}
 		}
+
+		flags += {.EXT_ARG}
+		ext: linux.IO_Uring_Getevents_Arg
+		ext.ts = timeout
+
 		n_submitted_: int
-		n_submitted_, err = linux.io_uring_enter(ring.fd, n_submitted, wait_nr, flags, nil)
+		n_submitted_, err = linux.io_uring_enter2(ring.fd, n_submitted, wait_nr, flags, &ext)
 		assert(n_submitted_ >= 0)
 		n_submitted = u32(n_submitted_)
 	}
