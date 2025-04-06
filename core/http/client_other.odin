@@ -22,10 +22,10 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 	// PERF: this is "blocking"
 	ns_err, hosts_err, ok := dns.init_sync(&c.dnsc, allocator)
 	if ns_err != nil {
-		log.errorf("DNS client init: name servers error: %v", ns_err)
+		log.warnf("DNS client init: name servers error: %v", ns_err)
 	}
 	if hosts_err != nil {
-		log.errorf("DNS client init: hosts error: %v", hosts_err)
+		log.warnf("DNS client init: hosts error: %v", hosts_err)
 	}
 	if !ok {
 		return false

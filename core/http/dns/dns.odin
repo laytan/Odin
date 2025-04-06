@@ -246,7 +246,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	log.debugf("%q not in hosts file", hostname)
 
 	if len(c.name_servers) == 0 {
-		log.error("no name servers to query for DNS records")
+		log.warn("no name servers to query for DNS records")
 		cb(user, {}, .Unable_To_Resolve)
 		return
 	}
@@ -443,7 +443,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 @(private)
 load_name_servers_done :: proc(c: ^Client, err: Init_Error, msg: string = "", args: ..any) {
 	if msg != "" {
-		log.errorf(msg, ..args)
+		log.warnf(msg, ..args)
 	}
 
 	c.name_servers_err = err
@@ -456,7 +456,7 @@ load_name_servers_done :: proc(c: ^Client, err: Init_Error, msg: string = "", ar
 @(private)
 load_hosts_done :: proc(c: ^Client, err: Init_Error, msg: string = "", args: ..any) {
 	if msg != "" {
-		log.errorf(msg, ..args)
+		log.warnf(msg, ..args)
 	}
 
 	c.hosts_err = err

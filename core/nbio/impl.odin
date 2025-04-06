@@ -28,10 +28,10 @@ io :: #force_inline proc() -> (io: ^IO) {
 		@(cold)
 		internal :: proc(io: ^IO) {
 			if err := init(io, runtime.heap_allocator()); err != nil {
-				buf: [1024]byte = ---
-				n := copy(buf[:], "could not initialize non-blocking IO: ")
-				n += copy(buf[:], error_string(err))
-				panic(string(buf[:n]))
+				// buf: [1024]byte = ---
+				// n := copy(buf[:], "could not initialize non-blocking IO: ")
+				// n += copy(buf[:], error_string(err))
+				// panic(string(buf[:n]))
 			}
 			io.initialized = true
 
