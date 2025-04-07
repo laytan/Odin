@@ -1,7 +1,5 @@
 #+build !darwin
 #+build !freebsd
-#+build !openbsd
-#+build !netbsd
 #+build !linux
 #+build !windows
 #+private
