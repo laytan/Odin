@@ -1,21 +1,20 @@
 - Odin
 	- core
 		- net
-			- http         | HTTP client and server
-			- dns          | DNS client built on nbio (maybe call it nbdns?)
-		- io
-			- nbio         | "Low" level asynchronous IO event loop
+			- http          | HTTP client and server
+			- nbdns         | DNS client built on nbio
+		- nbio                  | "Low" level asynchronous IO event loop
 		- sys
 			- linux
-				- io_uring | IO Uring API
-			- kqueue       | Kqueue bindings
+				- uring | IO Uring wrapper
+			- kqueue        | Kqueue bindings
 	 - vendor
-	 	- openssl          | Minimal OpenSSL bindings enabling (plug-in) HTTPS in the HTTP client
+	 	- openssl               | Minimal OpenSSL bindings enabling (plug-in) HTTPS in the HTTP client
 
 # TODO
 
 - [ ] Move packages into final spot (see tree above)
-- [ ] Make sure everything runs under `-sanitize:address`
+- [x] Make sure everything runs under `-sanitize:address`
 - [ ] Remove README.md and rewrite relevant info and smaller example into `doc.odin`
 - [x] Build/update openssl using CI (on a cron?)
 - [x] move tests to listening on port 0 (which gets a port assigned by kernel) and query the actual port
