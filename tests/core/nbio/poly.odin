@@ -1,6 +1,5 @@
 package tests_nbio
 
-import "core:log"
 import "core:nbio"
 import "core:net"
 import "core:testing"
