@@ -54,7 +54,7 @@ client_and_server_send_recv :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(), nil)
 
-	nbio.connect_poly2(ep, t, &state, proc(t: ^testing.T, state: ^State, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.dial_poly2(ep, t, &state, proc(t: ^testing.T, state: ^State, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 
 		state.client = socket
@@ -113,7 +113,7 @@ close_errors_recv :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(), nil)
 
-	nbio.connect_poly(ep, t, proc(t: ^testing.T, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.dial_poly(ep, t, proc(t: ^testing.T, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 		nbio.close_poly(socket, t, proc(t: ^testing.T, err: nbio.FS_Error) {
 			ev(t, err, nil)
@@ -143,7 +143,7 @@ close_errors_send :: proc(t: ^testing.T) {
 
 	ev(t, nbio.tick(), nil)
 
-	nbio.connect_poly(ep, t, proc(t: ^testing.T, socket: net.TCP_Socket, err: net.Network_Error) {
+	nbio.dial_poly(ep, t, proc(t: ^testing.T, socket: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 		nbio.close_poly(socket, t, proc(t: ^testing.T, err: nbio.FS_Error) {
 			ev(t, err, nil)
