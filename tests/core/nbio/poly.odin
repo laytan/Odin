@@ -4,9 +4,6 @@ import "core:nbio"
 import "core:net"
 import "core:testing"
 
-ev :: testing.expect_value
-e  :: testing.expect
-
 // Tests that all poly variants are correctly passing through arguments, and that
 // all procs eventually get their callback called.
 @(test)

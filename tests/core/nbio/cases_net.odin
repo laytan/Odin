@@ -1,98 +1,13 @@
+#+build linux, darwin, freebsd, windows
 package tests_nbio
 
-import "core:log"
+// TODO: support other BSDs in core:net and enable these tests for them.
+
 import "core:mem"
 import "core:nbio"
 import "core:net"
-import os "core:os/os2"
-import "core:sync"
 import "core:testing"
-import "core:thread"
 import "core:time"
-
-open_next_available_local_port :: proc(t: ^testing.T, loc := #caller_location) -> (sock: net.TCP_Socket, ep: net.Endpoint) {
-	err: net.Network_Error
-	sock, err = nbio.open_and_listen_tcp({net.IP4_Loopback, 0})
-	if err != nil {
-		log.errorf("open_and_listen_tcp: %v", err, location=loc)
-		return
-	}
-
-	ep, err = net.bound_endpoint(sock)
-	if err != nil {
-		log.errorf("bound_endpoint: %v", err, location=loc)
-	}
-
-	return
-}
-
-check_support :: proc(t: ^testing.T, loc := #caller_location) -> bool {
-	err := nbio.init()
-	if err == .Unsupported {
-		log.warn("nbio is unsupported, skipping test", location=loc)
-		return false
-	}
-	return ev(t, err, nil, loc)
-}
-
-@(test)
-close_invalid_handle_works :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	testing.set_fail_timeout(t, time.Second)
-
-	nbio.close_poly(max(nbio.Handle), t, proc(t: ^testing.T, err: nbio.FS_Error) {
-		e(t, err != nil)
-	})
-
-	ev(t, nbio.run(), nil)
-}
-
-@(test)
-write_read_close :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	testing.set_fail_timeout(t, time.Second)
-
-	handle, errno := nbio.open(
-		"test_write_read_close",
-		{.Read, .Write, .Create, .Trunc},
-		0o777,
-	)
-	ev(t, errno, nil)
-
-	State :: struct {
-		buf: [20]byte,
-		fd:  nbio.Handle,
-	}
-
-	CONTENT :: [20]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
-
-	state := State{
-		buf = CONTENT,
-		fd = handle,
-	}
-
-	nbio.write_entire_file2(handle, state.buf[:], t, &state, proc(t: ^testing.T, state: ^State, written: int, err: nbio.FS_Error) {
-		ev(t, written, len(state.buf))
-		ev(t, err, nil)
-
-		nbio.read_at_all_poly2(state.fd, 0, state.buf[:], t, state, proc(t: ^testing.T, state: ^State, read: int, err: nbio.FS_Error) {
-			ev(t, read, len(state.buf))
-			ev(t, err, nil)
-			ev(t, state.buf, CONTENT)
-
-			nbio.close_poly2(state.fd, t, state, proc(t: ^testing.T, state: ^State, err: nbio.FS_Error) {
-				ev(t, err, nil)
-				os.remove("test_write_read_close")
-			})
-		})
-	})
-
-	ev(t, nbio.run(), nil)
-}
 
 @(test)
 client_and_server_send_recv :: proc(t: ^testing.T) {
@@ -236,77 +151,6 @@ close_errors_send :: proc(t: ^testing.T) {
 	})
 
 	ev(t, nbio.run(), nil)
-}
-
-@(test)
-usage_across_threads :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	testing.set_fail_timeout(t, time.Second)
-
-	handle: nbio.Handle
-	thread_done: sync.One_Shot_Event
-
-	open_thread := thread.create_and_start_with_poly_data3(t, &handle, &thread_done, proc(t: ^testing.T, handle: ^nbio.Handle, thread_done: ^sync.One_Shot_Event) {
-		if !check_support(t) { return }
-		defer nbio.destroy()
-
-		fd, errno := nbio.open(#file)
-		ev(t, errno, nil)
-
-		sync.atomic_store(handle, fd)
-		sync.one_shot_event_signal(thread_done)
-	}, init_context=context)
-
-	sync.one_shot_event_wait(&thread_done)
-	thread.destroy(open_thread)
-
-	buf: [128]byte
-	nbio.read_at_poly(handle, 0, buf[:], t, proc(t: ^testing.T, read: int, errno: nbio.FS_Error) {
-		ev(t, errno, nil)
-		e(t, read > 0)
-	})
-
-	nbio.run()
-}
-
-@(test)
-poll_already_ready :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	fd, err := nbio.open(#file)
-	ev(t, err, nil)
-
-	hit: bool
-	nbio.poll_poly(fd, .Read, false, &hit, proc(hit: ^bool, _: nbio.Poll_Event) {
-		hit^ = true
-	})
-
-	ev(t, nbio.run(), nil)
-
-	e(t, hit)
-
-	nbio.close(fd)
-	ev(t, nbio.run(), nil)
-}
-
-@(test)
-remove_timeout :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	hit: bool
-	timeout := nbio.timeout_poly(time.Second, &hit, proc(hit: ^bool) {
-		hit^ = true
-	})
-
-	nbio.remove(timeout)
-
-	ev(t, nbio.run(), nil)
-
-	e(t, !hit)
 }
 
 @(test)
