@@ -23,8 +23,7 @@
 	- [ ] benchmark the difference between the various nbio things with a callback vs taking over the event loop until an operation completes (http.body vs http.body_cb), if looping is fine, do that everywhere by default
 - [x] Support the BSDs
 	- [x] verify kqueue against bsd headers
-- [ ] Investigate sendfile and splice for Linux (if it can be used and where)
-- [ ] Investigate timeouts on Windows?
+- [x] Investigate timeouts on Windows? Just need to do the same as on posix
 - [x] Check all recv calls and make sure they check `received == 0` which means the connection was orderly closed
 
 ## HTTP Server
@@ -35,14 +34,14 @@
 - [x] `http.io()` that returns `&http.td.io` or errors if it isn't one of the handler threads
 - [x] `panic` when user does `free_all` on the given temp ally
 - [x] in `http.respond`, set the `context.temp_allocator` back to the current connection's, so a user changing it doesn't fuck it up
-- [ ] Add an API to set a custom temp allocator
 - [x] Overload the router procs so you can do `route_get("/foo", foo)` instead of `route_get("/foo", http.handler(foo))`
 - [ ] An API to write directly to the underlying socket, (to not have the overhead of buffering the body in memory)
 	- [ ] Use it in respond_file things and maybe other places
 - [ ] An API to read in a streamed fashion, maybe expose the scanner API used internally
 - [x] Regex router
 - [ ] Remove rate limit middleware; it's kinda bad/basic and easy to add userland
-- [ ] Use SetConsoleCtrlHandler instead of catching signals on Windows
+- [ ] Use SetConsoleCtrlHandler instead of catching signals on Windows - also add option to opt-out of handling this
+- [ ] Ability to run multiple servers
 
 ## HTTP Client
 
@@ -61,9 +60,8 @@
 - [ ] Testing
 	- [ ] Big requests > 16kb (a TLS packet)
 - [x] Consider move into main package, but may be confusing?
-- [ ] Each host has multiple connections, when a request is made, get an available connection or make a new connection.
+- [x] Each host has multiple connections, when a request is made, get an available connection or make a new connection.
 - [ ] Follow redirects
-- [ ] Ingest cookies / Cookie JAR
 - [ ] Nice APIS wrapping over all the configuration for common actions
 
 ## DNS Client
@@ -87,12 +85,9 @@
 - [x] nbio.run that loops a tick, and returns when the event loop has nothing going on
 - [x] remove `read` and `write` and force the offset, document why (Windows)
 - [ ] do `time.now` at most once a tick (cache it), can probably add a `nbio.now(nbio.IO) -> time.Time` too
-    - [x] Darwin
-	- [x] Can you use the queue to get the current time? No
-  - [x] Linux
-    - [x] Can you use the queue to get the current time? Yes, but it's monotonic, so not UTC, like time.Time should be
-  - [ ] Windows
-	- [ ] Can you use the queue to get the current time?
+	- [x] Darwin
+	- [x] Linux
+	- [ ] Windows
 - [x] check if some of the calls need to take a flags bitset. No
 - [ ] don't use os.Errno or os package at all
 	- [x] Darwin
@@ -103,9 +98,24 @@
 	- [x] Linux
 	- [x] Darwin
 	- [?] Windows
-- [ ] A way to tick without blocking
 - [x] unaligned copy in core:thread poly procs
 
 ## WASM
 
 - [x] HTTP Client backed by JS/WASM (This may have to be an additional, even higher level API, or, have the HTTP API be full of opaque structs and have getters)
+
+# Nice to have
+
+- [ ] Investigate sendfile and splice for Linux (if it can be used and where)
+
+## Server
+
+- [ ] Add an API to set a custom temp allocator
+
+## Client
+
+- [ ] Ingest cookies / Cookie JAR
+
+## nbio
+
+- [ ] A way to tick without blocking
