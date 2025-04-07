@@ -37,7 +37,7 @@ Op_Accept :: struct {
 }
 
 Op_Connect :: struct {
-	callback: On_Connect,
+	callback: On_Dial,
 	socket:   win.SOCKET,
 	addr:     win.SOCKADDR_STORAGE_LH,
 	pending:  bool,

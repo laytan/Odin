@@ -117,7 +117,7 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 	return nil
 }
 
-_connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> (completion: ^Completion, err: net.Network_Error) {
+_dial :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Dial) -> (completion: ^Completion, err: net.Network_Error) {
 	return nil, net.Dial_Error.Network_Unreachable
 }
 

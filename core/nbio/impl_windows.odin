@@ -228,7 +228,7 @@ _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Acce
 	)
 }
 
-_connect :: proc(io: ^IO, ep: net.Endpoint, user: rawptr, callback: On_Connect) -> (^Completion, net.Network_Error) {
+_dial :: proc(io: ^IO, ep: net.Endpoint, user: rawptr, callback: On_Dial) -> (^Completion, net.Network_Error) {
 	if ep.port == 0 {
 		return nil, net.Dial_Error.Port_Required
 	}

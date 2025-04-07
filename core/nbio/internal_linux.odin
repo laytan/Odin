@@ -67,7 +67,7 @@ Op_Close :: struct {
 }
 
 Op_Connect :: struct {
-	callback: On_Connect,
+	callback: On_Dial,
 	socket:   net.TCP_Socket,
 	sockaddr: linux.Sock_Addr_Any,
 }

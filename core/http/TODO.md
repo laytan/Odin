@@ -25,7 +25,7 @@
 	- [x] verify kqueue against bsd headers
 - [ ] Investigate sendfile and splice for Linux (if it can be used and where)
 - [ ] Investigate timeouts on Windows?
-- [ ] Check all recv calls and make sure they check `received == 0` which means the connection was orderly closed
+- [x] Check all recv calls and make sure they check `received == 0` which means the connection was orderly closed
 
 ## HTTP Server
 

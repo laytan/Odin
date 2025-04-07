@@ -167,7 +167,7 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 	return completion
 }
 
-_connect :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> (completion: ^Completion, err: net.Network_Error) {
+_dial :: proc(io: ^IO, endpoint: net.Endpoint, user: rawptr, callback: On_Dial) -> (completion: ^Completion, err: net.Network_Error) {
 	if endpoint.port == 0 {
 		return nil, net.Dial_Error.Port_Required
 	}

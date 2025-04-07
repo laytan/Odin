@@ -277,9 +277,9 @@ accept_poly3 :: proc(socket: net.TCP_Socket, p: $T, p2: $T2, p3: $T3, callback: 
 	return completion
 }
 
-connect_poly :: proc(endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+dial_poly :: proc(endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
-	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _dial(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
@@ -299,9 +299,9 @@ connect_poly :: proc(endpoint: net.Endpoint, p: $T, callback: $C/proc(p: T, sock
 	return completion
 }
 
-connect_poly2 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+dial_poly2 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
-	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _dial(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
@@ -323,9 +323,9 @@ connect_poly2 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, callback: $C/proc(
 	return completion
 }
 
-connect_poly3 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
+dial_poly3 :: proc(endpoint: net.Endpoint, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, socket: net.TCP_Socket, err: net.Network_Error)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS  {
-	completion, err := _connect(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
+	completion, err := _dial(io(), endpoint, nil, proc(completion: rawptr, socket: net.TCP_Socket, err: net.Network_Error) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))

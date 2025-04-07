@@ -279,9 +279,6 @@ On_Accept :: #type proc(user: rawptr, client: net.TCP_Socket, source: net.Endpoi
 /*
 Using the given socket, accepts the next incoming connection, calling the callback when that happens
 
-// TODO: can we remedy that?
-NOTE: if `close` is called on the socket while an `accept` is waiting in the event loop, the `accept` will never call back.
-
 NOTE: polymorphic variants for type safe user data are available under `accept_poly`, `accept_poly2`, and `accept_poly3`.
 
 Inputs:
@@ -296,7 +293,7 @@ accept :: proc(socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> (re
 	return
 }
 
-On_Connect :: #type proc(user: rawptr, socket: net.TCP_Socket, err: net.Network_Error)
+On_Dial :: #type proc(user: rawptr, socket: net.TCP_Socket, err: net.Network_Error)
 
 /*
 Connects to the given endpoint, calling the given callback once it has been done
@@ -307,8 +304,8 @@ Inputs:
 - io:       The IO instance to use
 - endpoint: An endpoint to connect a socket to
 */
-connect :: proc(endpoint: net.Endpoint, user: rawptr, callback: On_Connect) -> ^Completion {
-	completion, err := _connect(io(), endpoint, user, callback)
+dial :: proc(endpoint: net.Endpoint, user: rawptr, callback: On_Dial) -> ^Completion {
+	completion, err := _dial(io(), endpoint, user, callback)
 	if err != nil {
 		callback(user, {}, err)
 	}

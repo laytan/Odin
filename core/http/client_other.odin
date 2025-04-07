@@ -311,7 +311,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 		log.debug("connecting to endpoint")
 
-		nbio.connect_poly(r.ep, r, on_tcp_connect)
+		nbio.dial_poly(r.ep, r, on_tcp_connect)
 
 		on_tcp_connect :: proc(r: ^In_Flight, socket: net.TCP_Socket, err: net.Network_Error) {
 			if err != nil {

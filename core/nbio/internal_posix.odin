@@ -59,7 +59,7 @@ Op_Close :: struct {
 }
 
 Op_Connect :: struct {
-	callback:  On_Connect,
+	callback:  On_Dial,
 	socket:    net.TCP_Socket,
 	sockaddr:  posix.sockaddr_storage,
 	initiated: bool,
@@ -185,6 +185,7 @@ flush :: proc(io: ^IO) -> General_Error {
 		io.io_inflight += change_events
 		io.io_inflight -= int(new_events)
 
+		assert(io.io_inflight >= 0)
 		assert(new_events >= 0)
 
 		queue.reserve(&io.completed, int(new_events))
