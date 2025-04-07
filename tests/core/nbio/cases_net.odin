@@ -1,4 +1,7 @@
+#+build linux, darwin, freebsd, windows
 package tests_nbio
+
+// TODO: support other BSDs in core:net and enable these tests for them.
 
 import "core:mem"
 import "core:nbio"
