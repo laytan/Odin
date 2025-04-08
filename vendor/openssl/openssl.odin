@@ -2,7 +2,6 @@
 package openssl
 
 import "core:c"
-import "core:c/libc"
 
 SHARED :: #config(OPENSSL_SHARED, false)
 
@@ -13,7 +12,6 @@ when ODIN_OS == .Windows {
 			"./windows/libcrypto.lib",
 		}
 	} else {
-		@(extra_linker_flags="/nodefaultlib:libcmt")
 		foreign import lib {
 			"./windows/libssl_static.lib",
 			"./windows/libcrypto_static.lib",
@@ -68,7 +66,7 @@ foreign lib {
 	SSL_set_fd :: proc(ssl: ^SSL, fd: c.int) -> c.int ---
 	SSL_connect :: proc(ssl: ^SSL) -> c.int ---
 	SSL_get_error :: proc(ssl: ^SSL, ret: c.int) -> Error ---
-	ERR_print_errors_fp :: proc(fp: ^libc.FILE) ---
+	ERR_print_errors_fp :: proc(fp: ^c.FILE) ---
 	ERR_print_errors_cb :: proc(cb: Error_Callback, u: rawptr) ---
 	SSL_read :: proc(ssl: ^SSL, buf: [^]byte, num: c.int) -> c.int ---
 	SSL_write :: proc(ssl: ^SSL, buf: [^]byte, num: c.int) -> c.int ---
@@ -81,15 +79,6 @@ foreign lib {
 // This is a macro in c land.
 SSL_set_tlsext_host_name :: proc(ssl: ^SSL, name: cstring) -> c.int {
 	return c.int(SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, rawptr(name)))
-}
-
-ERR_print_errors :: proc {
-	ERR_print_errors_fp,
-	ERR_print_errors_stderr,
-}
-
-ERR_print_errors_stderr :: proc() {
-	ERR_print_errors_fp(libc.stderr)
 }
 
 Error :: enum c.int {

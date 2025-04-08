@@ -7,7 +7,6 @@ import "core:container/queue"
 import "core:log"
 import "core:mem"
 import "core:net"
-import "core:os"
 import "core:time"
 
 import win "core:sys/windows"
@@ -17,7 +16,7 @@ _IO :: struct #no_copy {
 	allocator:       mem.Allocator,
 	timeouts:        [dynamic]^Completion,
 	completed:       queue.Queue(^Completion),
-	completion_pool: Pool(Completion),
+	completion_pool: Pool,
 	io_pending:      int,
 }
 
@@ -27,6 +26,24 @@ _Completion :: struct {
 	op:   Operation,
 }
 #assert(offset_of(Completion, over) == 0, "needs to be the first field to work")
+
+_Handle :: distinct uintptr
+
+INVALID_HANDLE :: Handle(win.INVALID_HANDLE)
+
+Operation :: union {
+	Op_Accept,
+	Op_Close,
+	Op_Connect,
+	Op_Read,
+	Op_Recv,
+	Op_Send,
+	Op_Write,
+	Op_Timeout,
+	Op_Next_Tick,
+	Op_Poll,
+	Op_Remove,
+}
 
 Op_Accept :: struct {
 	callback: On_Accept,
@@ -50,7 +67,7 @@ Op_Close :: struct {
 
 Op_Read :: struct {
 	callback: On_Read,
-	fd:       os.Handle,
+	fd:       Handle,
 	offset:   int,
 	buf:      []byte,
 	pending:  bool,
@@ -61,7 +78,7 @@ Op_Read :: struct {
 
 Op_Write :: struct {
 	callback: On_Write,
-	fd:       os.Handle,
+	fd:       Handle,
 	offset:   int,
 	buf:      []byte,
 	pending:  bool,
@@ -101,7 +118,7 @@ Op_Next_Tick :: struct {}
 
 Op_Poll :: struct {}
 
-Op_Poll_Remove :: struct {}
+Op_Remove :: struct {}
 
 flush_timeouts :: proc(io: ^IO) -> (expires: Maybe(time.Duration)) {
 	curr: time.Time
@@ -132,25 +149,6 @@ flush_timeouts :: proc(io: ^IO) -> (expires: Maybe(time.Duration)) {
 	return
 }
 
-prepare_socket :: proc(io: ^IO, socket: net.Any_Socket) -> net.Network_Error {
-	net.set_option(socket, .Reuse_Address, true) or_return
-	net.set_option(socket, .TCP_Nodelay, true) or_return
-
-	handle := win.HANDLE(uintptr(net.any_socket_to_socket(socket)))
-
-	handle_iocp := win.CreateIoCompletionPort(handle, io.iocp, nil, 0)
-	assert(handle_iocp == io.iocp)
-
-	mode: byte
-	mode |= FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
-	mode |= FILE_SKIP_SET_EVENT_ON_HANDLE
-	if !win.SetFileCompletionNotificationModes(handle, mode) {
-		return net.Socket_Option_Error(win.GetLastError())
-	}
-
-	return nil
-}
-
 submit :: proc(io: ^IO, user: rawptr, op: Operation) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
@@ -172,10 +170,9 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			return
 		}
 
-		rerr := net.Accept_Error(err)
-		if rerr != nil { win.closesocket(op.client) }
+		if err != nil { win.closesocket(op.client) }
 
-		op.callback(completion.user_data, net.TCP_Socket(op.client), source, rerr)
+		op.callback(completion.user_data, net.TCP_Socket(op.client), source, err)
 
 	case Op_Connect:
 		err := connect_callback(io, completion, &op)
@@ -184,10 +181,9 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			return
 		}
 
-		rerr := net.Dial_Error(err)
-		if rerr != nil { win.closesocket(op.socket) }
+		if err != nil { win.closesocket(op.socket) }
 
-		op.callback(completion.user_data, net.TCP_Socket(op.socket), rerr)
+		op.callback(completion.user_data, net.TCP_Socket(op.socket), err)
 
 	case Op_Close:
 		op.callback(completion.user_data, close_callback(io, op))
@@ -206,7 +202,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 		op.read += int(read)
 
 		if err != win.NO_ERROR {
-			op.callback(completion.user_data, op.read, os.Errno(err))
+			op.callback(completion.user_data, op.read, FS_Error(err))
 		} else if op.all && op.read < op.len {
 			op.buf = op.buf[read:]
 			op.offset += int(read)
@@ -216,7 +212,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			handle_completion(io, completion)
 			return
 		} else {
-			op.callback(completion.user_data, op.read, os.ERROR_NONE)
+			op.callback(completion.user_data, op.read, nil)
 		}
 
 	case Op_Write:
@@ -228,8 +224,8 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 		op.written += int(written)
 
-		oerr := os.Errno(err)
-		if oerr != os.ERROR_NONE {
+		oerr := FS_Error(err)
+		if oerr != nil {
 			op.callback(completion.user_data, op.written, oerr)
 		} else if op.all && op.written < op.len {
 			op.buf = op.buf[written:]
@@ -240,7 +236,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			handle_completion(io, completion)
 			return
 		} else {
-			op.callback(completion.user_data, op.written, os.ERROR_NONE)
+			op.callback(completion.user_data, op.written, nil)
 		}
 
 	case Op_Recv:
@@ -252,9 +248,8 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 		op.received += int(received)
 
-		nerr := net.TCP_Recv_Error(err)
-		if nerr != nil {
-			op.callback(completion.user_data, op.received, {}, nerr)
+		if err != nil {
+			op.callback.(On_Recv_TCP)(completion.user_data, op.received, err)
 		} else if op.all && op.received < op.len {
 			op.buf = win.WSABUF{
 				len = op.buf.len - win.ULONG(received),
@@ -265,7 +260,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			handle_completion(io, completion)
 			return
 		} else {
-			op.callback(completion.user_data, op.received, {}, nil)
+			op.callback.(On_Recv_TCP)(completion.user_data, op.received, nil)
 		}
 
 	case Op_Send:
@@ -277,9 +272,8 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 		op.sent += int(sent)
 
-		nerr := net.TCP_Send_Error(err)
-		if nerr != nil {
-			op.callback(completion.user_data, op.sent, nerr)
+		if err != nil {
+			op.callback.(On_Sent_TCP)(completion.user_data, op.sent, err)
 		} else if op.all && op.sent < op.len {
 			op.buf = win.WSABUF{
 				len = op.buf.len - win.ULONG(sent),
@@ -290,20 +284,20 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 			handle_completion(io, completion)
 			return
 		} else {
-			op.callback(completion.user_data, op.sent, nil)
+			op.callback.(On_Sent_TCP)(completion.user_data, op.sent, nil)
 		}
 
 	case Op_Timeout:
 		op.callback(completion.user_data)
 
-	case Op_Next_Tick, Op_Poll, Op_Poll_Remove:
+	case Op_Next_Tick, Op_Poll, Op_Remove:
 		unreachable()
 
 	}
 	pool_put(&io.completion_pool, completion)
 }
 
-accept_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Accept) -> (source: net.Endpoint, err: win.c_int) {
+accept_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Accept) -> (source: net.Endpoint, err: net.Accept_Error) {
 	ok: win.BOOL
 	if op.pending {
 		// Get status update, we've already initiated the accept.
@@ -313,10 +307,9 @@ accept_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Accept) -> (source: 
 	} else {
 		op.pending = true
 
-		oclient, oerr := open_socket(io, .IP4, .TCP)
-
-		err = win.c_int(net_err_to_code(oerr))
-		if err != win.NO_ERROR { return }
+		oclient, oerr := _open_socket(io, .IP4, .TCP)
+		// TODO:
+		ensure(oerr == nil)
 
 		op.client = win.SOCKET(net.any_socket_to_socket(oclient))
 
@@ -338,7 +331,7 @@ accept_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Accept) -> (source: 
 	}
 
 	if !ok {
-		err = win.WSAGetLastError()
+		err = net._accept_error()
 		return
 	}
 
@@ -349,7 +342,7 @@ accept_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Accept) -> (source: 
 	return
 }
 
-connect_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Connect) -> (err: win.c_int) {
+connect_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Connect) -> (err: net.Network_Error) {
 	transferred: win.DWORD
 	ok: win.BOOL
 	if op.pending {
@@ -358,47 +351,53 @@ connect_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Connect) -> (err: w
 	} else {
 		op.pending = true
 
-		osocket, oerr := open_socket(io, .IP4, .TCP)
-
-		err = win.c_int(net_err_to_code(oerr))
-		if err != win.NO_ERROR { return }
+		osocket := _open_socket(io, .IP4, .TCP) or_return
 
 		op.socket = win.SOCKET(net.any_socket_to_socket(osocket))
 
 		sockaddr := endpoint_to_sockaddr({net.IP4_Any, 0})
 		res := win.bind(op.socket, &sockaddr, size_of(sockaddr))
-		if res < 0 { return win.WSAGetLastError() }
+		if res < 0 { return net._bind_error() }
 
 		connect_ex: LPFN_CONNECTEX
 		load_socket_fn(op.socket, WSAID_CONNECTEX, &connect_ex)
 		// TODO: size_of(win.sockaddr_in6) when ip6.
 		ok = connect_ex(op.socket, &op.addr, size_of(win.sockaddr_in) + 16, nil, 0, &transferred, &comp.over)
 	}
-	if !ok { return win.WSAGetLastError() }
+	if !ok { return net._dial_error() }
 
 	// enables getsockopt, setsockopt, getsockname, getpeername.
 	win.setsockopt(op.socket, win.SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, nil, 0)
 	return
 }
 
-close_callback :: proc(io: ^IO, op: Op_Close) -> bool {
+close_callback :: proc(io: ^IO, op: Op_Close) -> FS_Error {
 	// NOTE: This might cause problems if there is still IO queued/pending.
 	// Is that our responsibility to check/keep track of?
 	// Might want to call win.CancelloEx to cancel all pending operations first.
 
 	switch h in op.fd {
-	case os.Handle:
-		delete_key(&io.offsets, h)
-		return win.CloseHandle(win.HANDLE(h)) == true
+	case Handle:
+		if !win.CloseHandle(win.HANDLE(h)) {
+			return FS_Error(win.GetLastError())
+		}
 	case net.TCP_Socket:
-		return win.closesocket(win.SOCKET(h)) == win.NO_ERROR
+		if win.closesocket(win.SOCKET(h)) != win.NO_ERROR {
+			return FS_Error(win.WSAGetLastError())
+		}
 	case net.UDP_Socket:
-		return win.closesocket(win.SOCKET(h)) == win.NO_ERROR
+		if win.closesocket(win.SOCKET(h)) != win.NO_ERROR {
+			return FS_Error(win.WSAGetLastError())
+		}
 	case net.Socket:
-		return win.closesocket(win.SOCKET(h)) == win.NO_ERROR
+		if win.closesocket(win.SOCKET(h)) != win.NO_ERROR {
+			return FS_Error(win.WSAGetLastError())
+		}
 	case:
 		unreachable()
 	}
+
+	return nil
 }
 
 read_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Read) -> (read: win.DWORD, err: win.DWORD) {
@@ -448,7 +447,7 @@ write_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Write) -> (written: w
 	return
 }
 
-recv_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Recv) -> (received: win.DWORD, err: win.c_int) {
+recv_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Recv) -> (received: win.DWORD, err: net.TCP_Recv_Error) {
 	sock := win.SOCKET(net.any_socket_to_socket(op.socket))
 	ok: win.BOOL
 	if op.pending {
@@ -461,11 +460,11 @@ recv_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Recv) -> (received: wi
 		op.pending = true
 	}
 
-	if !ok { err = win.WSAGetLastError() }
+	if !ok { err = net._tcp_recv_error() }
 	return
 }
 
-send_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Send) -> (sent: win.DWORD, err: win.c_int) {
+send_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Send) -> (sent: win.DWORD, err: net.TCP_Send_Error) {
 	sock := win.SOCKET(net.any_socket_to_socket(op.socket))
 	ok: win.BOOL
 	if op.pending {
@@ -477,7 +476,7 @@ send_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Send) -> (sent: win.DW
 		op.pending = true
 	}
 
-	if !ok { err = win.WSAGetLastError() }
+	if !ok { err = net._tcp_send_error() }
 	return
 }
 
@@ -509,12 +508,25 @@ LPFN_ACCEPTEX :: #type proc "stdcall" (
 	overlapped: win.LPOVERLAPPED,
 ) -> win.BOOL
 
-wsa_err_incomplete :: proc(err: win.c_int) -> bool {
-	#partial switch win.System_Error(err) {
-	case .WSAEWOULDBLOCK, .IO_PENDING, .IO_INCOMPLETE, .WSAEALREADY:
-		return true
-	case:
-		return false
+wsa_err_incomplete :: proc(err: $T) -> bool {
+	when T == net.Dial_Error {
+		if err == .Already_Connecting {
+			return true
+		}
+	}
+
+	when T != net.Network_Error {
+		if err == .Would_Block {
+			return true
+		} else if err != .Unknown {
+			return false
+		}
+	}
+
+	last := win.System_Error(net.last_platform_error())
+	#partial switch last {
+	case .WSAEWOULDBLOCK, .IO_PENDING, .IO_INCOMPLETE, .WSAEALREADY: return true
+	case: return false
 	}
 }
 
@@ -564,47 +576,6 @@ endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: win.SOCKADDR_STORAG
 		return
 	}
 	unreachable()
-}
-
-net_err_to_code :: proc(err: net.Network_Error) -> os.Errno {
-	switch e in err {
-	case net.Create_Socket_Error:
-		return os.Errno(e)
-	case net.Socket_Option_Error:
-		return os.Errno(e)
-	case net.General_Error:
-		return os.Errno(e)
-	case net.Platform_Error:
-		return os.Errno(e)
-	case net.Dial_Error:
-		return os.Errno(e)
-	case net.Listen_Error:
-		return os.Errno(e)
-	case net.Accept_Error:
-		return os.Errno(e)
-	case net.Bind_Error:
-		return os.Errno(e)
-	case net.TCP_Send_Error:
-		return os.Errno(e)
-	case net.UDP_Send_Error:
-		return os.Errno(e)
-	case net.TCP_Recv_Error:
-		return os.Errno(e)
-	case net.UDP_Recv_Error:
-		return os.Errno(e)
-	case net.Shutdown_Error:
-		return os.Errno(e)
-	case net.Set_Blocking_Error:
-		return os.Errno(e)
-	case net.Parse_Endpoint_Error:
-		return os.Errno(e)
-	case net.Resolve_Error:
-		return os.Errno(e)
-	case net.DNS_Error:
-		return os.Errno(e)
-	case:
-		return os.ERROR_NONE
-	}
 }
 
 // TODO: loading this takes a overlapped parameter, maybe we can do this async?

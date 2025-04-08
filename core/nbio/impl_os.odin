@@ -71,7 +71,7 @@ pool_get :: proc(p: ^Pool) -> (completion: ^Completion) {
 
 pool_put :: proc(p: ^Pool, elem: ^Completion) {
 	p.num_waiting -= 1
-	assert(elem.operation != nil)
+//	assert(elem.operation != nil)
 	mem.zero_item(elem)
 	if _, err := queue.push_back(&p.objects, elem); err != nil {
 		panic("nbio completion pool allocation error")

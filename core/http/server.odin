@@ -5,7 +5,6 @@ import "base:runtime"
 
 import "core:bufio"
 import "core:bytes"
-import "core:c/libc"
 import "core:fmt"
 import "core:log"
 import "core:mem"
@@ -18,6 +17,7 @@ import "core:slice"
 import "core:sync"
 import "core:thread"
 import "core:time"
+import win "core:sys/windows"
 
 Server_Opts :: struct {
 	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.
@@ -314,19 +314,35 @@ server_shutdown_on_interrupt :: proc(s: ^Server) {
 	on_interrupt_server = s
 	on_interrupt_context = context
 
-	libc.signal(
-		libc.SIGINT,
-		proc "cdecl" (_: i32) {
+	when ODIN_OS == .Windows {
+		ok := win.SetConsoleCtrlHandler(proc "std" (u32) -> win.BOOL {
 			context = on_interrupt_context
 
 			// Force close on second signal.
 			if td.state == .Closing {
-				os2.exit(1)
+				return false
 			}
 
 			server_shutdown(on_interrupt_server)
-		},
-	)
+
+			return true
+		}, true)
+		assert(ok == true)
+	} else {
+		libc.signal(
+			libc.SIGINT,
+			proc "c" (_: i32) {
+				context = on_interrupt_context
+
+				// Force close on second signal.
+				if td.state == .Closing {
+					os2.exit(1)
+				}
+
+				server_shutdown(on_interrupt_server)
+			},
+		)
+	}
 }
 
 // Taken from Go's implementation,

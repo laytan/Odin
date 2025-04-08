@@ -4,50 +4,68 @@ package nbio
 import "core:container/queue"
 import "core:log"
 import "core:net"
-import "core:os"
 import "core:time"
+import "core:mem"
 
 import win "core:sys/windows"
 
-_init :: proc(io: ^IO, allocator := context.allocator) -> (err: os.Errno) {
+__init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) {
 	io.allocator = allocator
 
-	pool_init(&io.completion_pool, allocator = allocator)
-	queue.init(&io.completed, allocator = allocator)
-	io.timeouts = make([dynamic]^Completion, allocator)
+	mem_err: mem.Allocator_Error
+	if mem_err = pool_init(&io.completion_pool, allocator = allocator); mem_err != nil {
+		err = .Allocation_Failed
+		return
+	}
+	defer if err != nil { pool_destroy(&io.completion_pool) }
+
+	if mem_err = queue.init(&io.completed, allocator = allocator); mem_err != nil {
+		err = .Allocation_Failed
+		return
+	}
+	defer if err != nil { queue.destroy(&io.completed) }
+
+	if io.timeouts, mem_err = make([dynamic]^Completion, allocator); mem_err != nil {
+		err = .Allocation_Failed
+		return
+	}
+	defer if err != nil { delete(io.timeouts) }
 
 	win.ensure_winsock_initialized()
-	defer if err != win.NO_ERROR {
-		clean_err := win.WSACleanup()
-		assert(clean_err == win.NO_ERROR)
-	}
+	defer if err != nil { win.WSACleanup() }
 
-	io.iocp = win.CreateIoCompletionPort(win.INVALID_HANDLE_VALUE, nil, nil, 0)
+	io.iocp = win.CreateIoCompletionPort(win.INVALID_HANDLE_VALUE, nil, 0, 0)
 	if io.iocp == nil {
-		err = os.Errno(win.GetLastError())
+		err = General_Error(win.GetLastError())
 		return
 	}
 
 	return
 }
 
-_destroy :: proc(io: ^IO) {
-	context.allocator = io.allocator
-
-	delete(io.timeouts)
-	queue.destroy(&io.completed)
-	pool_destroy(&io.completion_pool)
-
-	// TODO: error handling.
-	win.CloseHandle(io.iocp)
-	// win.WSACleanup()
-}
-
-_num_waiting :: #force_inline proc(io: ^IO) -> int {
+_num_waiting :: proc(io: ^IO) -> int {
 	return io.completion_pool.num_waiting
 }
 
-_tick :: proc(io: ^IO) -> (err: os.Errno) {
+__destroy :: proc(io: ^IO) {
+	unimplemented()
+//	context.allocator = io.allocator
+//
+//	delete(io.timeouts)
+//	queue.destroy(&io.completed)
+//	pool_destroy(&io.completion_pool)
+//
+//	// TODO: error handling.
+//	win.CloseHandle(io.iocp)
+	// win.WSACleanup()
+}
+
+_now :: proc(io: ^IO) -> time.Time {
+	// TODO:
+	return time.now()
+}
+
+_tick :: proc(io: ^IO) -> (err: General_Error) {
 	if queue.len(io.completed) == 0 {
 		next_timeout := flush_timeouts(io)
 
@@ -65,7 +83,7 @@ _tick :: proc(io: ^IO) -> (err: os.Errno) {
 		entries_removed: win.ULONG
 		if !win.GetQueuedCompletionStatusEx(io.iocp, &events[0], len(events), &entries_removed, wait_ms, false) {
 			if terr := win.GetLastError(); terr != win.WAIT_TIMEOUT {
-				err = os.Errno(terr)
+				err = General_Error(terr)
 				return
 			}
 		}
@@ -103,31 +121,30 @@ _tick :: proc(io: ^IO) -> (err: os.Errno) {
 	return
 }
 
-_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> (err: net.Network_Error) {
-	if res := win.listen(win.SOCKET(socket), i32(backlog)); res == win.SOCKET_ERROR {
-		err = net.Listen_Error(win.WSAGetLastError())
-	}
-	return
-}
-
 // Basically a copy of `os.open`, where a flag is added to signal async io, and creation of IOCP.
 // Specifically the FILE_FLAG_OVERLAPPEd flag.
-_open :: proc(io: ^IO, path: string, mode, perm: int) -> (os.Handle, os.Errno) {
-	if len(path) == 0 {
-		return os.INVALID_HANDLE, os.ERROR_FILE_NOT_FOUND
+_open :: proc(io: ^IO, path: string, flags: File_Flags, perm: int) -> (handle: Handle, err: FS_Error) {
+	handle = INVALID_HANDLE
+
+	if path == "" {
+		err = .Invalid_Argument
+		return
 	}
 
 	access: u32
-	switch mode & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR) {
-	case os.O_RDONLY: access = win.FILE_GENERIC_READ
-	case os.O_WRONLY: access = win.FILE_GENERIC_WRITE
-	case os.O_RDWR:   access = win.FILE_GENERIC_READ | win.FILE_GENERIC_WRITE
-	}
 
-	if mode & os.O_CREATE != 0 {
+	if .Write in flags {
 		access |= win.FILE_GENERIC_WRITE
 	}
-	if mode & os.O_APPEND != 0 {
+
+	if .Read in flags {
+		access |= win.FILE_GENERIC_READ
+	}
+
+	if .Create in flags {
+		access |= win.FILE_GENERIC_WRITE
+	}
+	if .Append in flags {
 		access &~= win.FILE_GENERIC_WRITE
 		access |= win.FILE_APPEND_DATA
 	}
@@ -138,41 +155,44 @@ _open :: proc(io: ^IO, path: string, mode, perm: int) -> (os.Handle, os.Errno) {
 		nLength        = size_of(win.SECURITY_ATTRIBUTES),
 		bInheritHandle = true,
 	}
-	if mode & os.O_CLOEXEC == 0 {
+	if .Inheritable in flags {
 		sa = &sa_inherit
+
 	}
 
 	create_mode: u32
+
+	// TODO: this means create and excl are in flags right?
 	switch {
-	case mode & (os.O_CREATE | os.O_EXCL) == (os.O_CREATE | os.O_EXCL):
+	case File_Flags{.Create, .Excl} <= flags:
 		create_mode = win.CREATE_NEW
-	case mode & (os.O_CREATE | os.O_TRUNC) == (os.O_CREATE | os.O_TRUNC):
+	case File_Flags{.Create, .Trunc} <= flags:
 		create_mode = win.CREATE_ALWAYS
-	case mode & os.O_CREATE == os.O_CREATE:
+	case .Create in flags:
 		create_mode = win.OPEN_ALWAYS
-	case mode & os.O_TRUNC == os.O_TRUNC:
+	case .Trunc in flags:
 		create_mode = win.TRUNCATE_EXISTING
 	case:
 		create_mode = win.OPEN_EXISTING
 	}
 
-	flags := win.FILE_ATTRIBUTE_NORMAL | win.FILE_FLAG_BACKUP_SEMANTICS
+	winflags := win.FILE_ATTRIBUTE_NORMAL | win.FILE_FLAG_BACKUP_SEMANTICS
 
 	// This line is the only thing different from the `os.open` procedure.
 	// This makes it an asynchronous file that can be used in nbio.
-	flags |= win.FILE_FLAG_OVERLAPPED
+	winflags |= win.FILE_FLAG_OVERLAPPED
 
 	wide_path := win.utf8_to_wstring(path)
-	handle := os.Handle(win.CreateFileW(wide_path, access, share_mode, sa, create_mode, flags, nil))
+	handle = Handle(win.CreateFileW(wide_path, access, share_mode, sa, create_mode, winflags, nil))
 
-	if handle == os.INVALID_HANDLE {
-		err := os.Errno(win.GetLastError())
-		return os.INVALID_HANDLE, err
+	if handle == INVALID_HANDLE {
+		err = FS_Error(win.GetLastError())
+		return
 	}
 
 	// Everything past here is custom/not from `os.open`.
 
-	handle_iocp := win.CreateIoCompletionPort(win.HANDLE(handle), io.iocp, nil, 0)
+	handle_iocp := win.CreateIoCompletionPort(win.HANDLE(handle), io.iocp, 0, 0)
 	assert(handle_iocp == io.iocp)
 
 	cmode: byte
@@ -180,24 +200,27 @@ _open :: proc(io: ^IO, path: string, mode, perm: int) -> (os.Handle, os.Errno) {
 	cmode |= FILE_SKIP_SET_EVENT_ON_HANDLE
 	if !win.SetFileCompletionNotificationModes(win.HANDLE(handle), cmode) {
 		win.CloseHandle(win.HANDLE(handle))
-		return os.INVALID_HANDLE, os.Errno(win.GetLastError())
+		return INVALID_HANDLE, FS_Error(win.GetLastError())
 	}
 
-	if mode & os.O_APPEND != 0 {
-		_seek(io, handle, 0, .End)
-	}
-
-	return handle, os.ERROR_NONE
+	return handle, nil
 }
 
-_file_size :: proc(_: ^IO, fd: os.Handle) -> (i64, os.Errno) {
+_file_size :: proc(_: ^IO, fd: Handle) -> (i64, FS_Error) {
 	size: win.LARGE_INTEGER
 	ok := win.GetFileSizeEx(win.HANDLE(fd), &size)
 	if !ok {
-		return 0, os.Errno(win.GetLastError())
+		return 0, FS_Error(win.GetLastError())
 	}
 
-	return i64(size), 0
+	return i64(size), nil
+}
+
+_listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> (err: net.Listen_Error) {
+	if res := win.listen(win.SOCKET(socket), i32(backlog)); res == win.SOCKET_ERROR {
+		err = net._listen_error()
+	}
+	return
 }
 
 _open_socket :: proc(
@@ -208,13 +231,32 @@ _open_socket :: proc(
 	socket: net.Any_Socket,
 	err: net.Network_Error,
 ) {
-	socket, err = net.create_socket(family, protocol)
-	if err != nil { return }
+	socket = net.create_socket(family, protocol) or_return
 
-	err = prepare_socket(io, socket)
+	err = _prepare_socket(io, socket)
 	if err != nil { net.close(socket) }
 	return
 }
+
+_prepare_socket :: proc(io: ^IO, socket: net.Any_Socket) -> net.Network_Error {
+	net.set_option(socket, .Reuse_Address, true) or_return
+//	net.set_option(socket, .TCP_Nodelay, true) or_return
+
+	handle := win.HANDLE(uintptr(net.any_socket_to_socket(socket)))
+
+	handle_iocp := win.CreateIoCompletionPort(handle, io.iocp, 0, 0)
+	assert(handle_iocp == io.iocp)
+
+	mode: byte
+	mode |= FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+	mode |= FILE_SKIP_SET_EVENT_ON_HANDLE
+	if !win.SetFileCompletionNotificationModes(handle, mode) {
+		return net._socket_option_error()
+	}
+
+	return nil
+}
+
 
 _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {
 	return submit(
@@ -245,7 +287,7 @@ _close :: proc(io: ^IO, fd: Closable, user: rawptr, callback: On_Close) -> ^Comp
 
 _read :: proc(
 	io: ^IO,
-	fd: os.Handle,
+	fd: Handle,
 	offset: int,
 	buf: []byte,
 	user: rawptr,
@@ -265,7 +307,7 @@ _read :: proc(
 
 _write :: proc(
 	io: ^IO,
-	fd: os.Handle,
+	fd: Handle,
 	offset: int,
 	buf: []byte,
 	user: rawptr,
@@ -340,14 +382,18 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 	return completion
 }
 
+_timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) -> ^Completion {
+	panic("unimplemented on windows: timeout_completion")
+}
+
+_remove :: proc(io: ^IO, target: ^Completion) {
+	panic("unimplemented on windows: remove")
+}
+
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
 	panic("unimplemented on windows: next_tick")
 }
 
-_poll :: proc(io: ^IO, fd: os.Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
+_poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
 	panic("unimplemented on windows: poll")
-}
-
-_poll_remove :: proc(io: ^IO, fd: os.Handle, event: Poll_Event) -> ^Completion {
-	panic("unimplemented on windows: poll_remove")
 }
