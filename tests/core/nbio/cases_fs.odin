@@ -100,27 +100,6 @@ usage_across_threads :: proc(t: ^testing.T) {
 }
 
 @(test)
-poll_already_ready :: proc(t: ^testing.T) {
-	if !check_support(t) { return }
-	defer nbio.destroy()
-
-	fd, err := nbio.open(#file)
-	ev(t, err, nil)
-
-	hit: bool
-	nbio.poll_poly(fd, .Read, false, &hit, proc(hit: ^bool, _: nbio.Poll_Event) {
-		hit^ = true
-	})
-
-	ev(t, nbio.run(), nil)
-
-	e(t, hit)
-
-	nbio.close(fd)
-	ev(t, nbio.run(), nil)
-}
-
-@(test)
 remove_timeout :: proc(t: ^testing.T) {
 	if !check_support(t) { return }
 	defer nbio.destroy()
@@ -136,4 +115,3 @@ remove_timeout :: proc(t: ^testing.T) {
 
 	e(t, !hit)
 }
-

@@ -196,3 +196,70 @@ remove_a_completion_with_a_timeout :: proc(t: ^testing.T) {
 	e(t, !hit_accept)
 	e(t, hit_timeout)
 }
+
+/*
+This test walks through the scenario where a user wants to `poll` in order to check if some other package (in this case `core:net`),
+would be able to do an operation without blocking.
+
+It also tests whether a poll can be issues when it is already in a ready state.
+And it tests big send/recv buffers being handled properly.
+*/
+@(test)
+test_poll :: proc(t: ^testing.T) {
+	if !check_support(t) { return }
+	defer nbio.destroy()
+
+	can_recv: bool
+
+	sock, ep := open_next_available_local_port(t)
+
+	/* -- Server -- */
+
+	nbio.accept_poly2(sock, t, &can_recv, proc(t: ^testing.T, can_recv: ^bool, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error) {
+		ev(t, err, nil)
+
+		check_recv :: proc(t: ^testing.T, can_recv: ^bool, client: net.TCP_Socket) {
+			// Not ready to unblock the client yet, requeue for after 10ms.
+			if !can_recv^ {
+				nbio.timeout_poly3(time.Millisecond * 10, t, can_recv, client, check_recv)
+				return
+			}
+
+			// Receive some data to unblock the client, which should complete the poll it does, allowing it to send data again.
+			buf, mem_err := make([]byte, mem.Gigabyte * 2, context.temp_allocator)
+			ev(t, mem_err, nil)
+			nbio.recv_all_tcp_poly(client, buf, t, proc(t: ^testing.T, received: int, err: net.TCP_Recv_Error) {
+				ev(t, err, nil)
+			})
+		}
+		nbio.timeout_poly3(time.Millisecond * 10, t, can_recv, client, check_recv)
+	})
+
+	/* -- Client -- */
+
+	// Do a poll even though we know it's ready, so we can test that all implementations can handle that.
+	nbio.dial_poly2(ep, t, &can_recv, proc(t: ^testing.T, can_recv: ^bool, sock: net.TCP_Socket, err: net.Network_Error) {
+		ev(t, err, nil)
+
+		nbio.poll_poly3(nbio.Handle(sock), .Read, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
+			// Send 4 GB of data, which in my experience causes a Would_Block error because we filled up the internal buffer.
+			buf, mem_err := make([]byte, mem.Gigabyte*4, context.temp_allocator)
+			ev(t, mem_err, nil)
+			_, send_err := net.send_tcp(sock, buf)
+			ev(t, send_err, net.TCP_Send_Error.Would_Block)
+
+			// Tell the server it can start issueing recv calls, so it unblocks us.
+			can_recv^ = true
+
+			// Now poll again, when the server reads enough data it should complete, telling us we can send without blocking again.
+			nbio.poll_poly3(nbio.Handle(sock), .Read, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
+				buf: [128]byte
+				bytes_written, send_err := net.send_tcp(sock, buf[:])
+				ev(t, bytes_written, 128)
+				ev(t, send_err, nil)
+			})
+		})
+	})
+
+	ev(t, nbio.run(), nil)
+}

@@ -15,9 +15,17 @@ _IO :: struct #no_copy {
 	iocp:            win.HANDLE,
 	allocator:       mem.Allocator,
 	timeouts:        [dynamic]^Completion,
+//	polls:           [dynamic]^Completion,
+//	_polls:          [dynamic]win.WSA_POLLFD,
+	polls:         	 #soa [dynamic]Poll,
 	completed:       queue.Queue(^Completion),
 	completion_pool: Pool,
 	io_pending:      int,
+}
+
+Poll :: struct {
+	fd: win.WSA_POLLFD,
+	completion: ^Completion,
 }
 
 _Completion :: struct {
@@ -30,6 +38,8 @@ _Completion :: struct {
 _Handle :: distinct uintptr
 
 INVALID_HANDLE :: Handle(win.INVALID_HANDLE)
+
+MAX_RW :: mem.Gigabyte
 
 Operation :: union {
 	Op_Accept,
@@ -114,9 +124,15 @@ Op_Timeout :: struct {
 	expires:  time.Time,
 }
 
-Op_Next_Tick :: struct {}
+Op_Next_Tick :: struct {
+	callback: On_Next_Tick,
+}
 
-Op_Poll :: struct {}
+Op_Poll :: struct {
+	callback: On_Poll,
+	idx:      int,
+	multi:    bool,
+}
 
 Op_Remove :: struct {}
 
@@ -289,11 +305,12 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 	case Op_Timeout:
 		op.callback(completion.user_data)
-
-	case Op_Next_Tick, Op_Poll, Op_Remove:
+	case Op_Next_Tick:
+		op.callback(completion.user_data)
+	case Op_Poll, Op_Remove:
 		unreachable()
-
 	}
+
 	pool_put(&io.completion_pool, completion)
 }
 
@@ -409,6 +426,8 @@ read_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Read) -> (read: win.DW
 		// TODO: this is wrong.
 		comp.over.OffsetHigh = comp.over.Offset >> 32
 
+		// TODO: MAX_RW?
+
 		ok = win.ReadFile(win.HANDLE(op.fd), raw_data(op.buf), win.DWORD(len(op.buf)), &read, &comp.over)
 
 		// Not sure if this also happens with correctly set up handles some times.
@@ -432,6 +451,9 @@ write_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Write) -> (written: w
 		comp.over.Offset = u32(op.offset)
 		// TODO: this is wrong.
 		comp.over.OffsetHigh = comp.over.Offset >> 32
+
+		// TODO: MAX_RW?
+
 		ok = win.WriteFile(win.HANDLE(op.fd), raw_data(op.buf), win.DWORD(len(op.buf)), &written, &comp.over)
 
 		// Not sure if this also happens with correctly set up handles some times.
@@ -455,7 +477,11 @@ recv_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Recv) -> (received: wi
 		ok = win.WSAGetOverlappedResult(sock, &comp.over, &received, win.FALSE, &flags)
 	} else {
 		flags: win.DWORD
-		err_code := win.WSARecv(sock, &op.buf, 1, &received, &flags, win.LPWSAOVERLAPPED(&comp.over), nil)
+
+		buf := op.buf
+		buf.len = min(buf.len, MAX_RW)
+
+		err_code := win.WSARecv(sock, &buf, 1, &received, &flags, win.LPWSAOVERLAPPED(&comp.over), nil)
 		ok = err_code != win.SOCKET_ERROR
 		op.pending = true
 	}
@@ -471,7 +497,10 @@ send_callback :: proc(io: ^IO, comp: ^Completion, op: ^Op_Send) -> (sent: win.DW
 		flags: win.DWORD
 		ok = win.WSAGetOverlappedResult(sock, &comp.over, &sent, win.FALSE, &flags)
 	} else {
-		err_code := win.WSASend(sock, &op.buf, 1, &sent, 0, win.LPWSAOVERLAPPED(&comp.over), nil)
+		buf := op.buf
+		buf.len = min(buf.len, MAX_RW)
+
+		err_code := win.WSASend(sock, &buf, 1, &sent, 0, win.LPWSAOVERLAPPED(&comp.over), nil)
 		ok = err_code != win.SOCKET_ERROR
 		op.pending = true
 	}

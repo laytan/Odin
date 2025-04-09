@@ -356,7 +356,7 @@ _recv_tcp_poly :: proc(socket: net.TCP_Socket, buf: []byte, all: bool, p: $T, ca
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, received, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, 0, .Network_Unreachable)
 		return nil
@@ -379,7 +379,7 @@ _recv_tcp_poly2 :: proc(socket: net.TCP_Socket, buf: []byte, all: bool, p: $T, p
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, received, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, p2, 0, .Network_Unreachable)
 		return nil
@@ -404,7 +404,7 @@ _recv_tcp_poly3 :: proc(socket: net.TCP_Socket, buf: []byte, all: bool, p: $T, p
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, received, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, p2, p3, 0, .Network_Unreachable)
 		return nil
@@ -428,7 +428,7 @@ _recv_udp_poly :: proc(socket: net.UDP_Socket, buf: []byte, all: bool, p: $T, ca
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
 		cb(p, received, client, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, 0, {}, .Network_Unreachable)
 		return nil
@@ -451,7 +451,7 @@ _recv_udp_poly2 :: proc(socket: net.UDP_Socket, buf: []byte, all: bool, p: $T, p
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		cb(p, p2, received, client, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, p2, 0, {}, .Network_Unreachable)
 		return nil
@@ -476,7 +476,7 @@ _recv_udp_poly3 :: proc(socket: net.UDP_Socket, buf: []byte, all: bool, p: $T, p
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
 		cb(p, p2, p3, received, client, err)
-	}))
+	}), all)
 	if completion == nil {
 		callback(p, p2, p3, 0, {}, .Network_Unreachable)
 		return nil

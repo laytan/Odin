@@ -31,6 +31,9 @@ __init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) 
 	}
 	defer if err != nil { delete(io.timeouts) }
 
+	// TODO: errors
+	io.polls = make_soa(#soa [dynamic]Poll, allocator)
+
 	win.ensure_winsock_initialized()
 	defer if err != nil { win.WSACleanup() }
 
@@ -48,16 +51,13 @@ _num_waiting :: proc(io: ^IO) -> int {
 }
 
 __destroy :: proc(io: ^IO) {
-	unimplemented()
-//	context.allocator = io.allocator
-//
-//	delete(io.timeouts)
-//	queue.destroy(&io.completed)
-//	pool_destroy(&io.completion_pool)
-//
-//	// TODO: error handling.
-//	win.CloseHandle(io.iocp)
-	// win.WSACleanup()
+	context.allocator = io.allocator
+
+	queue.destroy(&io.completed)
+	pool_destroy(&io.completion_pool)
+	delete(io.timeouts)
+	delete(io.polls)
+	win.CloseHandle(io.iocp)
 }
 
 _now :: proc(io: ^IO) -> time.Time {
@@ -71,11 +71,48 @@ _tick :: proc(io: ^IO) -> (err: General_Error) {
 
 		// Wait a maximum of a ms if there is nothing to do.
 		// TODO: this is pretty naive, a typical server always has accept completions pending and will be at 100% cpu.
-		wait_ms: win.DWORD = 1 if io.io_pending == 0 else 0
+		wait_ms: win.DWORD = win.DWORD(IDLE_TIME / time.Millisecond) if io.io_pending == 0 else 0
 
 		// But, to counter inaccuracies in low timeouts,
 		// lets make the call exit immediately if the next timeout is close.
 		if nt, ok := next_timeout.?; ok && nt <= time.Millisecond * 15 {
+			wait_ms = 0
+		}
+
+		if len(io.polls) > 0 {
+			ret := win.WSAPoll(io.polls.fd, u32(min(int(max(u32)), len(io.polls))), i32(wait_ms))
+
+			if ret > 0 {
+				#reverse for &poll, i in io.polls {
+					completion := poll.completion
+					op := &completion.op.(Op_Poll)
+					if poll.fd.revents != 0 {
+						event: Poll_Event
+						if poll.fd.revents & win.POLLWRNORM != 0 {
+							event = .Read
+						} else if poll.fd.revents & win.POLLWRNORM != 0 {
+							event = .Write
+						} else {
+							unreachable()
+						}
+
+						context = completion.ctx
+						op.callback(completion.user_data, event)
+
+						if op.multi {
+							poll.fd.revents = 0
+						} else {
+							pool_put(&io.completion_pool, completion)
+							unordered_remove_soa(&io.polls, i)
+						}
+
+						ret -= 1
+						if ret == 0 { break }
+					}
+				}
+			}
+
+			// NOTE: Already waited on polls now.
 			wait_ms = 0
 		}
 
@@ -105,7 +142,7 @@ _tick :: proc(io: ^IO) -> (err: General_Error) {
 
 			// This is actually pointing at the Completion.over field, but because it is the first field
 			// It is also a valid pointer to the Completion struct.
-			completion := transmute(^Completion)event.lpOverlapped
+			completion := cast(^Completion)event.lpOverlapped
 			queue.push_back(&io.completed, completion)
 		}
 	}
@@ -239,8 +276,8 @@ _open_socket :: proc(
 }
 
 _prepare_socket :: proc(io: ^IO, socket: net.Any_Socket) -> net.Network_Error {
-	net.set_option(socket, .Reuse_Address, true) or_return
-//	net.set_option(socket, .TCP_Nodelay, true) or_return
+	net.set_option(socket, .Reuse_Address, true)
+	net.set_blocking(socket, false) or_return
 
 	handle := win.HANDLE(uintptr(net.any_socket_to_socket(socket)))
 
@@ -329,6 +366,9 @@ _recv :: proc(io: ^IO, socket: net.Any_Socket, buf: []byte, user: rawptr, callba
 	// TODO: implement UDP.
 	if _, ok := socket.(net.UDP_Socket); ok { unimplemented("nbio.recv with UDP sockets is not yet implemented") }
 
+	// TODO: support bigger (`int` size)
+	assert(len(buf) <= int(max(win.ULONG)))
+
 	return submit(
 		io,
 		user,
@@ -353,6 +393,9 @@ _send :: proc(
 ) -> ^Completion {
 	// TODO: implement UDP.
 	if _, ok := socket.(net.UDP_Socket); ok { unimplemented("nbio.send with UDP sockets is not yet implemented") }
+
+	// TODO: support bigger (`int` size)
+	assert(len(buf) <= int(max(win.ULONG)))
 
 	return submit(
 		io,
@@ -391,9 +434,35 @@ _remove :: proc(io: ^IO, target: ^Completion) {
 }
 
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
-	panic("unimplemented on windows: next_tick")
+	completion := pool_get(&io.completion_pool)
+	completion.ctx = context
+	completion.op = Op_Next_Tick{
+		callback = callback,
+	}
+	completion.user_data = user
+
+	// TODO: error handling
+	queue.push_back(&io.completed, completion)
+	return completion
 }
 
+// TODO: events should be a bit set.
+// TODO: sockets only.
 _poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
-	panic("unimplemented on windows: poll")
+	completion := pool_get(&io.completion_pool)
+	completion.ctx = context
+	completion.op = Op_Poll {
+		callback = callback,
+		multi = multi,
+	}
+	completion.user_data = user
+
+	append(&io.polls, Poll{
+		fd = win.WSA_POLLFD {
+			fd = win.SOCKET(fd),
+			events = win.POLLRDNORM|win.POLLWRNORM, // TODO: map from events given.
+		},
+		completion = completion,
+	})
+	return completion
 }
