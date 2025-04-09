@@ -11,6 +11,10 @@ import "core:time"
 
 import win "core:sys/windows"
 
+// TODO: we may want one iocp per application, and each threads calls GetQueuedblahblah on it.
+// Windows seems to have designed it for that use case.
+// BUT! I don't think we can then guarantee that a socket is "owned" by a thread, like the other impls do, is that a problem?
+
 _IO :: struct #no_copy {
 	iocp:            win.HANDLE,
 	allocator:       mem.Allocator,

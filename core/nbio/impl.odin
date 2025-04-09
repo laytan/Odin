@@ -12,7 +12,7 @@ IO :: struct {
 	refs:        int,
 }
 
-IDLE_TIME :: time.Millisecond * 1000
+IDLE_TIME :: time.Millisecond * 2
 #assert(IDLE_TIME % time.Millisecond == 0)
 
 @(thread_local)
