@@ -18,6 +18,11 @@ import "core:sync"
 import "core:thread"
 import "core:time"
 import win "core:sys/windows"
+import "core:c/libc"
+
+_ :: libc
+_ :: os2
+_ :: win
 
 Server_Opts :: struct {
 	// Whether the server should accept every request that sends a "Expect: 100-continue" header automatically.
