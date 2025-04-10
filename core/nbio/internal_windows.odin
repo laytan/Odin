@@ -32,10 +32,15 @@ Poll :: struct {
 	completion: ^Completion,
 }
 
+TIMED_OUT :: rawptr(max(uintptr))
+REMOVED   :: rawptr(max(uintptr)-1)
+
 _Completion :: struct {
-	over: win.OVERLAPPED,
-	ctx:  runtime.Context,
-	op:   Operation,
+	over:      win.OVERLAPPED,
+	ctx:       runtime.Context,
+	op:        Operation,
+	timeout:   ^Completion,
+	in_kernel: bool,
 }
 #assert(offset_of(Completion, over) == 0, "needs to be the first field to work")
 
@@ -64,14 +69,14 @@ Op_Accept :: struct {
 	socket:   win.SOCKET,
 	client:   win.SOCKET,
 	addr:     win.SOCKADDR_STORAGE_LH,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 }
 
 Op_Connect :: struct {
 	callback: On_Dial,
 	socket:   win.SOCKET,
 	addr:     win.SOCKADDR_STORAGE_LH,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 }
 
 Op_Close :: struct {
@@ -84,7 +89,7 @@ Op_Read :: struct {
 	fd:       Handle,
 	offset:   int,
 	buf:      []byte,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 	all:      bool,
 	read:     int,
 	len:      int,
@@ -95,7 +100,7 @@ Op_Write :: struct {
 	fd:       Handle,
 	offset:   int,
 	buf:      []byte,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 
 	written:  int,
 	len:      int,
@@ -106,7 +111,7 @@ Op_Recv :: struct {
 	callback: On_Recv,
 	socket:   net.Any_Socket,
 	buf:      win.WSABUF,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 	all:      bool,
 	received: int,
 	len:      int,
@@ -116,7 +121,7 @@ Op_Send :: struct {
 	callback: On_Sent,
 	socket:   net.Any_Socket,
 	buf:      win.WSABUF,
-	pending:  bool,
+	pending:  bool, // TODO: reuse in_kernel of the completion?
 
 	len:      int,
 	sent:     int,
@@ -145,7 +150,7 @@ flush_timeouts :: proc(io: ^IO) -> (expires: Maybe(time.Duration)) {
 	timeout_len := len(io.timeouts)
 
 	// PERF: could use a faster clock, is getting time since program start fast?
-	if timeout_len > 0 { curr = time.now() }
+	if timeout_len > 0 { curr = _now(io) }
 
 	for i := 0; i < timeout_len; {
 		completion := io.timeouts[i]
@@ -153,8 +158,8 @@ flush_timeouts :: proc(io: ^IO) -> (expires: Maybe(time.Duration)) {
 		cexpires := time.diff(curr, op.expires)
 
 		// Timeout done.
-		if (cexpires <= 0) {
-			ordered_remove(&io.timeouts, i)
+		if (cexpires <= 0 || completion.timeout == (^Completion)(REMOVED)) {
+			ordered_remove(&io.timeouts, i) // TODO: ordered remove bad.
 			queue.push_back(&io.completed, completion)
 			timeout_len -= 1
 			continue
@@ -181,6 +186,18 @@ submit :: proc(io: ^IO, user: rawptr, op: Operation) -> ^Completion {
 }
 
 handle_completion :: proc(io: ^IO, completion: ^Completion) {
+	// TODO: do we need to do anything if the completion is in the kernel? / does a CancelIoEx cause a final cancel signal on the iocp we need to catch?
+
+	if !completion.in_kernel && completion.timeout != (^Completion)(REMOVED) {
+		pool_put(&io.completion_pool, completion)
+		return
+	}
+
+	completed: bool
+	defer if !completed {
+		completion.in_kernel = true
+	}
+
 	switch &op in completion.op {
 	case Op_Accept:
 		// TODO: we should directly call the accept callback here, no need for it to be on the Op_Acccept struct.
@@ -310,11 +327,14 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 	case Op_Timeout:
 		op.callback(completion.user_data)
 	case Op_Next_Tick:
-		op.callback(completion.user_data)
+		if completion.timeout != (^Completion)(REMOVED) {
+			op.callback(completion.user_data)
+		}
 	case Op_Poll, Op_Remove:
 		unreachable()
 	}
 
+	completed = true
 	pool_put(&io.completion_pool, completion)
 }
 

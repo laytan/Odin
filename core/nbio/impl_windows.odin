@@ -66,6 +66,7 @@ _now :: proc(io: ^IO) -> time.Time {
 }
 
 _tick :: proc(io: ^IO) -> (err: General_Error) {
+	// TODO: does this if make sense, at least the polls need to be outside of it?
 	if queue.len(io.completed) == 0 {
 		next_timeout := flush_timeouts(io)
 
@@ -416,7 +417,7 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 
 	completion.op = Op_Timeout {
 		callback = callback,
-		expires  = time.time_add(time.now(), dur),
+		expires  = time.time_add(_now(io), dur),
 	}
 	completion.user_data = user
 	completion.ctx = context
@@ -430,7 +431,50 @@ _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) ->
 }
 
 _remove :: proc(io: ^IO, target: ^Completion) {
-	panic("unimplemented on windows: remove")
+	target.timeout = (^Completion)(TIMED_OUT)
+
+	#partial switch &op in target.op {
+	case Op_Poll:
+		// TODO: inneficient.
+		for poll, i in io.polls {
+			if poll.completion == target {
+				unordered_remove_soa(&io.polls, i)
+				break
+			}
+		}
+		return
+	case Op_Timeout, Op_Next_Tick:
+		return
+	case Op_Remove:
+		panic("can't remove a remove")
+
+	// TODO: with timeout_completion we need to remove the target.
+	}
+
+	if target.in_kernel {
+		handle: win.HANDLE
+		switch &op in target.op {
+		case Op_Accept:          handle = win.HANDLE(op.socket)
+		case Op_Close:
+			switch fd in op.fd {
+			case net.TCP_Socket: handle = win.HANDLE(uintptr(fd))
+			case net.UDP_Socket: handle = win.HANDLE(uintptr(fd))
+			case net.Socket:     handle = win.HANDLE(uintptr(fd))
+			case Handle:         handle = win.HANDLE(uintptr(fd))
+			}
+		case Op_Connect:         handle = win.HANDLE(op.socket)
+		case Op_Read:            handle = win.HANDLE(op.fd)
+		case Op_Write:           handle = win.HANDLE(op.fd)
+		case Op_Recv:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(op.socket)))
+		case Op_Send:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(op.socket)))
+		case Op_Timeout,
+		     Op_Next_Tick,
+		     Op_Poll,
+		     Op_Remove: unreachable()
+		}
+		ok := win.CancelIoEx(handle, &target.over)
+		assert(ok == true) // TODO
+	}
 }
 
 _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion {
