@@ -3,7 +3,10 @@ package openssl
 
 import "core:c"
 
-SHARED :: #config(OPENSSL_SHARED, false)
+// Use the shared libraries of OpenSSL.
+// Defaults to false on Windows, true otherwise.
+// it is usually universally installed as a system library and it's recommended to use that.
+SHARED :: #config(OPENSSL_SHARED, ODIN_OS != .Windows)
 
 when ODIN_OS == .Windows {
 	when SHARED {
@@ -41,14 +44,16 @@ Version :: bit_field u32 {
 	major:       uint | 4,
 }
 
+// TODO: don't use init, we don't want to make it always link.
+// TODO: do this in the http implementation when a connection is initialized?
 VERSION: Version
-
 @(private, init)
 version_check :: proc() {
 	VERSION = Version(OpenSSL_version_num())
 	assert(VERSION.major == 3, "invalid OpenSSL library version, expected 3.x")
 }
 
+// TODO: distinct rawptr?
 SSL_METHOD :: struct {}
 SSL_CTX :: struct {}
 SSL :: struct {}
@@ -58,6 +63,21 @@ SSL_CTRL_SET_TLSEXT_HOSTNAME :: 55
 TLSEXT_NAMETYPE_host_name :: 0
 
 Error_Callback :: #type proc "c" (str: cstring, len: c.size_t, u: rawptr) -> c.int
+
+Error :: enum c.int {
+	None,
+	Ssl,
+	Want_Read,
+	Want_Write,
+	Want_X509_Lookup,
+	Syscall,
+	Zero_Return,
+	Want_Connect,
+	Want_Accept,
+	Want_Async,
+	Want_Async_Job,
+	Want_Client_Hello_CB,
+}
 
 foreign lib {
 	TLS_client_method :: proc() -> ^SSL_METHOD ---
@@ -76,22 +96,8 @@ foreign lib {
 	OpenSSL_version_num :: proc() -> c.ulong ---
 }
 
-// This is a macro in c land.
+/* Macros */
+
 SSL_set_tlsext_host_name :: proc(ssl: ^SSL, name: cstring) -> c.int {
 	return c.int(SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, rawptr(name)))
-}
-
-Error :: enum c.int {
-	None,
-	Ssl,
-	Want_Read,
-	Want_Write,
-	Want_X509_Lookup,
-	Syscall,
-	Zero_Return,
-	Want_Connect,
-	Want_Accept,
-	Want_Async,
-	Want_Async_Job,
-	Want_Client_Hello_CB,
 }
