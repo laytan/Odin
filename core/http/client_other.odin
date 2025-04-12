@@ -583,24 +583,41 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				ssl_recv(r, buf, callback, nil)
 
 				ssl_recv :: proc(r: ^In_Flight, buf: []byte, callback: On_Scanner_Read, _: nbio.Poll_Event) {
-					log.debug("executing SSL recv")
-					switch n, res := client_ssl.recv(r.conn.ssl, buf); res {
-					case .None:
-						log.debugf("Successfully received %m from the connection", n)
-						callback(&r.conn.scanner, n, nil)
-					case .Want_Read:
-						log.debug("SSL read want read")
-						nbio.poll_poly3(nbio.Handle(r.conn.socket), .Read, false, r, buf, callback, ssl_recv)
-					case .Want_Write:
-						log.debug("SSL read want write")
-						nbio.poll_poly3(nbio.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
-					case .Shutdown:
-						log.error("read failed, connection is closed")
-						callback(&r.conn.scanner, 0, .Connection_Closed)
-					case: fallthrough
-					case .Fatal:
-						log.error("read failed due to unknown Fatal reason")
-						callback(&r.conn.scanner, 0, .Unknown)
+					log.debugf("executing SSL recv for %m", len(buf))
+					total: int
+					receiving: for {
+						switch n, res := client_ssl.recv(r.conn.ssl, buf[total:]); res {
+						case .None:
+							log.debugf("Successfully received %m from the connection", n)
+							total += n
+							if total < len(buf) {
+								continue receiving
+							}
+							callback(&r.conn.scanner, total, nil)
+						case .Want_Read:
+							log.debug("SSL read want read")
+							if total > 0 {
+								callback(&r.conn.scanner, total, nil)
+							} else {
+								nbio.poll_poly3(nbio.Handle(r.conn.socket), .Read, false, r, buf, callback, ssl_recv)
+							}
+						case .Want_Write:
+							log.debug("SSL read want write")
+							if total > 0 {
+								callback(&r.conn.scanner, total, nil)
+							} else {
+								nbio.poll_poly3(nbio.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
+							}
+						case .Shutdown:
+							log.error("read failed, connection is closed")
+							callback(&r.conn.scanner, total, .Connection_Closed)
+						case: fallthrough
+						case .Fatal:
+							log.error("read failed due to unknown Fatal reason")
+							callback(&r.conn.scanner, total, .Unknown)
+						}
+
+						break receiving
 					}
 				}
 			}
