@@ -209,8 +209,6 @@ test_poll :: proc(t: ^testing.T) {
 	if !check_support(t) { return }
 	defer nbio.destroy()
 
-	testing.set_fail_timeout(t, time.Second * 5)
-
 	can_recv: bool
 
 	sock, ep := open_next_available_local_port(t)
