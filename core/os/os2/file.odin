@@ -215,6 +215,7 @@ rename :: proc(old_path, new_path: string) -> Error {
 	return _rename(old_path, new_path)
 }
 
+mv :: rename
 
 link :: proc(old_name, new_name: string) -> Error {
 	return _link(old_name, new_name)
