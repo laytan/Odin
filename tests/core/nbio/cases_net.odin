@@ -230,7 +230,7 @@ test_poll :: proc(t: ^testing.T) {
 			// Receive some data to unblock the client, which should complete the poll it does, allowing it to send data again.
 			buf, mem_err := make([]byte, mem.Gigabyte * 2, context.temp_allocator)
 			ev(t, mem_err, nil)
-			nbio.recv_all_tcp_poly(client, buf, t, proc(t: ^testing.T, received: int, err: net.TCP_Recv_Error) {
+			nbio.recv_tcp_poly(client, buf, t, proc(t: ^testing.T, received: int, err: net.TCP_Recv_Error) {
 				ev(t, err, nil)
 			})
 		}
@@ -243,7 +243,7 @@ test_poll :: proc(t: ^testing.T) {
 	nbio.dial_poly2(ep, t, &can_recv, proc(t: ^testing.T, can_recv: ^bool, sock: net.TCP_Socket, err: net.Network_Error) {
 		ev(t, err, nil)
 
-		nbio.poll_poly3(nbio.Handle(sock), .Read, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
+		nbio.poll_poly3(nbio.Handle(sock), .Write, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
 			// Send 4 GB of data, which in my experience causes a Would_Block error because we filled up the internal buffer.
 			buf, mem_err := make([]byte, mem.Gigabyte*4, context.temp_allocator)
 			ev(t, mem_err, nil)
@@ -254,7 +254,7 @@ test_poll :: proc(t: ^testing.T) {
 			can_recv^ = true
 
 			// Now poll again, when the server reads enough data it should complete, telling us we can send without blocking again.
-			nbio.poll_poly3(nbio.Handle(sock), .Read, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
+			nbio.poll_poly3(nbio.Handle(sock), .Write, false, t, sock, can_recv, proc(t: ^testing.T, sock: net.TCP_Socket, can_recv: ^bool, _: nbio.Poll_Event) {
 				buf: [128]byte
 				bytes_written, send_err := net.send_tcp(sock, buf[:])
 				ev(t, bytes_written, 128)
