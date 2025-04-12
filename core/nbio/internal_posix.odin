@@ -8,7 +8,10 @@ import    "core:container/queue"
 import    "core:net"
 import    "core:sys/posix"
 import    "core:time"
+import    "core:mem"
 import kq "core:sys/kqueue"
+
+MAX_RW :: mem.Gigabyte
 
 MAX_EVENTS :: 256
 
@@ -466,7 +469,7 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 }
 
 do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
-	read := posix.pread(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset))
+	read := posix.pread(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset)) // TODO: MAX_RW?
 	if read < 0 {
 		err := posix.errno()
 		if err == .EWOULDBLOCK {
@@ -496,7 +499,7 @@ do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		received, err := net.recv_tcp(sock, op.buf)
+		received, err := net.recv_tcp(sock, op.buf[:min(len(op.buf), MAX_RW)])
 		if err != nil {
 			if err == .Would_Block {
 				push_pending(io, completion)
@@ -522,7 +525,7 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		pool_put(&io.completion_pool, completion)
 
 	case net.UDP_Socket:
-		received, remote_endpoint, err := net.recv_udp(sock, op.buf)
+		received, remote_endpoint, err := net.recv_udp(sock, op.buf[:min(len(op.buf), MAX_RW)])
 		if err != nil {
 			if err == .Would_Block {
 				push_pending(io, completion)
@@ -552,7 +555,7 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 	switch sock in op.socket {
 	case net.TCP_Socket:
-		sent := posix.send(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL})
+		sent := posix.send(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL}) // TODO: MAX_RW?
 		if sent < 0 {
 			err := _tcp_send_error()
 			if err == .Would_Block {
@@ -578,7 +581,7 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 
 	case net.UDP_Socket:
 		toaddr := _endpoint_to_sockaddr(op.endpoint.(net.Endpoint))
-		sent := posix.sendto(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len))
+		sent := posix.sendto(posix.FD(sock), raw_data(op.buf), len(op.buf), {.NOSIGNAL}, (^posix.sockaddr)(&toaddr), posix.socklen_t(toaddr.ss_len)) // TODO: MAX_RW?
 		if sent < 0 {
 			err := _udp_send_error()
 			if err == .Would_Block {
@@ -605,7 +608,7 @@ do_send :: proc(io: ^IO, completion: ^Completion, op: ^Op_Send) {
 }
 
 do_write :: proc(io: ^IO, completion: ^Completion, op: ^Op_Write) {
-	written := posix.pwrite(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset))
+	written := posix.pwrite(op.fd, raw_data(op.buf), len(op.buf), posix.off_t(op.offset)) // TODO: MAX_RW?
 	if written < 0 {
 		err := posix.errno()
 		if err == .EWOULDBLOCK {
