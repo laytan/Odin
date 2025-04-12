@@ -11,6 +11,8 @@ import "core:io"
 ascii_case_insensitive_eq :: proc(cmp: string, to: string) -> bool #no_bounds_check {
 	if len(cmp) != len(to) { return false }
 
+	// PERF: consider simd like headers_cmp.
+
 	for i in 0 ..< len(cmp) {
 		c := cmp[i]
 		if c >= 'A' && c <= 'Z' {

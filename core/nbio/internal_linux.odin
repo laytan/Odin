@@ -188,13 +188,18 @@ flush :: proc(io: ^IO) -> linux.Errno {
 	return nil
 }
 
+// TODO: we only ever call this with 0 or 1 wait_nr, can just optimize on that with a bool maybe.
 flush_completions :: proc(io: ^IO, wait_nr: u32) -> linux.Errno {
 	cqes: [256]linux.IO_Uring_CQE
 	wait_remaining := wait_nr
 	for {
 		completed := uring.copy_cqes(&io.ring, cqes[:], wait_remaining) or_return
 
-		wait_remaining = max(0, wait_remaining - completed)
+		if wait_remaining < completed {
+			wait_remaining = 0
+		} else {
+			wait_remaining -= completed
+		}
 
 		if completed > 0 {
 			for cqe in cqes[:completed] {
