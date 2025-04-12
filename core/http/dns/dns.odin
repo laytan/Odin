@@ -348,8 +348,6 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		log.debug("got DNS record", rec)
 		nbio.close(req.socket)
 
-		free(req, req.client.allocator)
-
 		entry := &req.client.cache[req.hostname]
 		entry.resolving = false
 		entry.record = rec
@@ -361,6 +359,8 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 			context = cb.ctx
 			cb.cb(cb.ud, rec, nil)
 		}
+
+		free(req, req.client.allocator)
 		delete(entry.callbacks)
 	}
 
