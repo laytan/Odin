@@ -12,10 +12,13 @@ Cookie_Same_Site :: enum u8 {
 	Lax,
 }
 
+// TODO: compiler panic if not distinct.
+Expires :: distinct Maybe(time.Time)
+
 Cookie :: struct {
 	domain:       Maybe(string),
 	path:         Maybe(string),
-	expires_gmt:  Maybe(time.Time),
+	expires_gmt:  Expires,
 	name:         string,
 	value:        string,
 	max_age_secs: Maybe(int),
