@@ -8,18 +8,17 @@ import "core:io"
 
 // NOTE: `to` is assumed lowercase!
 @(private)
-ascii_case_insensitive_eq :: proc(cmp: string, to: string) -> bool {
-	if cmp == to           { return true  }
+ascii_case_insensitive_eq :: proc(cmp: string, to: string) -> bool #no_bounds_check {
 	if len(cmp) != len(to) { return false }
 
-	to := to
-	for c, i in transmute([]byte)cmp {
-		switch c {
-		case 'A'..='Z':
-			DIFF :: 'a' - 'A'
-			if c + DIFF != to[i] { return false }
-		case:
-			if c != to[i] { return false }
+	for i in 0 ..< len(cmp) {
+		c := cmp[i]
+		if c >= 'A' && c <= 'Z' {
+			c |= 0x20
+		}
+
+		if c != to[i] {
+			return false
 		}
 	}
 

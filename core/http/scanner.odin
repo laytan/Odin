@@ -94,6 +94,8 @@ scanner_reset :: proc(s: ^Scanner) {
 	s.callback                     = nil
 }
 
+// TODO: update with unaligned like others
+
 scanner_scan1 :: proc(s: ^Scanner, p: $T, cb: $C/proc(p: T, token: string, err: bufio.Scanner_Error))
 	where size_of(T) <= SCANNER_MAX_USER_DATA {
 

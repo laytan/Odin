@@ -70,6 +70,8 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 		http_request :: proc "contextless" (c: ^Client, r: ^In_Flight, cb: On_Internal_Response) ---
 	}
 
+	// TODO: cookies
+
 	context.allocator = c.allocator
 
 	r := new(In_Flight)

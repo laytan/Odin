@@ -12,13 +12,10 @@ Cookie_Same_Site :: enum u8 {
 	Lax,
 }
 
-// TODO: compiler panic if not distinct.
-Expires :: distinct Maybe(time.Time)
-
 Cookie :: struct {
-	domain:       Maybe(string),
-	path:         Maybe(string),
-	expires_gmt:  Expires,
+	domain:       string,
+	path:         string,
+	expires_gmt:  time.Time,
 	name:         string,
 	value:        string,
 	max_age_secs: Maybe(int),
@@ -35,14 +32,14 @@ cookie_write :: proc(w: io.Writer, c: Cookie) -> io.Error {
 	io.write_byte(w, '=')              or_return
 	write_escaped_newlines(w, c.value) or_return
 
-	if d, ok := c.domain.(string); ok {
-		io.write_string(w, "; Domain=") or_return
-		write_escaped_newlines(w, d)    or_return
+	if c.domain != "" {
+		io.write_string(w, "; Domain=")     or_return
+		write_escaped_newlines(w, c.domain) or_return
 	}
 
-	if e, ok := c.expires_gmt.(time.Time); ok {
+	if c.expires_gmt != {} {
 		io.write_string(w, "; Expires=") or_return
-		date_write(w, e)                 or_return
+		date_write(w, c.expires_gmt)     or_return
 	}
 
 	if a, ok := c.max_age_secs.(int); ok {
@@ -50,9 +47,9 @@ cookie_write :: proc(w: io.Writer, c: Cookie) -> io.Error {
 		io.write_int(w, a)               or_return
 	}
 
-	if p, ok := c.path.(string); ok {
-		io.write_string(w, "; Path=") or_return
-		write_escaped_newlines(w, p)  or_return
+	if c.path != "" {
+		io.write_string(w, "; Path=")     or_return
+		write_escaped_newlines(w, c.path) or_return
 	}
 
 	switch c.same_site {
