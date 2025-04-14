@@ -679,6 +679,8 @@ link_timeout_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Tim
 		return
 	}
 
+	(&completion.operation.(_Op_Link_Timeout)).target.sqe.flags += {.IO_LINK}
+
 	sqe, ok := uring.link_timeout(
 		&io.ring,
 		u64(uintptr(completion)),

@@ -257,7 +257,7 @@ scanner_on_read :: proc(s: ^Scanner, n: int, e: net.TCP_Recv_Error) {
 			return
 		}
 
-		log.errorf("unexpected scanner recv err: %#v", e)
+		log.errorf("unexpected scanner recv err: %v (%v)", e, net.last_platform_error_string())
 		s._err = .Unknown
 		return
 	}

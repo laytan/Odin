@@ -318,8 +318,6 @@ _timeout :: proc(io: ^IO, dur: time.Duration, user: rawptr, callback: On_Timeout
 }
 
 _timeout_completion :: proc(io: ^IO, dur: time.Duration, target: ^Completion) -> ^Completion {
-	target.sqe.flags += {.IO_LINK}
-
 	completion := pool_get(&io.completion_pool)
 	completion.ctx = context
 
