@@ -22,7 +22,7 @@ DEFAULT_PARAMS :: linux.IO_Uring_Params {
 
 // Initialize and setup an uring, `entries` must be a power of 2 between 1 and 4096.
 init :: proc(ring: ^Ring, params: ^linux.IO_Uring_Params, entries: u32 = DEFAULT_ENTRIES) -> (err: linux.Errno) {
-	assert(entries < MAX_ENTRIES,              "too many entries")
+	assert(entries <= MAX_ENTRIES,             "too many entries")
 	assert(entries != 0,                       "entries must be positive")
 	assert(math.is_power_of_two(int(entries)), "entries must be a power of two")
 
@@ -99,7 +99,7 @@ flush_sq :: proc(ring: ^Ring) -> (n_pending: u32) {
 // Matches the implementation of sq_ring_needs_enter() in liburing.
 sq_ring_needs_enter :: proc(ring: ^Ring, flags: ^linux.IO_Uring_Enter_Flags) -> bool {
 	assert(flags^ == {})
-	if .SQPOLL in ring.flags { return true }
+	if .SQPOLL not_in ring.flags { return true }
 	if .NEED_WAKEUP in sync.atomic_load_explicit(ring.sq.flags, .Relaxed) {
 		flags^ += {.SQ_WAKEUP}
 		return true

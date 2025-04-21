@@ -160,17 +160,30 @@ flush :: proc(io: ^IO) -> linux.Errno {
 		}
 
 		switch &op in unqueued.operation {
-		case Op_Accept:    accept_enqueue (io, unqueued, &op)
-		case Op_Close:     close_enqueue  (io, unqueued, &op)
-		case Op_Connect:   connect_enqueue(io, unqueued, &op)
-		case Op_Read:      read_enqueue   (io, unqueued, &op)
-		case Op_Recv:      recv_enqueue   (io, unqueued, &op)
-		case Op_Send:      send_enqueue   (io, unqueued, &op)
-		case Op_Write:     write_enqueue  (io, unqueued, &op)
-		case Op_Timeout:   timeout_enqueue(io, unqueued, &op)
-		case Op_Poll:      poll_enqueue   (io, unqueued, &op)
-		case Op_Remove:    remove_enqueue (io, unqueued, &op)
-		case Op_Next_Tick, _Op_Link_Timeout: unreachable()
+		case Op_Accept:        accept_enqueue      (io, unqueued, &op)
+		case Op_Close:         close_enqueue       (io, unqueued, &op)
+		case Op_Connect:       connect_enqueue     (io, unqueued, &op)
+		case Op_Read:          read_enqueue        (io, unqueued, &op)
+		case Op_Recv:          recv_enqueue        (io, unqueued, &op)
+		case Op_Send:          send_enqueue        (io, unqueued, &op)
+		case Op_Write:         write_enqueue       (io, unqueued, &op)
+		case Op_Timeout:       timeout_enqueue     (io, unqueued, &op)
+		case Op_Poll:          poll_enqueue        (io, unqueued, &op)
+		case Op_Remove:        remove_enqueue      (io, unqueued, &op)
+		case _Op_Link_Timeout: link_timeout_enqueue(io, unqueued, &op)
+		case Op_Next_Tick:     unreachable()
+		}
+
+		if unqueued.sqe == nil && queue.len(io.unqueued) > 0 {
+			// log.info("trying to enqueue unqueued but still not able to")
+
+			// Kind of hacky way to keep the link intact, so we do not requeue the linked op without requeuing the link too.
+			front := queue.peek_front(&io.unqueued)
+			if link, is_link := front^.operation.(_Op_Link_Timeout); is_link {
+				queue.push_back(&io.unqueued, queue.pop_front(&io.unqueued))
+			}
+
+			break
 		}
 	}
 
@@ -190,7 +203,7 @@ flush :: proc(io: ^IO) -> linux.Errno {
 
 // TODO: we only ever call this with 0 or 1 wait_nr, can just optimize on that with a bool maybe.
 flush_completions :: proc(io: ^IO, wait_nr: u32) -> linux.Errno {
-	cqes: [256]linux.IO_Uring_CQE
+	cqes: [QUEUE_SIZE]linux.IO_Uring_CQE
 	wait_remaining := wait_nr
 	for {
 		completed := uring.copy_cqes(&io.ring, cqes[:], wait_remaining) or_return
@@ -695,7 +708,8 @@ link_timeout_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^_Op_Link_Tim
 		return
 	}
 
-	(&completion.operation.(_Op_Link_Timeout)).target.sqe.flags += {.IO_LINK}
+	assert(op.target.sqe != nil)
+	op.target.sqe.flags += {.IO_LINK}
 
 	sqe, ok := uring.link_timeout(
 		&io.ring,

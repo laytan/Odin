@@ -7,7 +7,9 @@ import "core:net"
 import "core:sys/linux"
 import "core:time"
 
-// TODO: use uring.link_timeout for with_timeout
+QUEUE_SIZE :: 1024
+#assert(QUEUE_SIZE <= uring.MAX_ENTRIES)
+#assert(size_of(linux.IO_Uring_CQE) * QUEUE_SIZE < 1024 * 512) // Smaller than .5 MB, maybe should be even smaller (we have a stack buffer), could put it on the heap too.
 
 __init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
 	io.allocator = alloc
@@ -19,14 +21,19 @@ __init :: proc(io: ^IO, alloc := context.allocator) -> (err: General_Error) {
 	defer if err != nil { pool_destroy(&io.completion_pool) }
 
 	params := uring.DEFAULT_PARAMS
+	params.flags += {.SUBMIT_ALL, .COOP_TASKRUN, .SINGLE_ISSUER}
 
-	ENTRIES :: 256
-	uerr := uring.init(&io.ring, &params, ENTRIES)
+	// TODO: check if this is wanted.
+	// params.flags += {.SQPOLL}
+
+	uerr := uring.init(&io.ring, &params, QUEUE_SIZE)
 	if uerr != nil {
 		err = General_Error(uerr)
 		return
 	}
 	defer if err != nil { uring.destroy(&io.ring) }
+
+	// TODO: make sure io.ring.features has all the features we use.
 
 	if perr := queue.init(&io.unqueued, allocator = alloc); perr != nil {
 		err = .Allocation_Failed

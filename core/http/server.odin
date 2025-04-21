@@ -58,6 +58,7 @@ Server_Opts :: struct {
 	// max_free_blocks_queued:  uint,
 }
 
+// TODO screaming case
 Default_Server_Opts := Server_Opts {
 	auto_expect_continue    = true,
 	redirect_head_to_get    = true,
@@ -125,6 +126,7 @@ assert_has_td :: #force_inline proc(loc := #caller_location) {
 @(private, thread_local)
 td: Server_Thread
 
+// TODO screaming case
 Default_Endpoint := net.Endpoint {
 	address = net.IP4_Any,
 	port    = 8080,
@@ -229,6 +231,8 @@ _server_thread_init :: proc(s: ^Server, main_thread := false) {
 		}
 	}
 
+	nbio.destroy()
+
 	log.debug("event loop end")
 
 	sync.wait_group_done(&s.threads_closed)
@@ -304,7 +308,6 @@ _server_thread_shutdown :: proc(s: ^Server, loc := #caller_location) {
 	log.debug("running out remaining events")
 	nbio.run()
 	td.state = .Closed
-	nbio.destroy()
 
 	log.info("shutdown: done")
 }
@@ -489,7 +492,7 @@ on_accept :: proc(server: rawptr, sock: net.TCP_Socket, source: net.Endpoint, er
 	if err != nil {
 		#partial switch err {
 		case .Insufficient_Resources:
-			log.error("Connection limit reached, trying again in a bit")
+			log.warn("Connection limit reached, trying again in a bit")
 			nbio.timeout(time.Second, server, proc(server: rawptr) {
 				server := cast(^Server)server
 				td.curr_accept = nbio.accept(server.tcp_sock, server, on_accept)
@@ -499,6 +502,8 @@ on_accept :: proc(server: rawptr, sock: net.TCP_Socket, source: net.Endpoint, er
 
 		fmt.panicf("accept error: %v", err)
 	}
+
+	// TODO: see if queueing multiple accepts per thread improves things?
 
 	// Accept next connection.
 	td.curr_accept = nbio.accept(server.tcp_sock, server, on_accept)
