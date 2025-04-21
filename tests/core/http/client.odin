@@ -227,7 +227,7 @@ test_server_closes_after_ok :: proc(t: ^testing.T) {
 			}
 			state.sent_second_request = true
 
-			http._connection_close(c)
+			http.close_eventually(c)
 
 			// NOTE: On a timeout send the next request, closing a connection takes time.
 			nbio.timeout(http.Conn_Close_Delay, rawptr(nil), send_second_request)

@@ -2,6 +2,7 @@
 package http
 
 import "core:bytes"
+import "core:container/queue"
 import "core:io"
 import "core:log"
 import "core:mem/virtual"
@@ -22,20 +23,19 @@ Response :: struct {
 	status:           Status,
 
 	// When set, the callback is called once the response has been sent.
-	on_sent: proc(c: ^Connection, user: rawptr),
+	on_sent:    proc(c: ^Connection, user: rawptr),
 	on_sent_ud: rawptr,
 
 	// Only for internal usage.
-	_conn: ^Connection,
-	_buf:  bytes.Buffer,
+	_buf:  bytes.Buffer, // TODO: can just be a dyn array/string builder.
 }
 
-response_init :: proc(r: ^Response, allocator := context.allocator) {
+response_init :: proc(r: ^Response, allocator := context.allocator, temp_allocator := context.temp_allocator) {
 	r.status             = .Not_Found
-	r.cookies.allocator  = allocator
-	r._buf.buf.allocator = allocator
+	r.cookies.allocator  = temp_allocator
+	r._buf.buf.allocator = allocator // PERF: dynamic allocation done every single response, could be pooled or something.
 
-	headers_init(&r.headers, allocator)
+	headers_init(&r.headers, temp_allocator)
 }
 
 /*
@@ -219,7 +219,7 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 	if bytes.buffer_length(&r._buf) > 0 { return }
 
 	ws   :: bytes.buffer_write_string
-	conn := r._conn
+	conn := loop_conn(res_loop(r))
 	b    := &r._buf
 
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
@@ -291,94 +291,106 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 	assert(!r.sent, "response has already been sent", loc)
 	context.temp_allocator = virtual.arena_allocator(&conn.temp_allocator)
 
-	_response_write_heading(r, 0)
-
-	user_ptr:   rawptr
-	user_index: int
-	if status_is_informational(r.status) {
-		buf := bytes.buffer_to_bytes(&r._buf)
-
-		user_ptr = raw_data(buf)
-		user_index = len(buf)
-
-		r._buf = {}
-		r._buf.buf.allocator = context.temp_allocator
-	} else {
-		r.sent = true
-	}
-	context.user_ptr   = user_ptr
-	context.user_index = user_index
-
-	check_body :: proc(res: rawptr, body: Body, err: Body_Error) {
-		res := cast(^Response)res
-		will_close: bool
-
-		if err != nil {
-			// Any read error should close the connection.
-			response_status(res, body_error_status(err))
-			headers_set_close(&res.headers)
-			will_close = true
-		}
-
-		response_send_got_body(res, will_close)
-	}
-
 	// RFC 7230 6.3: A server MUST read
 	// the entire request message body or close the connection after sending
 	// its response, since otherwise the remaining data on a persistent
 	// connection would be misinterpreted as the next request.
-	if !response_must_close(&conn.loop.req, r) {
-		// TODO: if informational, `Max_Post_Handler_Discard_Bytes` does not suffice, user should
-		// be able to choose that.
-		body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, r, check_body)
-	} else {
-		response_send_got_body(r, true)
+
+	l := res_loop(r)
+	if response_must_close(&l.req, r) {
+		connection_set_state(conn, .Will_Close)
+		return
 	}
+
+	{
+		_response_write_heading(r, 0)
+
+		assert(r._buf.off == 0)
+		buf := bytes.buffer_to_bytes(&r._buf)
+		queue.push_back(&conn.responses, Queued_Response{buf, r.on_sent, r.on_sent_ud})
+		if queue.len(conn.responses) == 1 {
+			nbio.send_all_tcp(conn.socket, buf, conn, on_response_sent)
+		} else {
+			log.debugf("[%d] %v responses queued", conn.socket, queue.len(conn.responses))
+		}
+	}
+
+	// TODO: if informational, `Max_Post_Handler_Discard_Bytes` does not suffice, user should
+	// be able to choose that.
+
+	// HACK: during the body retrieval the status could already be changed for the actual response.
+	// So we can't retrieve this from the conn/res after retrieval of body.
+	if status_is_informational(r.status) {
+		context.user_index = 1
+	} else {
+		context.user_index = 0
+	}
+
+	body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, conn, proc(conn: rawptr, _: Body, err: Body_Error) {
+		conn := (^Connection)(conn)
+
+		if err != nil {
+			log.warn("closing connection because of error fetching body: %v", err)
+			close_eventually(conn)
+			return
+		}
+
+		is_informational := context.user_index == 1
+		if !is_informational {
+			clean_request_loop(conn)
+		}
+	})
 }
 
 @(private)
-response_send_got_body :: proc(r: ^Response, will_close: bool) {
-	conn := r._conn
+on_response_sent :: proc(conn: rawptr, sent: int, err: net.TCP_Send_Error) {
+	conn := cast(^Connection)conn
 
-	if will_close {
-		if !connection_set_state(r._conn, .Will_Close) { return }
-	}
-
-	buf: []byte
-	if context.user_ptr != nil {
-		buf = ([^]byte)(context.user_ptr)[:context.user_index]
-	} else {
-		buf = bytes.buffer_to_bytes(&r._buf)
-	}
-
-	log.debug("\n", string(buf), sep="")
-
-	nbio.send_all_tcp(conn.socket, buf, conn, on_response_sent)
-}
-
-
-@(private)
-on_response_sent :: proc(conn_: rawptr, sent: int, err: net.TCP_Send_Error) {
-	conn := cast(^Connection)conn_
+	res := queue.pop_front(&conn.responses)
+	delete(res.buf, conn.server.conn_allocator)
 
 	if err != nil {
-		log.errorf("could not send response: %v", err)
-		if !connection_set_state(conn, .Will_Close) { return }
+		log.warnf("[%v] could not send response: %v", conn.socket, err)
+
+		connection_set_state(conn, .Will_Close)
+
+		// Could not send our response, prob won't be able to send others, just discard them.
+		for queued_res in queue.pop_front_safe(&conn.responses) {
+			delete(queued_res.buf, conn.server.conn_allocator)
+		}
+	} else if res.on_sent != nil {
+		// TODO: make work as optional callback to a respond call, maybe have a respond_informational() for it.
+		// NOTE: we need this for stuff like websockets to take over the connection.
+		res.on_sent(conn, res.on_sent_ud)
 	}
 
-	clean_request_loop(conn)
+	if queue.len(conn.responses) > 0 {
+		log.debugf("[%v] sending next queued response, %v queued", conn.socket, queue.len(conn.responses))
+		nbio.send_all_tcp(conn.socket, queue.front(&conn.responses).buf, conn, on_response_sent)
+		return
+	}
+
+	if conn.state == .Will_Close {
+		_connection_close(conn)
+	}
+}
+
+close_eventually :: proc(conn: ^Connection) {
+	if !connection_set_state(conn, .Will_Close) { return }
+	if queue.len(conn.responses) == 0 {
+		_connection_close(conn)
+	} else {
+		// Shutdown receive end already, we will only be sending left over queued responses.
+		net.shutdown(conn.socket, net.Shutdown_Manner.Receive)
+	}
 }
 
 // Response has been sent, clean up and close/handle next.
 @(private)
-clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
-	// TODO: make work as optional callback to a respond call, maybe have a respond_informational() for it.
-	if conn.loop.res.on_sent != nil {
-		conn.loop.res.on_sent(conn, conn.loop.res.on_sent_ud)
-	}
-
+clean_request_loop :: proc(conn: ^Connection) {
 	// blocks, size, used := allocator_free_all(&conn.temp_allocator)
 	// log.debugf("temp_allocator had %d blocks of a total size of %m of which %m was used", blocks, size, used)
+	// log.info("clean_request_loop")
 	free_all(context.temp_allocator)
 
 	scanner_reset(&conn.scanner)
@@ -386,28 +398,17 @@ clean_request_loop :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
 	conn.loop.req = {}
 	conn.loop.res = {}
 
-	if c, ok := close.?; (ok && c) || conn.state == .Will_Close {
-		_connection_close(conn)
-	} else {
-		// If the response is informational, do not try to handle new
-		// requests yet, we are still finishing this one.
-		// NOTE: using context here, the status could have already changed for the next normal response.
-		// TODOO: this is not great.
-		is_informational := context.user_ptr != nil
-		if is_informational {
-			return
-		}
+	// If the response is informational, do not try to handle new
+	// requests yet, we are still finishing this one.
+	// NOTE: using context here, the status could have already changed for the next normal response.
+	// TODOO: this is not great.
+	// is_informational := context.user_ptr != nil
+	// if is_informational {
+	// 	return
+	// }
 
-		if !connection_set_state(conn, .Idle) { return }
-		conn_handle_req(conn, context.temp_allocator)
-	}
-}
-
-@(private)
-clean_request_loop_err :: proc(conn: ^Connection, close: Maybe(bool) = nil) {
-	// HACK: making sure clean_request_loop doesn't think it's informational.
-	context.user_ptr = nil
-	clean_request_loop(conn, close)
+	if !connection_set_state(conn, .Idle) { return }
+	conn_handle_req(conn, context.temp_allocator)
 }
 
 // A server MUST NOT send a Content-Length header field in any response
@@ -444,7 +445,8 @@ response_must_close :: proc(req: ^Request, res: ^Response) -> bool {
 	}
 
 	// If the connection's state indicates closing, close.
-	if res._conn.state >= .Will_Close {
+	conn := loop_conn(res_loop(res))
+	if conn.state >= .Will_Close {
 		headers_set_close(&res.headers)
 		return true
 	}
@@ -452,6 +454,7 @@ response_must_close :: proc(req: ^Request, res: ^Response) -> bool {
 	// HTTP 1.0 does not have persistent connections.
 	line := req.line.?
 	if line.version == {1, 0} {
+		headers_set_close(&res.headers)
 		return true
 	}
 
