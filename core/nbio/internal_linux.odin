@@ -179,7 +179,7 @@ flush :: proc(io: ^IO) -> linux.Errno {
 
 			// Kind of hacky way to keep the link intact, so we do not requeue the linked op without requeuing the link too.
 			front := queue.peek_front(&io.unqueued)
-			if link, is_link := front^.operation.(_Op_Link_Timeout); is_link {
+			if _, is_link := front^.operation.(_Op_Link_Timeout); is_link {
 				queue.push_back(&io.unqueued, queue.pop_front(&io.unqueued))
 			}
 
