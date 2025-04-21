@@ -88,17 +88,16 @@ _tick :: proc(io: ^IO) -> (err: General_Error) {
 					completion := poll.completion
 					op := &completion.op.(Op_Poll)
 					if poll.fd.revents != 0 {
-						event: Poll_Event
-						if poll.fd.revents & win.POLLWRNORM != 0 {
-							event = .Read
-						} else if poll.fd.revents & win.POLLWRNORM != 0 {
-							event = .Write
-						} else {
-							unreachable()
+						context = completion.ctx
+
+						res: Poll_Result
+						if poll.fd.revents & win.POLLERR|win.POLLHUP > 0 {
+							res = .Error
+						} else if poll.fd.revents & win.POLLNVAL > 0 {
+							res = .Invalid_Argument
 						}
 
-						context = completion.ctx
-						op.callback(completion.user_data, event)
+						op.callback(completion.user_data, res)
 
 						if op.multi {
 							poll.fd.revents = 0
@@ -490,9 +489,7 @@ _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion
 	return completion
 }
 
-// TODO: events should be a bit set.
-// TODO: sockets only.
-_poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
+_poll :: proc(io: ^IO, socket: net.Any_Socket, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 	completion.ctx = context
 	completion.op = Op_Poll {
@@ -501,10 +498,16 @@ _poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr,
 	}
 	completion.user_data = user
 
+	winevent: win.c_short
+	switch event {
+	case .Read:  winevent = win.POLLRDNORM
+	case .Write: winevent = win.POLLWRNORM
+	}
+
 	append(&io.polls, Poll{
 		fd = win.WSA_POLLFD {
-			fd = win.SOCKET(fd),
-			events = win.POLLRDNORM|win.POLLWRNORM, // TODO: map from events given.
+			fd     = win.SOCKET(net.any_socket_to_socket(socket)),
+			events = winevent,
 		},
 		completion = completion,
 	})

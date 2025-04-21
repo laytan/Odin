@@ -194,10 +194,10 @@ flush :: proc(io: ^IO) -> General_Error {
 		queue.reserve(&io.completed, int(new_events))
 		for event in events[:new_events] {
 			completion := cast(^Completion)event.udata
-			// if .Error in event.flags {
-			// 	// TODO: remove, I think this only happens on poll, and is fine.
-			// 	log.warnf("error on %v fd %v: %v", reflect.union_variant_typeid(completion.operation), event.ident, posix.strerror(posix.Errno(event.data)))
-			// }
+
+			// TODO: handle the .Error flag and pass it through to the user, maybe only needed for poll
+			// because the others we just try the operation again?
+
 			completion.in_kernel = false
 			push_completed(io, completion)
 		}
@@ -257,7 +257,7 @@ time_out_op :: proc(io: ^IO, completed: ^Completion) {
 		case:             unreachable()
 		}
 	case Op_Write:       op.callback(completed.user_data, 0, .Timeout)
-	case Op_Poll:        op.callback(completed.user_data, nil) // TODO: add error to callback
+	case Op_Poll:        op.callback(completed.user_data, .Timeout)
 	case Op_Timeout, Op_Next_Tick, Op_Remove: panic("timed out untimeoutable")
 	case: unreachable()
 	}
@@ -484,7 +484,7 @@ do_read :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 
 	op.read += read
 
-	if op.all && op.read < op.len {
+	if op.all && read > 0 && op.read < op.len {
 		op.buf = op.buf[read:]
 		op.offset += read
 
@@ -514,7 +514,7 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 
 		op.received += received
 
-		if op.all && op.received < op.len {
+		if op.all && received > 0 && op.received < op.len {
 			op.buf = op.buf[received:]
 			do_recv(io, completion, op)
 			return
@@ -540,7 +540,7 @@ do_recv :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 
 		op.received += received
 
-		if op.all && op.received < op.len {
+		if op.all && received > 0 && op.received < op.len {
 			op.buf = op.buf[received:]
 			do_recv(io, completion, op)
 			return
@@ -668,7 +668,7 @@ do_timeout :: proc(io: ^IO, completion: ^Completion, op: ^Op_Timeout) {
 }
 
 do_poll :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
-	op.callback(completion.user_data, op.event)
+	op.callback(completion.user_data, .Ready) // TODO: Check error from the kqueue event.
 	if !op.multi {
 		pool_put(&io.completion_pool, completion)
 	}

@@ -75,7 +75,7 @@ Op_Connect :: struct {
 Op_Read :: struct {
 	callback: On_Read,
 	fd:       linux.Fd,
-	buf:      []byte,
+	buf:      []byte `fmt:"-"`,
 	offset:   int,
 	all:      bool,
 	read:     int,
@@ -85,7 +85,7 @@ Op_Read :: struct {
 Op_Write :: struct {
 	callback: On_Write,
 	fd:       linux.Fd,
-	buf:      []byte,
+	buf:      []byte `fmt:"-"`,
 	offset:   int,
 	all:      bool,
 	written:  int,
@@ -96,7 +96,7 @@ Op_Send :: struct {
 	endpoint: linux.Sock_Addr_Any,
 	callback: On_Sent,
 	socket:   net.Any_Socket,
-	buf:      []byte,
+	buf:      []byte `fmt:"-"`,
 	len:      int,
 	sent:     int,
 	all:      bool,
@@ -105,7 +105,7 @@ Op_Send :: struct {
 Op_Recv :: struct {
 	callback: On_Recv,
 	socket:   net.Any_Socket,
-	buf:      []byte,
+	buf:      []byte `fmt:"-"`,
 	all:      bool,
 	received: int,
 	len:      int,
@@ -384,7 +384,7 @@ read_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Read) {
 
 	op.read += int(completion.result)
 
-	if op.all && op.read < op.len {
+	if op.all && completion.result > 0 && op.read < op.len {
 		op.buf = op.buf[completion.result:]
 		op.offset += int(completion.result)
 		read_enqueue(io, completion, op)
@@ -410,7 +410,7 @@ recv_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 		// TODO: recv from udp is not possible with uring, surely not?
 
 		// NOTE: emulation via poll.
-		poll := _poll(io, linux.Fd(sock), .Read, false, completion, proc(completion: rawptr, _: Poll_Event) {
+		poll := _poll(io, sock, .Read, false, completion, proc(completion: rawptr, _: Poll_Result) {
 			completion := (^Completion)(completion)
 			op         := &completion.operation.(Op_Recv)
 
@@ -465,7 +465,7 @@ recv_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Recv) {
 
 	op.received += int(completion.result)
 
-	if op.all && op.received < op.len {
+	if op.all && completion.result > 0 && op.received < op.len {
 		op.buf = op.buf[completion.result:]
 		recv_enqueue(io, completion, op)
 		return
@@ -641,20 +641,31 @@ poll_enqueue :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
 }
 
 poll_callback :: proc(io: ^IO, completion: ^Completion, op: ^Op_Poll) {
-	errno := linux.Errno(completion.result)
-	#partial switch errno {
-	case .NONE:
-	case .EINTR, .EWOULDBLOCK:
-		if !op.multi {
-			poll_enqueue(io, completion, op)
+	if completion.result < 0 {
+		errno := linux.Errno(-completion.result)
+		#partial switch errno {
+		case .NONE, .ECANCELED:
+		case .EINTR, .EWOULDBLOCK:
+			if !op.multi {
+				poll_enqueue(io, completion, op)
+			}
+		case .EINVAL, .EFAULT, .EBADF:
+			op.callback(completion.user_data, .Invalid_Argument)
+
+			// TODO: make sure that if multi was set, that the IORING_CQE_F_MORE flag is not set which
+			// means we won't get any more events.
+			pool_put(&io.completion_pool, completion)
+		case:
+			op.callback(completion.user_data, .Error)
+
+			// TODO: make sure that if multi was set, that the IORING_CQE_F_MORE flag is not set which
+			// means we won't get any more events.
+			pool_put(&io.completion_pool, completion)
 		}
-	case .ECANCELED:
 		return
-	case:
-		// TODO: might want to give the user this error.
 	}
 
-	op.callback(completion.user_data, op.event)
+	op.callback(completion.user_data, .Ready)
 	if !op.multi {
 		pool_put(&io.completion_pool, completion)
 	}

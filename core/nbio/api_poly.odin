@@ -963,17 +963,16 @@ write_at_all_poly3 :: #force_inline proc(fd: Handle, offset: int, buf: []byte, p
 	return _write_poly3(fd, offset, buf, p, p2, p3, callback, all = true)
 }
 
-poll_poly :: proc(fd: Handle, event: Poll_Event, multi: bool, p: $T, callback: $C/proc(p: T, event: Poll_Event)) -> ^Completion
+poll_poly :: proc(socket: net.Any_Socket, event: Poll_Event, multi: bool, p: $T, callback: $C/proc(p: T, res: Poll_Result)) -> ^Completion
 	where size_of(T) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
-	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), socket, event, multi, nil, proc(completion: rawptr, res: Poll_Result) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C)(rawptr(ptr)))
 		p   := unall((^T)(rawptr(ptr + size_of(C))))
-		cb(p, event)
+		cb(p, res)
 	})
 	if completion == nil {
-		// TODO: poll needs to take an error, or there needs to be a Poll_Event indicating failure.
-		callback(p, nil)
+		callback(p, .Unsupported)
 		return nil
 	}
 
@@ -986,18 +985,17 @@ poll_poly :: proc(fd: Handle, event: Poll_Event, multi: bool, p: $T, callback: $
 	return completion
 }
 
-poll_poly2 :: proc(fd: Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, event: Poll_Event)) -> ^Completion
+poll_poly2 :: proc(socket: net.Any_Socket, event: Poll_Event, multi: bool, p: $T, p2: $T2, callback: $C/proc(p: T, p2: T2, res: Poll_Result)) -> ^Completion
 	where size_of(T) + size_of(T2) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
-	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), socket, event, multi, nil, proc(completion: rawptr, res: Poll_Result) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
-		cb(p, p2, event)
+		cb(p, p2, res)
 	})
 	if completion == nil {
-		// TODO: poll needs to take an error, or there needs to be a Poll_Event indicating failure.
-		callback(p, p2, nil)
+		callback(p, p2, .Unsupported)
 		return nil
 	}
 
@@ -1011,19 +1009,18 @@ poll_poly2 :: proc(fd: Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, c
 	return completion
 }
 
-poll_poly3 :: proc(fd: Handle, event: Poll_Event, multi: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, event: Poll_Event)) -> ^Completion
+poll_poly3 :: proc(socket: net.Any_Socket, event: Poll_Event, multi: bool, p: $T, p2: $T2, p3: $T3, callback: $C/proc(p: T, p2: T2, p3: T3, res: Poll_Result)) -> ^Completion
 	where size_of(T) + size_of(T2) + size_of(T3) <= size_of(rawptr) * MAX_USER_ARGUMENTS {
-	completion := _poll(io(), fd, event, multi, nil, proc(completion: rawptr, event: Poll_Event) {
+	completion := _poll(io(), socket, event, multi, nil, proc(completion: rawptr, res: Poll_Result) {
 		ptr := uintptr(&((^Completion)(completion)).user_args)
 		cb  := unall((^C) (rawptr(ptr)))
 		p   := unall((^T) (rawptr(ptr + size_of(C))))
 		p2  := unall((^T2)(rawptr(ptr + size_of(C) + size_of(T))))
 		p3  := unall((^T3)(rawptr(ptr + size_of(C) + size_of(T) + size_of(T2))))
-		cb(p, p2, p3, event)
+		cb(p, p2, p3, res)
 	})
 	if completion == nil {
-		// TODO: poll needs to take an error, or there needs to be a Poll_Event indicating failure.
-		callback(p, p2, p3, nil)
+		callback(p, p2, p3, .Unsupported)
 		return nil
 	}
 

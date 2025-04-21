@@ -227,14 +227,14 @@ all_poly_work :: proc(tt: ^testing.T) {
 		ev(t, three, 3)
 	})
 
-	nbio.poll_poly(HANDLE, .Read, false, 1, proc(one: int, event: nbio.Poll_Event) {
+	nbio.poll_poly(TCP_SOCKET, .Read, false, 1, proc(one: int, res: nbio.Poll_Result) {
 		ev(t, one, 1)
 	})
-	nbio.poll_poly2(HANDLE, .Read, false, 1, 2, proc(one: int, two: int, event: nbio.Poll_Event) {
+	nbio.poll_poly2(TCP_SOCKET, .Read, false, 1, 2, proc(one: int, two: int, res: nbio.Poll_Result) {
 		ev(t, one, 1)
 		ev(t, two, 2)
 	})
-	nbio.poll_poly3(HANDLE, .Read, false, 1, 2, 3, proc(one: int, two: int, three: int, event: nbio.Poll_Event) {
+	nbio.poll_poly3(TCP_SOCKET, .Read, false, 1, 2, 3, proc(one: int, two: int, three: int, res: nbio.Poll_Result) {
 		ev(t, one, 1)
 		ev(t, two, 2)
 		ev(t, three, 3)

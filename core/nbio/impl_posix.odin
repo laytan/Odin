@@ -369,14 +369,14 @@ _next_tick :: proc(io: ^IO, user: rawptr, callback: On_Next_Tick) -> ^Completion
 	return completion
 }
 
-_poll :: proc(io: ^IO, fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
+_poll :: proc(io: ^IO, socket: net.Any_Socket, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
 	completion.ctx = context
 	completion.user_data = user
 	completion.operation = Op_Poll{
 		callback = callback,
-		fd       = fd,
+		fd       = cast(Handle)net.any_socket_to_socket(socket),
 		event    = event,
 		multi    = multi,
 	}

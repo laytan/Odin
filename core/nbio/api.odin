@@ -346,7 +346,7 @@ recv_udp :: proc(socket: net.UDP_Socket, buf: []byte, user: rawptr, callback: On
 }
 
 /*
-Receives from the given socket until the given buf is full or an error occurred, and calls the given callback
+Receives from the given socket until the given buf is full, the connection is closed, or an error occurred, and calls the given callback
 
 NOTE: polymorphic variants for type safe user data are available under `recv_all_poly`, `recv_all_poly2`, and `recv_all_poly3`.
 
@@ -540,8 +540,17 @@ write_at_all :: proc(fd: Handle, offset: int, buf: []byte, user: rawptr, callbac
 	return
 }
 
+
+Poll_Result :: enum i32 {
+	Ready,
+	Unsupported,
+	Timeout,
+	Invalid_Argument,
+	Error,
+}
+
 // TODO: should this have an error too?
-On_Poll :: #type proc(user: rawptr, event: Poll_Event)
+On_Poll :: #type proc(user: rawptr, res: Poll_Result)
 
 /*
 Polls for the given event on the subject handle
@@ -556,10 +565,10 @@ Inputs:
 - event:    Whether to call the callback when `fd` is ready to be read from, or be written to
 - multi:    Keeps the poll after an event happens, calling the callback again for further events, remove poll with `remove`
 */
-poll :: proc(fd: Handle, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> (res: ^Completion) {
-	res = _poll(io(), fd, event, multi, user, callback)
+poll :: proc(socket: net.Any_Socket, event: Poll_Event, multi: bool, user: rawptr, callback: On_Poll) -> (res: ^Completion) {
+	res = _poll(io(), socket, event, multi, user, callback)
 	if res == nil {
-		callback(user, nil)
+		callback(user, .Unsupported)
 	}
 	return
 }

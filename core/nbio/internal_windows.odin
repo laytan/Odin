@@ -240,7 +240,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 		if err != win.NO_ERROR {
 			op.callback(completion.user_data, op.read, FS_Error(err))
-		} else if op.all && op.read < op.len {
+		} else if op.all && read > 0 && op.read < op.len {
 			op.buf = op.buf[read:]
 			op.offset += int(read)
 
@@ -287,7 +287,7 @@ handle_completion :: proc(io: ^IO, completion: ^Completion) {
 
 		if err != nil {
 			op.callback.(On_Recv_TCP)(completion.user_data, op.received, err)
-		} else if op.all && op.received < op.len {
+		} else if op.all && received > 0 && op.received < op.len {
 			op.buf = win.WSABUF{
 				len = op.buf.len - win.ULONG(received),
 				buf = (cast([^]byte)op.buf.buf)[received:],
