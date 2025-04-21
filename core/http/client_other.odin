@@ -340,7 +340,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 				ssl_connect(r, nil)
 
-				ssl_connect :: proc(r: ^In_Flight, _: nbio.Poll_Event) {
+				ssl_connect :: proc(r: ^In_Flight, _: nbio.Poll_Result) {
 					switch client_ssl.connect(r.conn.ssl) {
 					case .None:
 						log.debug("SSL connection established")
@@ -348,10 +348,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 						on_connected(r, nil)
 					case .Want_Read:
 						log.debug("SSL connect want read")
-						nbio.poll_poly(nbio.Handle(r.conn.socket), .Read,  false, r, ssl_connect)
+						nbio.poll_poly(r.conn.socket, .Read,  false, r, ssl_connect)
 					case .Want_Write:
 						log.debug("SSL connect want write")
-						nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_connect)
+						nbio.poll_poly(r.conn.socket, .Write, false, r, ssl_connect)
 					case .Shutdown:
 						log.error("SSL connect error: Shutdown")
 						on_connected(r, net.Dial_Error.Refused)
@@ -481,7 +481,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 
 		log.debugf("Sending HTTPS request:\n%v%v", string(r.conn.buf.buf[:]), string(r.body))
 
-		ssl_write_req :: proc(r: ^In_Flight, _: nbio.Poll_Event) {
+		ssl_write_req :: proc(r: ^In_Flight, _: nbio.Poll_Result) {
 			switch n, res := client_ssl.send(r.conn.ssl, r.conn.buf.buf[:]); res {
 			case .None:
 				log.debugf("Successfully written request line and headers of %m to connection", n)
@@ -496,10 +496,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				ssl_write_body(r, nil)
 			case .Want_Read:
 				log.debug("SSL write want read")
-				nbio.poll_poly(nbio.Handle(r.conn.socket), .Read, false, r, ssl_write_req)
+				nbio.poll_poly(r.conn.socket, .Read, false, r, ssl_write_req)
 			case .Want_Write:
 				log.debug("SSL write want write")
-				nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_write_req)
+				nbio.poll_poly(r.conn.socket, .Write, false, r, ssl_write_req)
 			case .Shutdown:
 				log.error("write failed, connection is closed")
 				on_sent_request(r, .Connection_Closed)
@@ -510,7 +510,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			}
 		}
 
-		ssl_write_body :: proc(r: ^In_Flight, _: nbio.Poll_Event) {
+		ssl_write_body :: proc(r: ^In_Flight, _: nbio.Poll_Result) {
 			assert(r.conn.state == .Sent_Headers)
 
 			log.debugf("Writing body of %m to connection", len(r.body))
@@ -535,10 +535,10 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				on_sent_request(r, nil)
 			case .Want_Read:
 				log.debug("SSL write want read")
-				nbio.poll_poly(nbio.Handle(r.conn.socket), .Read, false, r, ssl_write_body)
+				nbio.poll_poly(r.conn.socket, .Read, false, r, ssl_write_body)
 			case .Want_Write:
 				log.debug("SSL write want write")
-				nbio.poll_poly(nbio.Handle(r.conn.socket), .Write, false, r, ssl_write_body)
+				nbio.poll_poly(r.conn.socket, .Write, false, r, ssl_write_body)
 			case .Shutdown:
 				log.error("write failed, connection is closed")
 				on_sent_request(r, net.TCP_Send_Error.Connection_Closed)
@@ -582,7 +582,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 			case .HTTPS:
 				ssl_recv(r, buf, callback, nil)
 
-				ssl_recv :: proc(r: ^In_Flight, buf: []byte, callback: On_Scanner_Read, _: nbio.Poll_Event) {
+				ssl_recv :: proc(r: ^In_Flight, buf: []byte, callback: On_Scanner_Read, _: nbio.Poll_Result) {
 					log.debugf("executing SSL recv for %m", len(buf))
 					total: int
 					receiving: for {
@@ -599,14 +599,14 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
-								nbio.poll_poly3(nbio.Handle(r.conn.socket), .Read, false, r, buf, callback, ssl_recv)
+								nbio.poll_poly3(r.conn.socket, .Read, false, r, buf, callback, ssl_recv)
 							}
 						case .Want_Write:
 							log.debug("SSL read want write")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
-								nbio.poll_poly3(nbio.Handle(r.conn.socket), .Write, false, r, buf, callback, ssl_recv)
+								nbio.poll_poly3(r.conn.socket, .Write, false, r, buf, callback, ssl_recv)
 							}
 						case .Shutdown:
 							log.error("read failed, connection is closed")
