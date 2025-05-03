@@ -326,7 +326,7 @@ response_send :: proc(r: ^Response, conn: ^Connection, loc := #caller_location) 
 		context.user_index = 0
 	}
 
-	body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, conn, proc(conn: rawptr, _: Body, err: Body_Error) {
+	body(&conn.loop.req, Max_Post_Handler_Discard_Bytes, conn, proc(conn: rawptr, _: []byte, err: Body_Error) {
 		conn := (^Connection)(conn)
 
 		if err != nil {

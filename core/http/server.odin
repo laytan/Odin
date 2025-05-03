@@ -218,14 +218,6 @@ _server_thread_init :: proc(s: ^Server, main_thread := false) {
 
 		errno := nbio.tick()
 		if errno != nil {
-			// // TODO: check how this behaves on Windows.
-			// when ODIN_OS != .Windows {
-			// 	if errno == os.EINTR {
-			// 		server_shutdown(s)
-			// 		continue
-			// 	}
-			// }
-
 			log.errorf("non-blocking io tick error: %v", errno)
 			break
 		}

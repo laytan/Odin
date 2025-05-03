@@ -5,6 +5,7 @@ import "core:net"
 @(private)
 client_ssl: Client_SSL
 
+// TODO: put on http client, no need for a global.
 set_client_ssl :: proc(ssl: Client_SSL) {
 	client_ssl = ssl
 }

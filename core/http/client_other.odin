@@ -3,6 +3,7 @@
 package http
 
 import intr "base:intrinsics"
+import      "base:runtime"
 
 import      "core:bufio"
 import      "core:http/dns"
@@ -138,8 +139,9 @@ In_Flight :: struct {
 	conn:    ^Client_Connection,
 	res:     Client_Response,
 	ep:      Endpoint,
-	user:    rawptr,
-	cb:      On_Response,
+
+	// NOTE: temporary to avoid stack overflow.
+	recursion: int,
 }
 
 in_flight_destroy :: proc(r: ^In_Flight) {
@@ -206,20 +208,20 @@ Client_Connection_State :: enum {
 	Failed,
 }
 
-_client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Response) {
+_client_request :: proc(c: ^Client, req: Client_Request) {
+	assert(req.cb != nil, "no response callback")
+
 	host := url_parse(req.url).host
 	host_or_endpoint, err := net.parse_hostname_or_endpoint(host)
 	if err != nil {
 		log.warnf("Invalid request URL %q: %v", req.url, err)
-		cb({}, user, .Bad_URL)
+		req.cb(req, {}, .Bad_URL)
 		return
 	}
 
 	r := new(In_Flight, c.allocator)
 	r.r = req
 	r.c = c
-	r.user = user
-	r.cb = cb
 
 	switch t in host_or_endpoint {
     case net.Endpoint:
@@ -236,7 +238,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 		r := (^In_Flight)(r)
 		if err != nil {
 			log.warnf("DNS resolve error for %q: %v", r.r.url, err)
-			r.cb({}, r.user, .DNS)
+			r.cb(r, {}, .DNS)
 			free(r, r.c.allocator)
 			return
 		}
@@ -585,6 +587,18 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				ssl_recv :: proc(r: ^In_Flight, buf: []byte, callback: On_Scanner_Read, _: nbio.Poll_Result) {
 					log.debugf("executing SSL recv for %m", len(buf))
 					total: int
+
+					MAX_RECURSION :: 100
+
+					// NOTE: hacky? fix for stack overflows because we keep getting data without going back up the stack.
+					if r.recursion > MAX_RECURSION {
+						nbio.next_tick_poly3(r, buf, callback, proc(r: ^In_Flight, buf: []byte, callback: On_Scanner_Read) {
+							r.recursion = 0
+							ssl_recv(r, buf, callback, nil)
+						})
+						return
+					}
+
 					receiving: for {
 						switch n, res := client_ssl.recv(r.conn.ssl, buf[total:]); res {
 						case .None:
@@ -593,12 +607,14 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 							if total < len(buf) {
 								continue receiving
 							}
+							r.recursion += 1
 							callback(&r.conn.scanner, total, nil)
 						case .Want_Read:
 							log.debug("SSL read want read")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
+								r.recursion = 0
 								nbio.poll_poly3(r.conn.socket, .Read, false, r, buf, callback, ssl_recv)
 							}
 						case .Want_Write:
@@ -606,6 +622,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
+								r.recursion = 0
 								nbio.poll_poly3(r.conn.socket, .Write, false, r, buf, callback, ssl_recv)
 							}
 						case .Shutdown:
@@ -748,6 +765,7 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 					return
 				}
 
+				// TODO: set allocator.
 				append(&r.res.cookies, cookie)
 			}
 
@@ -761,33 +779,56 @@ _client_request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: On_Re
 				return
 			}
 
-			// TODO: configurable max length.
+			r.res.headers = r.conn.headers
+			r.res.headers.readonly = true
+
+			// TODO: set r.res.body allocator.
+
+			// TODO: configurable max length, make sure to handle the error in on_body too!
 			body(&r.conn.body, -1, r, on_body)
 		}
 
 		on_body :: proc(r: rawptr, body: []byte, err: Body_Error) {
 			r := (^In_Flight)(r)
-			if err != nil {
-				handle_scanner_err(r, err)
-				return
+
+			switch err {
+			case .None:
+				// TODO: determine based on response status and headers if we can keep the connection
+				// alive, if so, put the connection on a free list.
+
+				r.conn.state = .Connected
+				r.conn.body  = {}
+
+				append(&r.res.body, ..body)
+				log.warn("DONE")
+				r.cb(r, &r.res, nil)
+				free(r, r.c.allocator)
+
+			case .Partial:
+				//  NOTE: appending to the body may be stupid, could have a callback take the []byte, and if there isn't a callback do the appending?
+				append(&r.res.body, ..body)
+				r.cb(r, &r.res, .Partial)
+
+			case .Timeout:
+				r.cb(r, &r.res, .Timeout)
+				handle_bad_response(r)
+
+			case .EOF:
+				r.cb(r, &r.res, .Aborted)
+				handle_bad_response(r)
+
+			// TODO: some bad response error indicating invalid length, headers.
+			case .Invalid_Content_Length, .Invalid_Trailing_Header, .Unknown:
+				r.cb(r, &r.res, .Unknown)
+				handle_bad_response(r)
+
+			case .Corrupted_State:
+				panic("corrupted state retrieving body of response, probably a bug in this package")
+
+			case .Already_Consumed, .Exceeds_Max_Size:
+				// Body is tried to be consumed multiple times, we set no max size currently.
+				unreachable()
 			}
-
-			// TODO: determine based on response status and headers if we can keep the connection
-			// alive, if so, put the connection on a free list.
-
-			r.conn.state = .Connected
-
-			r.res.headers = r.conn.headers
-			r.res.headers.readonly = true
-
-			r.conn.headers = {}
-
-			r.res.body = make([]byte, len(body), r.c.allocator)
-			copy(r.res.body, body)
-
-			r.cb(r.res, r.user, nil)
-
-			free(r, r.c.allocator)
 		}
 	}
 }

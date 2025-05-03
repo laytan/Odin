@@ -13,9 +13,12 @@ import "core:slice"
 
 Client :: _Client
 
-On_Response :: #type proc(r: Client_Response, user_data: rawptr, err: Request_Error)
+On_Response :: #type proc(req: Client_Request, res: ^Client_Response, err: Request_Error)
 
 Client_Request :: struct {
+	user_data: rawptr,
+	cb:        On_Response,
+
 	headers: Headers,
 
 	url:     string,
@@ -35,6 +38,7 @@ Client_Request :: struct {
 
 Request_Error :: enum {
 	None,
+	Partial,
 	Bad_URL,
 	Network,
 	CORS,
@@ -48,7 +52,7 @@ Request_Error :: enum {
 // + response_destroy could be made to use that instead of taking the client too.
 Client_Response :: struct {
 	status:  Status,
-	body:    []byte,
+	body:    [dynamic]byte,
 	headers: Headers,
 
 	// NOTE: unused on JS targets, use the `js_credentials` option to configure cookies there.
@@ -87,15 +91,15 @@ response_destroy :: proc(c: ^Client, res: Client_Response) {
 	_response_destroy(c, res)
 }
 
-get :: proc(url: string) -> Client_Request {
-	return { url = url }
+get :: proc(url: string, user_data: rawptr = nil, cb: On_Response = nil) -> Client_Request {
+	return { url = url, user_data = user_data, cb = cb }
 }
 
 // TODO: post, post_json, yada yada
 
-request :: proc(c: ^Client, req: Client_Request, user: rawptr, cb: proc(r: Client_Response, user: rawptr, err: Request_Error)) {
+request :: proc(c: ^Client, req: Client_Request) {
 	// TODO: make sure client is initialized
-	_client_request(c, req, user, cb)
+	_client_request(c, req)
 }
 
 Multi_Res :: struct {
@@ -115,19 +119,39 @@ responses_destroy :: proc(c: ^Client, s: []Multi_Res) {
 sync_one_request :: proc(c: ^Client, req: Client_Request) -> (Client_Response, Request_Error) {
 	not_js()
 
+	req := req
+
 	State :: struct {
 		res:  Client_Response,
 		err:  Request_Error,
 		done: bool,
+
+		orig_cb:        On_Response,
+		orig_user_data: rawptr,
 	}
 	s: State
+	s.orig_cb        = req.cb
+	s.orig_user_data = req.user_data
 
-	_client_request(c, req, &s, proc(r: Client_Response, s: rawptr, err: Request_Error) {
-		s := (^State)(s)
-		s.res = r
-		s.err = err
-		s.done = true
-	})
+	req.user_data = &s
+	req.cb = proc(req: Client_Request, res: ^Client_Response, err: Request_Error) {
+		s := (^State)(req.user_data)
+
+		if s.orig_cb != nil {
+			// NOTE: Not ideal copy.
+			req := req
+			req.user_data = s.orig_user_data
+			req.cb        = s.orig_cb
+			s.orig_cb(req, res, err)
+		}
+
+		if err != .Partial {
+			s.res = res^
+			s.err = err
+			s.done = true
+		}
+	}
+	_client_request(c, req)
 
 	for {
 		if s.done {
@@ -167,16 +191,29 @@ sync_requests_into :: proc(c: ^Client, reqs: []Client_Request, res: []Multi_Res)
 		done: Done
 		context.user_ptr = &done
 
-		for req, j in chunk {
+		for &req, j in chunk {
+
+			// TODO: support this.
+			assert(req.cb == nil, "unimplemented: sync_requests with user cb too")
+
 			context.user_index = j
-			_client_request(c, req, &res[((i-1)*64)+j], proc(r: Client_Response, mr: rawptr, err: Request_Error) {
-				mr := (^Multi_Res)(mr)
-				mr.res = r
+
+			req.user_data = &res[((i-1)*64)+j]
+			req.cb = proc(req: Client_Request, res: ^Client_Response, err: Request_Error) {
+
+				// TODO: support this.
+				if err == .Partial {
+					return
+				}
+
+				mr := (^Multi_Res)(req.user_data)
+				mr.res = res^
 				mr.err = err
 
 				done  := (^Done)(context.user_ptr)
 				done^ += { context.user_index }
-			})
+			}
+			_client_request(c, req)
 		}
 
 		for {

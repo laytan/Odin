@@ -30,7 +30,7 @@ openssl :: proc(t: ^testing.T) {
 		return
 	}
 
-	http.request(&s.client, http.get("https://www.google.com/"), &s, proc(res: http.Client_Response, user: rawptr, err: http.Request_Error) {
+	http.request(&s.client, http.get("https://www.google.com/", &s, proc(req: http.Client_Request, res: http.Client_Response, err: http.Request_Error) {
 		s := (^State)(user)
 
 		ev(s.t, err, nil)
@@ -40,7 +40,7 @@ openssl :: proc(t: ^testing.T) {
 
 		http.response_destroy(&s.client, res)
 		http.client_destroy(&s.client)
-	})
+	}))
 
 	ev(t, nbio.run(), nil)
 }

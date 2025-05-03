@@ -205,6 +205,13 @@ _scanner_scan :: proc(s: ^Scanner) {
 		return
 	}
 
+	// More data must be required to be read
+	if s.start > 0 && (s.end == len(s.buf) || s.start > len(s.buf)/2) {
+		copy(s.buf[:], s.buf[s.start:s.end])
+		s.end -= s.start
+		s.start = 0
+	}
+
 	could_be_too_short := false
 
 	// Resize the buffer if full
@@ -232,6 +239,8 @@ _scanner_scan :: proc(s: ^Scanner) {
 
 		old_size := len(s.buf)
 		resize(&s.buf, new_size)
+		s.end -= s.start
+		s.start = 0
 
 		could_be_too_short = old_size >= len(s.buf)
 

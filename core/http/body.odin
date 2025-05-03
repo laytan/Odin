@@ -8,16 +8,24 @@ import "core:net"
 import "core:strconv"
 import "core:strings"
 
-Body :: []byte
+Body_Callback :: #type proc(user_data: rawptr, body: []byte, err: Body_Error)
 
-Body_Callback :: #type proc(user_data: rawptr, body: Body, err: Body_Error)
-
-Body_Error :: bufio.Scanner_Error
+Body_Error :: enum {
+	None,
+	Partial,
+	Already_Consumed,
+	Invalid_Content_Length,
+	Exceeds_Max_Size,
+	EOF,
+	Timeout,
+	Corrupted_State,
+	Invalid_Trailing_Header,
+	Unknown,
+}
 
 Has_Body :: struct {
 	headers: Headers,
 	_body: struct {
-		data:     []byte,
 		err:      Body_Error,
 		consumed: bool,
 		cbs: struct {
@@ -49,7 +57,7 @@ Do not call this more than once.
 */
 body :: proc(sub: ^Has_Body, max_length: int, user_data: rawptr, cb: Body_Callback) {
 	if sub._body.consumed {
-		cb(user_data, sub._body.data, sub._body.err)
+		cb(user_data, nil, sub._body.err != nil ? sub._body.err : .Already_Consumed)
 		return
 	}
 
@@ -146,30 +154,57 @@ body_url_encoded :: proc(plain: string, allocator := context.temp_allocator) -> 
 
 // Returns an appropriate status code for the given body error.
 body_error_status :: proc(e: Body_Error) -> Status {
+	switch e {
+	case .None:
+		return .OK
+	case .Partial, .Already_Consumed: // This is not actually a hard error and shouldn't get here.
+		return .Internal_Server_Error
+	case .Invalid_Content_Length, .EOF, .Timeout, .Invalid_Trailing_Header:
+		return .Bad_Request
+	case .Exceeds_Max_Size:
+		return .Payload_Too_Large
+	case .Corrupted_State, .Unknown:
+		return .Internal_Server_Error
+	case:
+		return .Internal_Server_Error
+	}
+}
+
+// Returns an appropriate status code for the given body error.
+_bufio_error_to_body_error :: proc(e: bufio.Scanner_Error, loc := #caller_location) -> Body_Error {
 	switch t in e {
 	case bufio.Scanner_Extra_Error:
 		switch t {
-		case .Too_Long:                            return .Payload_Too_Large
-		case .Too_Short, .Bad_Read_Count:          return .Bad_Request
-		case .Negative_Advance, .Advanced_Too_Far: return .Internal_Server_Error
-		case .None:                                return .OK
+		case .None:
+			return .None
+		case .Too_Long:
+			return .Exceeds_Max_Size
+		case .Too_Short, .Bad_Read_Count, .Negative_Advance, .Advanced_Too_Far:
+			log.error(e, location=loc)
+			return .Corrupted_State
 		case:
-			return .Internal_Server_Error
+			return .Unknown
 		}
 	case io.Error:
 		switch t {
-		case .EOF, .Unknown, .No_Progress, .Unexpected_EOF:
-			return .Bad_Request
+		case .None:
+			return .None
+		case .EOF, .Unexpected_EOF:
+			return .EOF
+		case .Unknown:
+			return .Unknown
+		case .No_Progress:
+			return .Timeout
 		case .Empty, .Short_Write, .Buffer_Full, .Short_Buffer,
 		     .Invalid_Write, .Negative_Read, .Invalid_Whence, .Invalid_Offset,
 			 .Invalid_Unread, .Negative_Write, .Negative_Count:
-			return .Internal_Server_Error
-		case .None:
-			return .OK
+			log.error(e, location=loc)
+			return .Corrupted_State
 		case:
-			return .Internal_Server_Error
+			return .Unknown
 		}
-	case: unreachable()
+	case:
+		return .Unknown
 	}
 }
 
@@ -184,12 +219,12 @@ _body_length :: proc(sub: ^Has_Body, max_length: int = -1) {
 
 	ilen, lenok := strconv.parse_int(len, 10)
 	if !lenok {
-		_body_do_cbs(sub, nil, .Bad_Read_Count)
+		_body_do_cbs(sub, nil, .Invalid_Content_Length)
 		return
 	}
 
 	if max_length > -1 && ilen > max_length {
-		_body_do_cbs(sub, nil, .Too_Long)
+		_body_do_cbs(sub, nil, .Exceeds_Max_Size)
 		return
 	}
 
@@ -200,10 +235,40 @@ _body_length :: proc(sub: ^Has_Body, max_length: int = -1) {
 
 	sub._scanner.max_token_size = ilen
 
-	sub._scanner.split          = scan_num_bytes
-	sub._scanner.split_data     = rawptr(uintptr(ilen))
+	sub._scanner.split = scan_whatever
+	sub._scanner.split_data = sub
 
-	scanner_scan(sub._scanner, sub, _body_do_cbs_string)
+	scanner_scan(sub._scanner, sub, on_body_content)
+	on_body_content :: proc(sub: ^Has_Body, token: string, err: bufio.Scanner_Error) {
+		if err != nil {
+			_body_do_cbs(sub, token, _bufio_error_to_body_error(err))
+			return
+		}
+
+		sub._scanner.max_token_size -= len(token)
+		assert(sub._scanner.max_token_size >= 0)
+
+		if sub._scanner.max_token_size == 0 {
+			_body_do_cbs(sub, token, nil)
+			return
+		}
+
+		_body_do_cbs(sub, token, .Partial)
+		scanner_scan(sub._scanner, sub, on_body_content)
+	}
+}
+
+scan_whatever :: proc(sub: rawptr, data: []byte, at_eof: bool) -> (advance: int, token: []byte, err: bufio.Scanner_Error, final_token: bool) {
+	sub := (^Has_Body)(sub)
+
+	n := sub._scanner.max_token_size
+
+	if at_eof && len(data) < n {
+		return
+	}
+
+	read := min(len(data), n)
+	return read, data[:read], nil, false
 }
 
 /*
@@ -241,7 +306,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 		size_line := size_line
 
 		if err != nil {
-			_body_do_cbs(s.sub, nil, err)
+			_body_do_cbs(s.sub, nil, _bufio_error_to_body_error(err))
 			return
 		}
 
@@ -254,7 +319,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 		size, ok := strconv.parse_int(string(size_line), 16)
 		if !ok {
 			log.infof("Encountered an invalid chunk size when decoding a chunked body: %q", string(size_line))
-			_body_do_cbs(s.sub, nil, .Bad_Read_Count)
+			_body_do_cbs(s.sub, nil, .Invalid_Content_Length)
 			return
 		}
 
@@ -264,36 +329,52 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			return
 		}
 
-		if s.max_length > -1 && strings.builder_len(s.buf) + size > s.max_length {
-			_body_do_cbs(s.sub, nil, .Too_Long)
+		if s.max_length > -1 && size > s.max_length {
+			_body_do_cbs(s.sub, nil, .Exceeds_Max_Size)
 			return
 		}
+		s.max_length -= size
 
 		s.sub._scanner.max_token_size = size
 
-		s.sub._scanner.split          = scan_num_bytes
-		s.sub._scanner.split_data     = rawptr(uintptr(size))
+		s.sub._scanner.split      = scan_whatever
+		s.sub._scanner.split_data = s.sub
 
-		scanner_scan(s.sub._scanner, s, on_scan_chunk)
+		scanner_scan(s.sub._scanner, s, on_body_content)
+		on_body_content :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
+			if err != nil {
+				_body_do_cbs(s.sub, token, _bufio_error_to_body_error(err))
+				return
+			}
+
+			s.max_length -= len(token)
+			s.sub._scanner.max_token_size -= s.max_length
+			assert(s.sub._scanner.max_token_size >= 0)
+
+			_body_do_cbs(s.sub, token, .Partial)
+
+			if s.sub._scanner.max_token_size == 0 {
+				on_scan_chunk(s)
+			} else {
+				scanner_scan(s.sub._scanner, s, on_body_content)
+			}
+		}
 	}
 
-	on_scan_chunk :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
-		if err != nil {
-			_body_do_cbs(s.sub, nil, err)
-			return
-		}
-
-		s.sub._scanner.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
+	on_scan_chunk :: proc(s: ^Chunked_State) {
+		s.sub._scanner.max_token_size = s.max_length
 		s.sub._scanner.split          = scan_lines
-
-		strings.write_string(&s.buf, token)
 
 		on_scan_empty_line :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
 			if err != nil {
-				_body_do_cbs(s.sub, nil, err)
+				_body_do_cbs(s.sub, nil, _bufio_error_to_body_error(err))
 				return
 			}
+			// TODO: an actual error.
 			assert(len(token) == 0)
+
+			s.max_length -= len(token)
+			s.sub._scanner.max_token_size = s.max_length
 
 			scanner_scan(s.sub._scanner, s, on_scan)
 		}
@@ -313,14 +394,14 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			entry^ = strings.trim_suffix(entry^, "chunked")
 			s.sub.headers.readonly = true
 
-			_body_do_cbs(s.sub, s.buf.buf[:], nil)
+			_body_do_cbs(s.sub, nil, nil)
 			return
 		}
 
 		key, ok := header_parse(&s.sub.headers, string(line), context.temp_allocator)
 		if !ok {
 			log.infof("Invalid header when decoding chunked body: %q", string(line))
-			_body_do_cbs(s.sub, nil, .Unknown)
+			_body_do_cbs(s.sub, nil, .Invalid_Trailing_Header)
 			return
 		}
 
@@ -330,19 +411,19 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			headers_delete(&s.sub.headers, key)
 		}
 
+		s.max_length -= len(line)
+		s.sub._scanner.max_token_size -= s.max_length
+
 		scanner_scan(s.sub._scanner, s, on_scan_trailer)
 	}
 
 	Chunked_State :: struct {
 		sub:        ^Has_Body,
 		max_length: int,
-		buf:        strings.Builder,
 	}
 
 	// TODO: lose the hidden temp ally.
 	s := new(Chunked_State, context.temp_allocator)
-
-	s.buf.buf.allocator = context.temp_allocator
 
 	s.sub        = sub
 	s.max_length = max_length
@@ -352,7 +433,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 }
 
 @(private="file")
-_body_do_cbs_bytes :: proc(sub: ^Has_Body, body: Body, err: Body_Error) {
+_body_do_cbs_bytes :: proc(sub: ^Has_Body, body: []byte, err: Body_Error) {
 	sub._body.err = err
 	sub._body.consumed = true
 
