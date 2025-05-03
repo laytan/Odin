@@ -440,11 +440,9 @@ do_close :: proc(io: ^IO, completion: ^Completion, op: ^Op_Close) {
 }
 
 do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
-	defer op.initiated = true
-
 	err: posix.Errno
 	if op.initiated {
-		// We have already called os.connect, retrieve error number only.
+		// We have already called connect, retrieve error number only.
 		size := posix.socklen_t(size_of(err))
 		posix.getsockopt(posix.FD(op.socket), posix.SOL_SOCKET, .ERROR, &err, &size)
 	} else {
@@ -452,6 +450,7 @@ do_connect :: proc(io: ^IO, completion: ^Completion, op: ^Op_Connect) {
 		if res != .OK {
 			err = posix.errno()
 			if err == .EINPROGRESS {
+				op.initiated = true
 				push_pending(io, completion)
 				return
 			}

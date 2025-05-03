@@ -586,6 +586,9 @@ Handle :: _Handle
 MAX_USER_ARGUMENTS :: 5
 
 Completion :: struct {
+
+	next: ^Completion,
+
 	// Implementation specifics, don't use outside of implementation/os.
 	using _:   _Completion,
 

@@ -19,7 +19,7 @@ __init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) 
 	defer if err != nil { posix.close(io.kq) }
 
 	perr: runtime.Allocator_Error
-	if perr = pool_init(&io.completion_pool, allocator = allocator); perr != nil {
+	if perr = pool_init(&io.completion_pool); perr != nil {
 		err = .Allocation_Failed
 		return
 	}
@@ -37,6 +37,7 @@ __init :: proc(io: ^IO, allocator := context.allocator) -> (err: General_Error) 
 }
 
 _num_waiting :: proc(io: ^IO) -> int {
+	// return abs(sync.atomic_load_explicit(&io.completion_pool.head, .Relaxed) - sync.atomic_load_explicit(&io.completion_pool.tail, .Relaxed))
 	return io.completion_pool.num_waiting
 }
 
@@ -131,6 +132,12 @@ _listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {
 	return nil
 }
 
+// prep_accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion
+//
+// enqueue :: proc(completion: ^Completion)
+//
+// execute :: proc(completion: ^Completion)
+
 _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
@@ -141,7 +148,7 @@ _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Acce
 		sock     = socket,
 	}
 
-	queue.push_back(&io.completed, completion)
+	push_completed(io, completion)
 	return completion
 }
 
