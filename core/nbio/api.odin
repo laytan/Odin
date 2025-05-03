@@ -80,6 +80,22 @@ now :: proc() -> time.Time {
 	return _now(&g_io)
 }
 
+On_Accept :: #type proc(user: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error)
+
+/*
+Using the given socket, accepts the next incoming connection, calling the callback when that happens
+
+NOTE: polymorphic variants for type safe user data are available under `accept_poly`, `accept_poly2`, and `accept_poly3`.
+
+Inputs:
+- socket: A bound and listening socket *that was created using this package*
+*/
+accept :: proc(socket: net.TCP_Socket, user: rawptr, cb: On_Accept) -> (res: ^Completion) {
+	res = prep_accept(socket, cb, user)
+	exec(res)
+	return
+}
+
 On_Timeout :: #type proc(user: rawptr)
 
 /*
@@ -270,25 +286,6 @@ close :: proc(fd: Closable, user: rawptr = nil, callback: On_Close = empty_on_cl
 	res = _close(io(), fd, user, callback)
 	if res == nil {
 		callback(user, .Unsupported)
-	}
-	return
-}
-
-On_Accept :: #type proc(user: rawptr, client: net.TCP_Socket, source: net.Endpoint, err: net.Accept_Error)
-
-/*
-Using the given socket, accepts the next incoming connection, calling the callback when that happens
-
-NOTE: polymorphic variants for type safe user data are available under `accept_poly`, `accept_poly2`, and `accept_poly3`.
-
-Inputs:
-- io:     The IO instance to use
-- socket: A bound and listening socket *that was created using this package*
-*/
-accept :: proc(socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> (res: ^Completion) {
-	res = _accept(io(), socket, user, callback)
-	if res == nil {
-		callback(user, {}, {}, .Network_Unreachable)
 	}
 	return
 }
@@ -581,19 +578,3 @@ Poll_Event :: enum {
 }
 
 Handle :: _Handle
-
-// TODO: should this be configurable, with a minimum of course for the use of core?
-MAX_USER_ARGUMENTS :: 5
-
-Completion :: struct {
-
-	next: ^Completion,
-
-	// Implementation specifics, don't use outside of implementation/os.
-	using _:   _Completion,
-
-	user_data: rawptr,
-
-	// Callback pointer and user args passed in poly variants.
-	user_args: [MAX_USER_ARGUMENTS + 1]rawptr,
-}

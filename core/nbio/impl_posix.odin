@@ -132,13 +132,7 @@ _listen :: proc(socket: net.TCP_Socket, backlog := 1000) -> net.Listen_Error {
 	return nil
 }
 
-// prep_accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion
-//
-// enqueue :: proc(completion: ^Completion)
-//
-// execute :: proc(completion: ^Completion)
-
-_accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {
+prep_accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {
 	completion := pool_get(&io.completion_pool)
 
 	completion.ctx       = context
@@ -148,7 +142,15 @@ _accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Acce
 		sock     = socket,
 	}
 
-	push_completed(io, completion)
+	return completion
+}
+
+execute :: proc(completion: ^Completion) {
+}
+
+_accept :: proc(io: ^IO, socket: net.TCP_Socket, user: rawptr, callback: On_Accept) -> ^Completion {
+	completion := prep_accept(io, socket, user, callback)
+	execute(completion)
 	return completion
 }
 

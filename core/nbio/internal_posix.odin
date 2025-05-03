@@ -30,102 +30,35 @@ _IO :: struct #no_copy {
 
 _Handle :: posix.FD
 
-Operation :: union {
-	Op_Accept,
-	Op_Close,
-	Op_Connect,
-	Op_Read,
-	Op_Recv,
-	Op_Send,
-	Op_Write,
-	Op_Timeout,
-	Op_Next_Tick,
-	Op_Poll,
-	Op_Remove,
-}
-
 _Completion :: struct {
-	operation: Operation,
 	timeout:   ^Completion,
 	in_kernel: bool,
-	ctx:       runtime.Context,
 }
 
-Op_Accept :: struct {
-	callback: On_Accept,
-	sock:     net.TCP_Socket,
-}
+_Op_Accept :: struct {}
 
-Op_Close :: struct {
-	callback: On_Close,
-	handle:   Handle,
-}
+_Op_Close :: struct {}
 
-Op_Connect :: struct {
-	callback:  On_Dial,
-	socket:    net.TCP_Socket,
+_Op_Connect :: struct {
 	sockaddr:  posix.sockaddr_storage,
 	initiated: bool,
 }
 
-Op_Recv :: struct {
-	callback: On_Recv,
-	socket:   net.Any_Socket,
-	buf:      []byte,
-	all:      bool,
-	received: int,
-	len:      int,
-}
+_Op_Recv :: struct {}
 
-Op_Send :: struct {
-	callback: On_Sent,
-	socket:   net.Any_Socket,
-	buf:      []byte,
-	endpoint: Maybe(net.Endpoint),
-	all:      bool,
-	len:      int,
-	sent:     int,
-}
+_Op_Send :: struct {}
 
-Op_Read :: struct {
-	callback: On_Read,
-	fd:       Handle,
-	buf:      []byte,
-	offset:	  int,
-	all:   	  bool,
-	read:  	  int,
-	len:   	  int,
-}
+_Op_Read :: struct {}
 
-Op_Write :: struct {
-	callback: On_Write,
-	fd:       Handle,
-	buf:      []byte,
-	offset:   int,
-	all:      bool,
-	written:  int,
-	len:      int,
-}
+_Op_Write :: struct {}
 
-Op_Timeout :: struct {
-	callback: On_Timeout,
-	expires:  time.Time,
-}
+_Op_Timeout :: struct {}
 
-Op_Next_Tick :: struct {
-	callback: On_Next_Tick,
-}
+_Op_Next_Tick :: struct {}
 
-Op_Poll :: struct {
-	callback: On_Poll,
-	fd:       Handle,
-	event:    Poll_Event,
-	multi:    bool,
-}
+_Op_Poll :: struct {}
 
-Op_Remove :: struct {
-	target: ^Completion,
-}
+_Op_Remove :: struct {}
 
 push_completed :: proc(io: ^IO, completed: ^Completion) {
 	ok, err := queue.push_back(&io.completed, completed)
