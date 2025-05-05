@@ -2917,6 +2917,17 @@ gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlo
 	}
 	defer (p->branch_location_pos = prev_token_pos);
 
+	if (kind == lbDeferExit_Return) {
+		for_array(i, p->locals) {
+			lbValue local = p->locals[i];
+
+			auto args = array_make<lbValue>(temporary_allocator(), 2);
+			args[0] = lb_emit_conv(p, local, t_rawptr);
+			args[1] = lb_const_int(p->module, t_int, type_size_of(local.type->Pointer.elem));
+			lb_emit_runtime_call(p, "__asan_unpoison_memory_region", args);
+		}
+	}
+
 	isize count = p->defer_stmts.count;
 	isize i = count;
 	while (i --> 0) {

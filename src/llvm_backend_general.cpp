@@ -3072,6 +3072,10 @@ gb_internal lbAddr lb_add_local(lbProcedure *p, Type *type, Entity *e, bool zero
 		lb_add_debug_local_variable(p, ptr, type, e->token);
 	}
 
+	if (build_context.sanitizer_flags & SanitizerFlag_Address && !p->entity->Procedure.no_sanitize_address) {
+		array_add(&p->locals, val);
+	}
+
 	if (zero_init) {
 		lb_mem_zero_ptr(p, ptr, type, alignment);
 	}
