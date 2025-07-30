@@ -4,6 +4,10 @@ when ODIN_OS == .Windows {
 	foreign import lib {
 		"lib/kb_text_shape.lib",
 	}
+} else when ODIN_ARCH == .wasm32 || ODIN_ARCH == .wasm64p32 {
+	foreign import lib {
+		"lib/kb_text_shape_wasm.o",
+	}
 } else {
 	foreign import lib {
 		"lib/kb_text_shape.a",
