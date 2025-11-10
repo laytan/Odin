@@ -25,6 +25,7 @@ download_assets :: proc "contextless" () {
 @(require) import "encoding/xml"
 @(require) import "flags"
 @(require) import "fmt"
+@(require) import "http"
 @(require) import "io"
 @(require) import "math"
 @(require) import "math/big"

@@ -14,6 +14,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:strings"
+import "core:sync"
 import "core:sync/chan"
 import "core:time"
 
@@ -88,6 +89,11 @@ format_log_text :: proc(level: runtime.Logger_Level, text: string, options: runt
 	} else {
 		log.do_location_header(options, &buf, location)
 	}
+
+	if .Thread_Id in options {
+		fmt.sbprintf(&buf, "[%v] ", sync.current_thread_id())
+	}
+
 	return fmt.aprintf("%s%s", strings.to_string(buf), text, allocator = allocator)
 }
 

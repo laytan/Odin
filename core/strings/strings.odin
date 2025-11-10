@@ -2809,6 +2809,32 @@ split_multi_iterate :: proc(it: ^string, substrs: []string) -> (res: string, ok:
 	return
 }
 
+split_multi_after_iterator :: proc(it: ^string, substrs: []string) -> (res: string, ok: bool) #no_bounds_check {
+	if len(it) == 0 || len(substrs) <= 0 {
+		return
+	}
+
+	// disallow "" substr
+	for substr in substrs {
+		if len(substr) == 0 {
+			return
+		}
+	}
+
+	// calculate the needed len of `results`
+	i, w := index_multi(it^, substrs)
+	if i >= 0 {
+		res = it[:i+w]
+		it^ = it[i+w:]
+	} else {
+		// last value
+		res = it^
+		it^ = it[len(it):]
+	}
+	ok = true
+	return
+}
+
 /*
 Replaces invalid UTF-8 characters in the input string with a specified replacement string. Adjacent invalid bytes are only replaced once.
 

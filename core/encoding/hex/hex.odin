@@ -20,14 +20,32 @@ Returns:
 - err: An optional allocator error if one occured, `.None` otherwise
 */
 encode :: proc(src: []byte, allocator := context.allocator, loc := #caller_location) -> (res: []byte, err: runtime.Allocator_Error) #optional_allocator_error {
-	res, err = make([]byte, len(src) * 2, allocator, loc)
-	#no_bounds_check for i, j := 0, 0; i < len(src); i += 1 {
+	dst := make([]byte, len(src) * 2, allocator, loc) or_return
+	return encode_into(dst, src, loc), nil
+}
+
+/*
+Encodes a byte slice into a lowercase hex sequence buffer
+
+The size of `dst` must be at least twice the size as `src`.
+
+Inputs:
+- dst: The `[]byte` to write into
+- src: The `[]byte` to be hex-encoded
+- loc: The caller location for debugging purposes (default: #caller_location)
+
+Returns: The hex-encoded result
+*/
+encode_into :: proc(dst, src: []byte, loc := #caller_location) -> []byte #no_bounds_check {
+	assert(len(dst) >= len(src)*2, loc=loc)
+	j := 0
+	for i := 0; i < len(src); i += 1 {
 		v := src[i]
-		res[j]   = LOWER[v>>4]
-		res[j+1] = LOWER[v&0x0f]
+		dst[j]   = LOWER[v>>4]
+		dst[j+1] = LOWER[v&0x0f]
 		j += 2
 	}
-	return
+	return dst[:j]
 }
 
 /*
@@ -62,14 +80,32 @@ Returns:
 - err: An optional allocator error if one occured, `.None` otherwise
 */
 encode_upper :: proc(src: []byte, allocator := context.allocator, loc := #caller_location) -> (res: []byte, err: runtime.Allocator_Error) #optional_allocator_error {
-	res, err = make([]byte, len(src) * 2, allocator, loc)
-	#no_bounds_check for i, j := 0, 0; i < len(src); i += 1 {
+	dst := make([]byte, len(src) * 2, allocator, loc) or_return
+	return encode_upper_into(dst, src, loc), nil
+}
+
+/*
+Encodes a byte slice into an uppercase hex sequence buffer
+
+The size of `dst` must be at least twice the size as `src`.
+
+Inputs:
+- dst: The `[]byte` to write into
+- src: The `[]byte` to be hex-encoded
+- loc: The caller location for debugging purposes (default: #caller_location)
+
+Returns: The hex-encoded result
+*/
+encode_upper_into :: proc(dst, src: []byte, loc := #caller_location) -> []byte #no_bounds_check {
+	assert(len(dst) >= len(src)*2, loc=loc)
+	j := 0
+	for i := 0; i < len(src); i += 1 {
 		v := src[i]
-		res[j]   = UPPER[v>>4]
-		res[j+1] = UPPER[v&0x0f]
+		dst[j]   = UPPER[v>>4]
+		dst[j+1] = UPPER[v&0x0f]
 		j += 2
 	}
-	return
+	return dst[:j]
 }
 
 /*

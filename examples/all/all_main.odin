@@ -82,6 +82,9 @@ package all
 @(require) import "core:hash"
 @(require) import "core:hash/xxhash"
 
+@(require) import "core:http"
+@(require) import "core:http/dns"
+
 @(require) import "core:image"
 @(require) import "core:image/bmp"
 @(require) import "core:image/netpbm"
