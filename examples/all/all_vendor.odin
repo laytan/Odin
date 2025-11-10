@@ -12,6 +12,7 @@ package all
 @(require) import "vendor:portmidi"
 @(require) import "vendor:raylib"
 @(require) import "vendor:zlib"
+@(require) import "vendor:openssl"
 
 @(require) import "vendor:sdl2"
 @(require) import "vendor:sdl2/net"
