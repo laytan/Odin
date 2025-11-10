@@ -46,7 +46,7 @@ Server_Opts :: struct {
 	// defaults to 8000.
 	limit_headers:           int,
 	// The thread count to use, defaults to your core count - 1.
-	thread_count:            int,
+	thread_count:            Maybe(int),
 
 	// // The initial size of the temp_allocator for each connection, defaults to 256KiB and doubles
 	// // each time it needs to grow.
@@ -66,11 +66,6 @@ Default_Server_Opts := Server_Opts {
 	limit_headers           = 8000,
 	// initial_temp_block_cap  = 256 * mem.Kilobyte,
 	// max_free_blocks_queued  = 64,
-}
-
-@(init, private)
-server_opts_init :: proc() {
-	Default_Server_Opts.thread_count = os.processor_core_count()
 }
 
 Server_State :: enum {
@@ -161,7 +156,7 @@ serve :: proc(s: ^Server, h: Handler) -> (err: net.Network_Error) {
 	assert(td.state == .Listening, "http server is not listening, listen before serve")
 	s.handler = h
 
-	thread_count := max(0, s.opts.thread_count - 1)
+	thread_count := max(0, s.opts.thread_count.? or_else (os.processor_core_count() - 1))
 	sync.wait_group_add(&s.threads_closed, thread_count)
 	s.threads = make([]^thread.Thread, thread_count, s.conn_allocator)
 	for i in 0 ..< thread_count {

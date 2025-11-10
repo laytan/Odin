@@ -400,6 +400,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 			return
 		}
 
+		// TODO: could we have gotten a partial response back and need to read more?
 		response := req.response[:op.recv.received]
 
 		HEADER_SIZE_BYTES :: 12
@@ -436,7 +437,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		cur_idx += hn_sz + dq_sz
 
 		for _ in 0..<answer_count+authority_count+additional_count {
-			if cur_idx == len(response) {
+			if cur_idx >= len(response) {
 				continue
 			}
 

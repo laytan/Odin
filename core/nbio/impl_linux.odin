@@ -276,7 +276,7 @@ __tick :: proc(l: ^Event_Loop) -> General_Error {
 			log.debug("trying to enqueue unqueued but still not able to")
 
 			// Kind of hacky way to keep the link intact, so we do not requeue the linked op without requeuing the link too.
-			front := queue.peek_front(&l.unqueued)
+			front := queue.front_ptr(&l.unqueued)
 			if front^.type == ._Link_Timeout {
 				queue.push_back(&l.unqueued, queue.pop_front(&l.unqueued))
 			}
@@ -403,7 +403,7 @@ _link_timeout :: proc(target: ^Operation, timeout: time.Duration) {
 	op._link_timeout.expires = _duration_to_time_spec(timeout)
 
 	// If the last op was queued because kernel is full, also queue this op.
-	if queue.len(target.l.unqueued) > 0 && queue.peek_back(&target.l.unqueued)^ == target {
+	if queue.len(target.l.unqueued) > 0 && queue.front_ptr(&target.l.unqueued)^ == target {
 		_enqueue(op, nil, false)
 		return
 	}
@@ -484,17 +484,12 @@ _dial_exec :: proc(op: ^Operation) {
 			queue.push_back(&op.l.completed, op)
 			return
 		}
-		defer if op.dial.err != nil { close(sock.(TCP_Socket)) }
 
 		op.dial.socket = sock.(TCP_Socket)
-
-		if err := net.set_blocking(sock, false); err != nil {
-			op.dial.err = err
-			queue.push_back(&op.l.completed, op)
-			return
-		}
-
+		// TODO: should this be set by default?
 		net.set_option(sock, .Reuse_Address, true)
+
+		op.dial._impl.sockaddr = _endpoint_to_sockaddr(op.dial.endpoint)
 	}
 
 	_enqueue(op, uring.connect(

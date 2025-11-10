@@ -45,7 +45,7 @@ Scanner :: struct #no_copy {
 	split:                        Split_Proc,
 	split_data:                   rawptr,
 	buf:                          [dynamic]byte,
-	max_token_size:               int,
+	max_token_size:               int, // TODO: check where it is used, and consider if usage is correct, the size of this is also the max size of the buffer, could a malicious request/response cause an oom?
 	start:                        int,
 	end:                          int,
 	token:                        []byte,
@@ -60,7 +60,10 @@ Scanner :: struct #no_copy {
 	callback:                     Scan_Callback,
 }
 
-INIT_BUF_SIZE :: 1024
+// TODO: on large responses, this massively impact the time to fully downloading it.
+// going from 1kb to 16kb reduced the time from 26s to 20s, look into this.
+// TLS packets are 16kb?
+INIT_BUF_SIZE :: 1024*16
 DEFAULT_MAX_CONSECUTIVE_EMPTY_READS :: 128
 
 scanner_init :: proc(s: ^Scanner, recv_user_data: rawptr, recv: Recv_Proc, buf_allocator := context.allocator) {

@@ -130,7 +130,7 @@ response_writer_init :: proc(rw: ^Response_Writer, r: ^Response, buffer: []byte)
 
 				bytes.buffer_grow(b, 16)
 				size_buf := dynamic_unwritten(b.buf)
-				size := strconv.append_int(size_buf, plen, 16)
+				size := strconv.write_int(size_buf, plen, 16)
 				dynamic_add_len(&b.buf, len(size))
 
 				ws(b, "\r\n")
@@ -259,7 +259,7 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 			ws(b, "content-length: ")
 
 			buf: [20]byte
-			ws(b, strconv.itoa(buf[:], content_length))
+			ws(b, strconv.write_int(buf[:], i64(content_length), 10))
 			ws(b, "\r\n")
 		}
 	}

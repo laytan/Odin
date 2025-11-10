@@ -4,6 +4,7 @@ package http
 
 import intr "base:intrinsics"
 
+import      "core:fmt"
 import      "core:bufio"
 import      "core:http/dns"
 import      "core:log"
@@ -293,7 +294,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 	}
 
 	handle_net_err :: proc(r: ^In_Flight, err: net.Network_Error, ctx := "") {
-		panic("NOOOOOOOOOO")
+		fmt.panicf("NOOOOOOOOOO: %v %v", ctx, err)
 	}
 
 	connect :: proc(r: ^In_Flight) {
@@ -397,7 +398,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 
 					// Write the length into unwritten portion.
 					unwritten := dynamic_unwritten(buf.buf)
-					l := len(strconv.itoa(unwritten, buf_len))
+					l := len(strconv.write_int(unwritten, i64(buf_len), 10))
 					assert(l <= 20)
 					dynamic_add_len(&buf.buf, l)
 
@@ -463,8 +464,12 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 			assert(r.conn.state == .Requesting)
 			r.conn.state = .Sent_Headers if op.send.err == nil else .Failed
 
+			log.debugf("Sent HTTP request:\n%v%v", string(r.conn.buf.buf[:]), string(r.body))
+
 			if len(r.body) == 0 {
-				on_sent_request(r, op.send.err.(net.TCP_Send_Error))
+				err: net.TCP_Send_Error
+				if op.send.err != nil { err = op.send.err.(net.TCP_Send_Error) }
+				on_sent_request(r, err)
 			}
 		}
 
@@ -554,6 +559,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 	}
 
 	on_sent_request :: proc(r: ^In_Flight, err: net.TCP_Send_Error) {
+		log.info(err)
 		if err != nil {
 			handle_net_err(r, err, "send request failed")
 			return
@@ -579,7 +585,9 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 				nbio.recv_poly2(
 					r.conn.socket, buf, s, callback,
 					proc(op: ^nbio.Operation, s: ^Scanner, callback: On_Scanner_Read) {
-						callback(s, op.recv.received, op.recv.err.(net.TCP_Recv_Error))
+						err: net.TCP_Recv_Error
+						if op.recv.err != nil { err = op.recv.err.(net.TCP_Recv_Error) }
+						callback(s, op.recv.received, err)
 					},
 				)
 			case .HTTPS:
@@ -589,7 +597,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 					log.debugf("executing SSL recv for %m", len(buf))
 					total: int
 
-					MAX_RECURSION :: 100
+					MAX_RECURSION :: 25
 
 					// NOTE: hacky? fix for stack overflows because we keep getting data without going back up the stack.
 					if r.recursion > MAX_RECURSION {
@@ -801,7 +809,6 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 				r.conn.body  = {}
 
 				append(&r.res.body, ..body)
-				log.warn("DONE")
 				r.cb(r, &r.res, nil)
 				free(r, r.c.allocator)
 

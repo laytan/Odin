@@ -1,5 +1,7 @@
 package http
 
+import "base:runtime"
+
 import "core:fmt"
 import "core:io"
 import "core:reflect"
@@ -8,6 +10,7 @@ import "core:os/os2"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "core:sync"
 
 Requestline_Error :: enum {
 	None,
@@ -189,46 +192,46 @@ header_parse :: proc(headers: ^Headers, line: string, allocator := context.alloc
 	return
 }
 
-@(private="file")
 allowed_trailers: Headers
 
-@(private="file", init)
 init_allowed_trailers :: proc() {
-	// TODO: maybe just check each of these in a loop instead.
-
-	headers_init(&allowed_trailers)
-	// Message framing:
-	headers_set(&allowed_trailers, "transfer-encoding", "")
-	headers_set(&allowed_trailers, "content-length", "")
-	// Routing:
-	headers_set(&allowed_trailers, "host", "")
-	// Request modifiers:
-	headers_set(&allowed_trailers, "if-match", "")
-	headers_set(&allowed_trailers, "if-none-match", "")
-	headers_set(&allowed_trailers, "if-modified-since", "")
-	headers_set(&allowed_trailers, "if-unmodified-since", "")
-	headers_set(&allowed_trailers, "if-range", "")
-	// Authentication:
-	headers_set(&allowed_trailers, "www-authenticate", "")
-	headers_set(&allowed_trailers, "authorization", "")
-	headers_set(&allowed_trailers, "proxy-authenticate", "")
-	headers_set(&allowed_trailers, "proxy-authorization", "")
-	headers_set(&allowed_trailers, "cookie", "")
-	headers_set(&allowed_trailers, "set-cookie", "")
-	// Control data:
-	headers_set(&allowed_trailers, "age", "")
-	headers_set(&allowed_trailers, "cache-control", "")
-	headers_set(&allowed_trailers, "expires", "")
-	headers_set(&allowed_trailers, "date", "")
-	headers_set(&allowed_trailers, "location", "")
-	headers_set(&allowed_trailers, "retry-after", "")
-	headers_set(&allowed_trailers, "vary", "")
-	headers_set(&allowed_trailers, "warning", "")
-	// How to process:
-	headers_set(&allowed_trailers, "content-encoding", "")
-	headers_set(&allowed_trailers, "content-type", "")
-	headers_set(&allowed_trailers, "trailer", "")
-	headers_set(&allowed_trailers, "content-range", "")
+	@(static) allowed_trailers_sync: sync.Once
+	sync.once_do(&allowed_trailers_sync, proc() {
+		context.allocator = runtime.heap_allocator()
+		headers_init(&allowed_trailers)
+		// Message framing:
+		headers_set(&allowed_trailers, "transfer-encoding", "")
+		headers_set(&allowed_trailers, "content-length", "")
+		// Routing:
+		headers_set(&allowed_trailers, "host", "")
+		// Request modifiers:
+		headers_set(&allowed_trailers, "if-match", "")
+		headers_set(&allowed_trailers, "if-none-match", "")
+		headers_set(&allowed_trailers, "if-modified-since", "")
+		headers_set(&allowed_trailers, "if-unmodified-since", "")
+		headers_set(&allowed_trailers, "if-range", "")
+		// Authentication:
+		headers_set(&allowed_trailers, "www-authenticate", "")
+		headers_set(&allowed_trailers, "authorization", "")
+		headers_set(&allowed_trailers, "proxy-authenticate", "")
+		headers_set(&allowed_trailers, "proxy-authorization", "")
+		headers_set(&allowed_trailers, "cookie", "")
+		headers_set(&allowed_trailers, "set-cookie", "")
+		// Control data:
+		headers_set(&allowed_trailers, "age", "")
+		headers_set(&allowed_trailers, "cache-control", "")
+		headers_set(&allowed_trailers, "expires", "")
+		headers_set(&allowed_trailers, "date", "")
+		headers_set(&allowed_trailers, "location", "")
+		headers_set(&allowed_trailers, "retry-after", "")
+		headers_set(&allowed_trailers, "vary", "")
+		headers_set(&allowed_trailers, "warning", "")
+		// How to process:
+		headers_set(&allowed_trailers, "content-encoding", "")
+		headers_set(&allowed_trailers, "content-type", "")
+		headers_set(&allowed_trailers, "trailer", "")
+		headers_set(&allowed_trailers, "content-range", "")
+	})
 }
 
 // Returns if this is a valid trailer header.
@@ -242,6 +245,7 @@ init_allowed_trailers :: proc() {
 // 7.1 of [RFC7231]), or determining how to process the payload (e.g.,
 // Content-Encoding, Content-Type, Content-Range, and Trailer).
 header_allowed_trailer :: proc(key: string) -> bool {
+	init_allowed_trailers()
 	return headers_has(allowed_trailers, key)
 }
 
@@ -419,8 +423,11 @@ _status_strings: #sparse [Status]string
 
 // Populates the status_strings like a map from status to their string representation.
 // Where an empty string means an invalid code.
+//
+// TODO: just do a switch (if it gets optimized into a jump table).
 @(init, private)
-status_strings_init :: proc() {
+status_strings_init :: proc "contextless" () {
+	context = runtime.default_context()
 	for field in Status {
 		name, ok := fmt.enum_value_to_string(field)
 		assert(ok)
