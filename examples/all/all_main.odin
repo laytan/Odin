@@ -76,6 +76,9 @@ package all
 @(require) import "core:hash"
 @(require) import "core:hash/xxhash"
 
+@(require) import "core:http"
+@(require) import "core:http/dns"
+
 @(require) import "core:image"
 @(require) import "core:image/bmp"
 @(require) import "core:image/netpbm"
@@ -102,6 +105,8 @@ package all
 @(require) import "core:mem"
 @(require) import "core:mem/tlsf"
 @(require) import "core:mem/virtual"
+
+@(require) import "core:nbio"
 
 @(require) import "core:odin/ast"
 @(require) import doc_format "core:odin/doc-format"
