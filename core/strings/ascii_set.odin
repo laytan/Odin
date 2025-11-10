@@ -18,7 +18,7 @@ Returns:
 - as: An Ascii_Set with unique characters from the input string.
 - ok: false if any character in the input string is not a valid ASCII character.
 */
-ascii_set_make :: proc(chars: string) -> (as: Ascii_Set, ok: bool) #no_bounds_check {
+ascii_set_make :: proc "contextless" (chars: string) -> (as: Ascii_Set, ok: bool) #no_bounds_check {
 	for i in 0..<len(chars) {
 		c := chars[i]
 		if c >= utf8.RUNE_SELF {

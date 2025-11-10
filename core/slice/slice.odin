@@ -924,6 +924,44 @@ bitset_to_enum_slice_with_make :: proc(bs: $T, $E: typeid, allocator := context.
 bitset_to_enum_slice :: proc{bitset_to_enum_slice_with_make, bitset_to_enum_slice_with_buffer}
 
 /*
+Iterate over a slice in chunks of `chunk_len`.
+
+Example:
+	import "core:fmt"
+	import "core:slice"
+
+	iter_chunks_example :: proc() {
+		sl: [128]int
+		i: int
+		for chunk in slice.iter_chunks(sl[:], 48, &i) {
+			fmt.println(len(chunk))
+		}
+	}
+
+Output:
+	48
+	48
+	32
+
+*/
+iter_chunks :: proc(s: $S/[]$T, chunk_len: int, i: ^int) -> (part: S, ok: bool) #no_bounds_check {
+	assert(i != nil)
+
+	off := i^ * chunk_len
+	assert(off >= 0)
+
+	if off >= len(s) {
+		ok = false
+		return
+	}
+
+	part = s[off:builtin.min(len(s), off+chunk_len)]
+	i^ += 1
+	ok = len(part) > 0
+	return
+}
+
+/*
 Removes the first n elements (`elems`) from a slice of slices, spanning inner slices and dropping empty ones.
 
 If `elems` is out of bounds (more than the total) this will trigger a bounds check.
