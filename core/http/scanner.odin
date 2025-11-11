@@ -39,7 +39,7 @@ scan_num_bytes :: proc(split_data: rawptr, data: []byte, at_eof: bool) -> (advan
 SCANNER_MAX_USER_DATA :: 3*size_of(rawptr)
 
 // A callback based scanner over the connection based on nbio.
-Scanner :: struct #no_copy {
+Scanner :: struct /* #no_copy */ {
 	recv:                         Recv_Proc,
 	recv_user_data:               rawptr,
 	split:                        Split_Proc,

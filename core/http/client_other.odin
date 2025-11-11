@@ -207,19 +207,23 @@ Client_Connection_State :: enum {
 }
 
 _client_request :: proc(c: ^Client, req: Client_Request) {
-	assert(req.cb != nil, "no response callback")
+	r := new(In_Flight, c.allocator)
+	r.c = c
+	r.r = req
+	_client_request_on(r)
+}
 
-	host := url_parse(req.url).host
+_client_request_on :: proc(r: ^In_Flight) {
+	assert(r.r.cb != nil, "no response callback")
+
+	host := url_parse(r.r.url).host
 	host_or_endpoint, err := net.parse_hostname_or_endpoint(host)
 	if err != nil {
-		log.warnf("Invalid request URL %q: %v", req.url, err)
-		req.cb(req, {}, .Bad_URL)
+		log.warnf("Invalid request URL %q: %v", r.r.url, err)
+		r.r.cb(r.r, {}, .Bad_URL)
+		free(r, r.c.allocator)
 		return
 	}
-
-	r := new(In_Flight, c.allocator)
-	r.r = req
-	r.c = c
 
 	switch t in host_or_endpoint {
     case net.Endpoint:
@@ -227,7 +231,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 		on_dns_resolve(r, { t.address, max(u32) }, nil)
     case net.Host:
 		r.ep.port = t.port
-		dns.resolve(&c.dnsc, t.hostname, r, on_dns_resolve)
+		dns.resolve(&r.c.dnsc, t.hostname, r, on_dns_resolve)
     case:
 		unreachable()
     }
@@ -559,7 +563,6 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 	}
 
 	on_sent_request :: proc(r: ^In_Flight, err: net.TCP_Send_Error) {
-		log.info(err)
 		if err != nil {
 			handle_net_err(r, err, "send request failed")
 			return
@@ -594,7 +597,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 				ssl_recv(nil, r, buf, callback)
 
 				ssl_recv :: proc(op: ^nbio.Operation, r: ^In_Flight, buf: []byte, callback: On_Scanner_Read) {
-					log.debugf("executing SSL recv for %m", len(buf))
+					// log.debugf("executing SSL recv for %m", len(buf))
 					total: int
 
 					MAX_RECURSION :: 25
@@ -611,7 +614,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 					receiving: for {
 						switch n, res := client_ssl.recv(r.conn.ssl, buf[total:]); res {
 						case .None:
-							log.debugf("Successfully received %m from the connection", n)
+							// log.debugf("Successfully received %m/%m from the connection", n, len(buf))
 							total += n
 							if total < len(buf) {
 								continue receiving
@@ -619,7 +622,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 							r.recursion += 1
 							callback(&r.conn.scanner, total, nil)
 						case .Want_Read:
-							log.debug("SSL read want read")
+							// log.debug("SSL read want read")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
@@ -627,7 +630,7 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 								nbio.poll_poly3(r.conn.socket, {.Read}, r, buf, callback, ssl_recv)
 							}
 						case .Want_Write:
-							log.debug("SSL read want write")
+							// log.debug("SSL read want write")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
@@ -807,6 +810,26 @@ _client_request :: proc(c: ^Client, req: Client_Request) {
 
 				r.conn.state = .Connected
 				r.conn.body  = {}
+
+				// TODO: what other statussus/special handling (like only on specific method, changing method, check spec).
+				// TODO: have a max amount of redirects to follow.
+				if !r.ignore_redirects && (r.res.status == .Found || r.res.status == .Moved_Permanently || r.res.status == .See_Other || r.res.status == .Temporary_Redirect || r.res.status == .Permanent_Redirect) {
+					// Reset everything as if the request was made to the location.
+
+					location, has_location := headers_get(r.res.headers, "Location")
+					assert(has_location)
+
+					r.r.url = strings.clone(location, r.c.allocator) // TODO: leak
+
+					r.conn = nil
+					r.ep = {}
+
+					response_destroy(r.c, r.res)
+					r.res = {}
+
+					_client_request_on(r)
+					break
+				}
 
 				append(&r.res.body, ..body)
 				r.cb(r, &r.res, nil)

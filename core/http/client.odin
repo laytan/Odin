@@ -52,7 +52,7 @@ Request_Error :: enum {
 // + response_destroy could be made to use that instead of taking the client too.
 Client_Response :: struct {
 	status:  Status,
-	body:    [dynamic]byte `fmt:"s"`,
+	body:    [dynamic]byte,
 	headers: Headers,
 
 	// NOTE: unused on JS targets, use the `js_credentials` option to configure cookies there.
