@@ -91,22 +91,16 @@ init :: proc(c: ^Client, user_data: rawptr, on_init: On_Init, allocator := conte
 }
 
 init_sync :: proc(c: ^Client, allocator := context.allocator) -> (name_servers_err: Init_Error, hosts_err: Init_Error, ok: bool) {
-	context.user_ptr = &name_servers_err
-	init(c, &hosts_err, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {
-		(^Init_Error)(context.user_ptr)^ = name_servers_err
-		(^Init_Error)(user)^ = hosts_err
-	})
+	init(c, nil, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {})
 
 	for {
 		errno := nbio.tick()
 		if errno != nil {
-			ok = false
-			return
+			return c.name_servers_err, c.hosts_err, false
 		}
 
-		if name_servers_err != _INIT_ERROR_LOADING && hosts_err != _INIT_ERROR_LOADING {
-			ok = true
-			return
+		if c.name_servers_err != _INIT_ERROR_LOADING && c.hosts_err != _INIT_ERROR_LOADING {
+			return c.name_servers_err, c.hosts_err, true
 		}
 	}
 }
@@ -228,19 +222,6 @@ Address_Family :: enum {
 resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	log.debugf("resolving DNS for %q", hostname)
 
-	if cached, ok := &c.cache[hostname]; ok {
-		if cached.resolving {
-			log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
-			append(&cached.callbacks, Callback{cb, user, context})
-		} else {
-			log.debugf("got DNS of %q from cache", hostname)
-			cb(user, cached.record, cached.err)
-		}
-		return
-	}
-
-	log.debugf("%q not in cache", hostname)
-
 	for host in c.hosts {
 		if host.name != hostname {
 			continue
@@ -257,6 +238,19 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	}
 
 	log.debugf("%q not in hosts file", hostname)
+
+	if cached, ok := &c.cache[hostname]; ok {
+		if cached.resolving {
+			log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
+			append(&cached.callbacks, Callback{cb, user, context})
+		} else {
+			log.debugf("got DNS of %q from cache", hostname)
+			cb(user, cached.record, cached.err)
+		}
+		return
+	}
+
+	log.debugf("%q not in cache", hostname)
 
 	if len(c.name_servers) == 0 {
 		log.warn("no name servers to query for DNS records")
