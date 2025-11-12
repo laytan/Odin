@@ -6,6 +6,7 @@ import "base:intrinsics"
 
 import "core:container/pool"
 import "core:sync/chan"
+import "core:net"
 
 @(thread_local)
 _tls_event_loop: Event_Loop
@@ -75,4 +76,24 @@ _tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 	}
 
 	return __tick(l)
+}
+
+_listen_tcp :: proc(
+	l: ^Event_Loop,
+	endpoint: net.Endpoint,
+	backlog := 1000,
+) -> (
+	socket: TCP_Socket,
+	err: net.Network_Error,
+) {
+	any_socket := _create_socket(l, .IP4, .TCP) or_return
+	defer if err != nil { net.close(any_socket) }
+
+	net.set_option(any_socket, .Reuse_Address, true)
+
+	net.bind(any_socket, endpoint) or_return
+
+	socket = any_socket.(TCP_Socket)
+	_listen(socket, backlog) or_return
+	return
 }

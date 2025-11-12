@@ -37,6 +37,7 @@ Handle :: _Handle
 MAX_USER_ARGUMENTS :: 6
 
 Operation :: struct {
+	_impl:   _Operation,
 
 	_pool_link: ^Operation,
 
@@ -65,9 +66,6 @@ Operation :: struct {
 	type: Operation_Type,
 
 	user_data: [MAX_USER_ARGUMENTS + 1]rawptr,
-
-	// Implementation specifics, private.
-	_impl:   _Operation,
 }
 
 Operation_Type :: enum {

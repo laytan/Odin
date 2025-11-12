@@ -121,6 +121,17 @@ foreign ws2_32 {
 		lpOverlapped: LPWSAOVERLAPPED,
 		lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 	) -> c_int ---
+	WSASendTo :: proc(
+		s: SOCKET,
+		lpBuffers: LPWSABUF,
+		dwBufferCount: DWORD,
+		lpNumberOfBytesSent: LPDWORD,
+		dwFlags: DWORD,
+		lpTo: ^sockaddr,
+		iToLen: c_int,
+		lpOverlapped: LPWSAOVERLAPPED,
+		lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+	) -> c_int ---
 	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsarecv)
 	WSARecv :: proc(
 		s: SOCKET,
@@ -130,6 +141,17 @@ foreign ws2_32 {
 		lpFlags: LPDWORD,
 		lpOverlapped: LPWSAOVERLAPPED,
 		lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+	) -> c_int ---
+	WSARecvFrom :: proc(
+	s: SOCKET,
+	lpBuffers: LPWSABUF,
+	dwBufferCount: DWORD,
+	lpNumberOfBytesReceived: LPDWORD,
+	lpFlags: LPDWORD,
+	lpFrom: ^sockaddr,
+	lpFromLen: LPINT,
+	lpOverlapped: LPWSAOVERLAPPED,
+	lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
 	) -> c_int ---
 	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsasocketw)
 	WSASocketW :: proc(

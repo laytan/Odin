@@ -1,4 +1,5 @@
 #+private
+#+build ignore
 package nbio
 
 import "base:runtime"
@@ -11,168 +12,108 @@ import "core:time"
 
 import win "core:sys/windows"
 
-// TODO: we may want one iocp per application, and each threads calls GetQueuedblahblah on it.
-// Windows seems to have designed it for that use case.
-// BUT! I don't think we can then guarantee that a socket is "owned" by a thread, like the other impls do, is that a problem?
-
-_IO :: struct #no_copy {
-	iocp:            win.HANDLE,
-	allocator:       mem.Allocator,
-	timeouts:        [dynamic]^Completion,
-//	polls:           [dynamic]^Completion,
-//	_polls:          [dynamic]win.WSA_POLLFD,
-	polls:         	 #soa [dynamic]Poll,
-	completed:       queue.Queue(^Completion),
-	completion_pool: Pool,
-	io_pending:      int,
-}
-
-Poll :: struct {
-	fd: win.WSA_POLLFD,
-	completion: ^Completion,
-}
-
 TIMED_OUT :: rawptr(max(uintptr))
 REMOVED   :: rawptr(max(uintptr)-1)
 
-_Completion :: struct {
-	over:      win.OVERLAPPED,
-	ctx:       runtime.Context,
-	op:        Operation,
-	timeout:   ^Completion,
-	in_kernel: bool,
-}
-#assert(offset_of(Completion, over) == 0, "needs to be the first field to work")
-
-_Handle :: distinct uintptr
 
 INVALID_HANDLE :: Handle(win.INVALID_HANDLE)
 
 MAX_RW :: mem.Gigabyte
 
-Operation :: union {
-	Op_Accept,
-	Op_Close,
-	Op_Connect,
-	Op_Read,
-	Op_Recv,
-	Op_Send,
-	Op_Write,
-	Op_Timeout,
-	Op_Next_Tick,
-	Op_Poll,
-	Op_Remove,
-}
-
-Op_Accept :: struct {
-	callback: On_Accept,
-	socket:   win.SOCKET,
-	client:   win.SOCKET,
-	addr:     win.SOCKADDR_STORAGE_LH,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-}
-
-Op_Connect :: struct {
-	callback: On_Dial,
-	socket:   win.SOCKET,
-	addr:     win.SOCKADDR_STORAGE_LH,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-}
-
-Op_Close :: struct {
-	callback: On_Close,
-	fd:       Closable,
-}
-
-Op_Read :: struct {
-	callback: On_Read,
-	fd:       Handle,
-	offset:   int,
-	buf:      []byte,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-	all:      bool,
-	read:     int,
-	len:      int,
-}
-
-Op_Write :: struct {
-	callback: On_Write,
-	fd:       Handle,
-	offset:   int,
-	buf:      []byte,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-
-	written:  int,
-	len:      int,
-	all:      bool,
-}
-
-Op_Recv :: struct {
-	callback: On_Recv,
-	socket:   net.Any_Socket,
-	buf:      win.WSABUF,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-	all:      bool,
-	received: int,
-	len:      int,
-}
-
-Op_Send :: struct {
-	callback: On_Sent,
-	socket:   net.Any_Socket,
-	buf:      win.WSABUF,
-	pending:  bool, // TODO: reuse in_kernel of the completion?
-
-	len:      int,
-	sent:     int,
-	all:      bool,
-}
-
-Op_Timeout :: struct {
-	callback: On_Timeout,
-	expires:  time.Time,
-}
-
-Op_Next_Tick :: struct {
-	callback: On_Next_Tick,
-}
-
-Op_Poll :: struct {
-	callback: On_Poll,
-	idx:      int,
-	multi:    bool,
-}
-
-Op_Remove :: struct {}
-
-flush_timeouts :: proc(io: ^IO) -> (expires: Maybe(time.Duration)) {
-	curr: time.Time
-	timeout_len := len(io.timeouts)
-
-	// PERF: could use a faster clock, is getting time since program start fast?
-	if timeout_len > 0 { curr = _now(io) }
-
-	for i := 0; i < timeout_len; {
-		completion := io.timeouts[i]
-		op := &completion.op.(Op_Timeout)
-		cexpires := time.diff(curr, op.expires)
-
-		// Timeout done.
-		if (cexpires <= 0 || completion.timeout == (^Completion)(REMOVED)) {
-			ordered_remove(&io.timeouts, i) // TODO: ordered remove bad.
-			queue.push_back(&io.completed, completion)
-			timeout_len -= 1
-			continue
-		}
-
-		// Update minimum timeout.
-		exp, ok := expires.?
-		expires = min(exp, cexpires) if ok else cexpires
-
-		i += 1
-	}
-	return
-}
+//Operation :: union {
+//	Op_Accept,
+//	Op_Close,
+//	Op_Connect,
+//	Op_Read,
+//	Op_Recv,
+//	Op_Send,
+//	Op_Write,
+//	Op_Timeout,
+//	Op_Next_Tick,
+//	Op_Poll,
+//	Op_Remove,
+//}
+//
+//Op_Accept :: struct {
+//	callback: On_Accept,
+//	socket:   win.SOCKET,
+//	client:   win.SOCKET,
+//	addr:     win.SOCKADDR_STORAGE_LH,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//}
+//
+//Op_Connect :: struct {
+//	callback: On_Dial,
+//	socket:   win.SOCKET,
+//	addr:     win.SOCKADDR_STORAGE_LH,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//}
+//
+//Op_Close :: struct {
+//	callback: On_Close,
+//	fd:       Closable,
+//}
+//
+//Op_Read :: struct {
+//	callback: On_Read,
+//	fd:       Handle,
+//	offset:   int,
+//	buf:      []byte,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//	all:      bool,
+//	read:     int,
+//	len:      int,
+//}
+//
+//Op_Write :: struct {
+//	callback: On_Write,
+//	fd:       Handle,
+//	offset:   int,
+//	buf:      []byte,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//
+//	written:  int,
+//	len:      int,
+//	all:      bool,
+//}
+//
+//Op_Recv :: struct {
+//	callback: On_Recv,
+//	socket:   net.Any_Socket,
+//	buf:      win.WSABUF,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//	all:      bool,
+//	received: int,
+//	len:      int,
+//}
+//
+//Op_Send :: struct {
+//	callback: On_Sent,
+//	socket:   net.Any_Socket,
+//	buf:      win.WSABUF,
+//	pending:  bool, // TODO: reuse in_kernel of the completion?
+//
+//	len:      int,
+//	sent:     int,
+//	all:      bool,
+//}
+//
+//Op_Timeout :: struct {
+//	callback: On_Timeout,
+//	expires:  time.Time,
+//}
+//
+//Op_Next_Tick :: struct {
+//	callback: On_Next_Tick,
+//}
+//
+//Op_Poll :: struct {
+//	callback: On_Poll,
+//	idx:      int,
+//	multi:    bool,
+//}
+//
+//Op_Remove :: struct {}
 
 submit :: proc(io: ^IO, user: rawptr, op: Operation) -> ^Completion {
 	completion := pool_get(&io.completion_pool)

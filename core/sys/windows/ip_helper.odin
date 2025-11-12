@@ -217,6 +217,34 @@ NL_DAD_STATE :: enum i32 {
 	IpDadStatePreferred  = 4,
 }
 
+MAX_HOSTNAME_LEN    :: 128
+MAX_DOMAIN_NAME_LEN :: 128
+MAX_SCOPE_ID_LEN    :: 256
+
+IP_ADDRESS_STRING :: struct {
+	String: [4 * 4]c_char,
+}
+IP_MASK_STRING :: IP_ADDRESS_STRING
+
+IP_ADDR_STRING :: struct {
+	Next:      ^IP_ADDR_STRING,
+	IpAddress: IP_ADDRESS_STRING,
+	IpMask:    IP_MASK_STRING,
+	Context:   DWORD,
+}
+
+FIXED_INFO :: struct {
+	HostName:         [MAX_HOSTNAME_LEN + 4]c_char,
+	DomainName:       [MAX_DOMAIN_NAME_LEN + 4]c_char,
+	CurrentDnsServer: ^IP_ADDR_STRING,
+	DnsServerList:    IP_ADDR_STRING,
+	NodeType:         UINT,
+	ScopeId:          [MAX_SCOPE_ID_LEN + 4]c_char,
+	EnableRouting:    UINT,
+	EnableProxy:      UINT,
+	EnableDns:        UINT,
+}
+
 @(default_calling_convention = "system")
 foreign iphlpapi {
 	/*
@@ -231,4 +259,5 @@ foreign iphlpapi {
 		size:              ^u32,
 	) -> ULONG ---
 
+	GetNetworkParams :: proc (pFixedInfo: ^FIXED_INFO, pOutBufLen: PULONG) -> System_Error ---
 }
