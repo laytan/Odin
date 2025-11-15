@@ -10,6 +10,7 @@ URL :: struct {
 	host:   string,
 	path:   string,
 	query:  string,
+	hash:   string,
 }
 
 url_parse :: proc(raw: string) -> (url: URL) {
@@ -20,6 +21,12 @@ url_parse :: proc(raw: string) -> (url: URL) {
 	if i >= 0 {
 		url.scheme = s[:i]
 		s = s[i+3:]
+	}
+
+	i = strings.index(s, "#")
+	if i != -1 {
+		url.hash = s[i:]
+		s = s[:i]
 	}
 
 	i = strings.index(s, "?")

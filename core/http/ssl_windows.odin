@@ -298,7 +298,7 @@ native_ssl_implementation :: proc() -> Client_SSL {
 			connection := new(Schannel_Connection) // TODO:
 			connection.handle = client.handle
 			connection.socket = socket
-			connection.host   = win.utf8_to_wstring_alloc(string(host)) // TODO: allocator
+			connection.host   = win.utf8_to_wstring_alloc(string(host), context.allocator) // TODO: allocator
 
 			return SSL_Connection(connection)
 		},

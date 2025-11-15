@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 #+build !js
 #+private
 package http
@@ -47,8 +48,6 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 }
 
 _client_destroy :: proc(_: ^nbio.Operation, c: ^Client) {
-	context.allocator = c.allocator
-
 	for ep, &conns in c.conns {
 		#reverse for conn, i in conns {
 			switch conn.state {
@@ -56,7 +55,7 @@ _client_destroy :: proc(_: ^nbio.Operation, c: ^Client) {
 				log.debug("freeing connection")
 				strings.builder_destroy(&conn.buf)
 				scanner_destroy(&conn.scanner)
-				free(conn)
+				free(conn, c.allocator)
 				ordered_remove(&conns, i)
 			case .Connected:
 				log.debug("closing connection")
@@ -94,18 +93,17 @@ _client_destroy :: proc(_: ^nbio.Operation, c: ^Client) {
 }
 
 _response_destroy :: proc(c: ^Client, res: Client_Response) {
-	context.allocator = c.allocator
 	res := res
 
 	iter := headers_iterator(&res.headers)
 	for k, v in headers_next(&iter) {
-		delete(k)
-		delete(v)
+		delete(k, c.allocator)
+		delete(v, c.allocator)
 	}
 	headers_destroy(&res.headers)
 
 	for cookie in res.cookies {
-		delete(cookie.name)
+		delete(cookie.name, c.allocator)
 	}
 	delete(res.cookies)
 
@@ -143,8 +141,7 @@ In_Flight :: struct {
 }
 
 in_flight_destroy :: proc(r: ^In_Flight) {
-	context.allocator = r.c.allocator
-	free(r)
+	free(r, r.c.allocator)
 }
 
 @(private="file")
@@ -161,7 +158,6 @@ Client_Connection :: struct {
 }
 
 client_connection_destroy :: proc(c: ^Client, conn: ^Client_Connection) {
-	context.allocator = c.allocator
 	conn.state = .Closing
 
 	if conn.ssl != nil {
@@ -189,7 +185,7 @@ client_connection_destroy :: proc(c: ^Client, conn: ^Client_Connection) {
 		strings.builder_destroy(&conn.buf)
 		scanner_destroy(&conn.scanner)
 		headers_destroy(&conn.headers)
-		free(conn)
+		free(conn, c.allocator)
 	})
 }
 
@@ -273,13 +269,9 @@ _client_request_on :: proc(r: ^In_Flight) {
 		log.debugf("DNS of %v resolved to %v", r.url, r.ep)
 
 		get_connection: {
-			context.allocator = r.c.allocator
-
-			// TODO: map_entry
-			conns, has_conns := &r.c.conns[r.ep]
-			if !has_conns {
-				conns = map_insert(&r.c.conns, r.ep, make([dynamic]^Client_Connection))
-			}
+			// TODO: err
+			_, conns, _, err := map_entry(&r.c.conns, r.ep)
+			conns.allocator = r.c.allocator
 
 			for conn in conns {
 				// NOTE: might want other states too.
@@ -289,7 +281,7 @@ _client_request_on :: proc(r: ^In_Flight) {
 				}
 			}
 
-			r.conn = new(Client_Connection)
+			r.conn = new(Client_Connection, r.c.allocator)
 			r.conn.ep = r.ep
 			append(conns, r.conn)
 		}
@@ -339,8 +331,9 @@ _client_request_on :: proc(r: ^In_Flight) {
 				}
 
 				host := url_parse(r.url).host
+				// TODO: just pass string and clone in client_ssl
 				chost := strings.clone_to_cstring(host, r.c.allocator)
-				defer delete(chost)
+				defer delete(chost, r.c.allocator)
 				r.conn.ssl = client_ssl.connection_create(r.c.ssl, op.dial.socket, chost)
 
 				ssl_connect(nil, r)
@@ -487,9 +480,9 @@ _client_request_on :: proc(r: ^In_Flight) {
 	}
 
 	send_https_request :: proc(r: ^In_Flight) {
-		ssl_write_req(nil, r)
-
 		log.debugf("Sending HTTPS request:\n%v%v", string(r.conn.buf.buf[:]), string(r.body))
+
+		ssl_write_req(nil, r)
 
 		ssl_write_req :: proc(op: ^nbio.Operation, r: ^In_Flight) {
 			// TODO: handle error.
@@ -572,7 +565,7 @@ _client_request_on :: proc(r: ^In_Flight) {
 
 		r.conn._scanner = &r.conn.scanner
 		scanner_reset(&r.conn.scanner)
-		scanner_init(&r.conn.scanner, r, scanner_recv)
+		scanner_init(&r.conn.scanner, r, scanner_recv, r.c.allocator)
 
 		r.conn.will_close = false
 		// r.conn._body_ok = nil // TODO

@@ -183,6 +183,7 @@ remove :: proc(target: ^Operation) {
 		return
 	}
 
+	// TOOD: should this be allowed?
 	if target.l != &_tls_event_loop {
 		panic("nbio.remove called on different thread")
 	}

@@ -158,14 +158,10 @@ _destroy :: proc(l: ^Event_Loop) {
 __tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 
 	flush_timeouts :: proc(l: ^Event_Loop) -> (expires: Maybe(time.Duration)) {
-		curr: time.Time
+		curr := now()
 		timeout_len := len(l.timeouts)
-
-		// PERF: could use a faster clock, is getting time since program start fast?
-		if timeout_len > 0 { curr = now() }
-
 		for i := 0; i < timeout_len; {
-			operation := l.timeouts[i]
+			#no_bounds_check operation := l.timeouts[i]
 			cexpires := time.diff(curr, operation.timeout._impl.expires)
 
 			removed := operation._impl.timeout == (^Operation)(REMOVED)
@@ -399,7 +395,12 @@ _exec :: proc(op: ^Operation) {
 	assert(op.l == &_tls_event_loop)
 	#partial switch op.type {
 	case .Timeout:
-		append(&op.l.timeouts, op)
+		if op.timeout.duration == 0 {
+			queue.push_back(&op.l.completed, op)
+		} else {
+			op.timeout._impl.expires = time.time_add(now(), op.timeout.duration)
+			append(&op.l.timeouts, op)
+		}
 	case .Poll:
 		winevent: win.c_short
 		if .Read  in op.poll.events { winevent |= win.POLLRDNORM }

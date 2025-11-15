@@ -1,4 +1,5 @@
 // A fully non-blocking DNS client with TTL caching.
+#+vet explicit-allocators
 package dns
 
 import "base:runtime"
@@ -56,7 +57,10 @@ Cache_Entry :: struct {
 	record:    Record,
 	resolving: bool,
 	err:       net.Network_Error,
-	callbacks: [dynamic]Callback,
+	callbacks: struct {
+		inline:   Callback,
+		overflow: [dynamic]Callback,
+	},
 	evictor:   ^nbio.Operation,
 }
 
@@ -91,7 +95,7 @@ init :: proc(c: ^Client, user_data: rawptr, on_init: On_Init, allocator := conte
 }
 
 init_sync :: proc(c: ^Client, allocator := context.allocator) -> (name_servers_err: Init_Error, hosts_err: Init_Error, ok: bool) {
-	init(c, nil, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {})
+	init(c, nil, proc(c: ^Client, user: rawptr, name_servers_err: Init_Error, hosts_err: Init_Error) {}, allocator)
 
 	for {
 		errno := nbio.tick()
@@ -151,6 +155,7 @@ cache_clear :: proc(c: ^Client) {
 // Removes the entry (if it exists) for the given hostname from the DNS cache.
 cache_evict :: proc(c: ^Client, hostname: string) {
 	if entry, ok := c.cache[hostname]; ok {
+		assert(!entry.resolving)
 		log.debugf("DNS of %q has been evicted", hostname)
 		delete_key(&c.cache, hostname)
 		delete(hostname, c.allocator)
@@ -162,12 +167,18 @@ cache_evict :: proc(c: ^Client, hostname: string) {
 // NOTE: this is done "psuedo-random".
 cache_shrink :: proc(c: ^Client, max_entries: int) {
 	to_remove := max(0, len(c.cache) - max_entries)
-	for k in c.cache {
+	for hostname, entry in c.cache {
 		if to_remove <= 0 {
 			break
 		}
 
-		cache_evict(c, k)
+		if entry.resolving {
+			continue
+		}
+
+		delete_key(&c.cache, hostname)
+		delete(hostname, c.allocator)
+		nbio.remove(entry.evictor)
 
 		to_remove -= 1
 	}
@@ -193,6 +204,8 @@ Address_Family :: enum {
 	IP4,
 	IP6,
 }
+
+// TODO: allocator for individual requests
 
 // Resolve the given hostname to an IP4 or IP6 address.
 //
@@ -222,6 +235,11 @@ Address_Family :: enum {
 resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 	log.debugf("resolving DNS for %q", hostname)
 
+	if hostname == "" {
+		cb(user, {}, .Invalid_Hostname_Error)
+		return
+	}
+
 	for host in c.hosts {
 		if host.name != hostname {
 			continue
@@ -239,10 +257,17 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 	log.debugf("%q not in hosts file", hostname)
 
-	if cached, ok := &c.cache[hostname]; ok {
+	if len(c.name_servers) == 0 {
+		log.warn("no name servers to query for DNS records")
+		cb(user, {}, .Invalid_Resolv_Config_Error)
+		return
+	}
+
+	cache_hostname, cached, new_entry, cache_err := map_entry(&c.cache, hostname)
+	if cache_err == nil && !new_entry {
 		if cached.resolving {
 			log.debugf("already resolving DNS of %q, adding to callback queue", hostname)
-			append(&cached.callbacks, Callback{cb, user, context})
+			append(&cached.callbacks.overflow, Callback{cb, user, context})
 		} else {
 			log.debugf("got DNS of %q from cache", hostname)
 			cb(user, cached.record, cached.err)
@@ -250,36 +275,38 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		return
 	}
 
-	log.debugf("%q not in cache", hostname)
+	log.debugf("%q not in cache, querying name servers", hostname)
 
-	if len(c.name_servers) == 0 {
-		log.warn("no name servers to query for DNS records")
+	host, clone_host_err := strings.clone(hostname, c.allocator)
+	if clone_host_err != nil {
+		delete_key(&c.cache, hostname)
 		cb(user, {}, .Unable_To_Resolve)
 		return
 	}
 
-	log.debug("querying name servers for IP4 records")
+	if cache_err == nil {
+		cache_hostname^ = host
 
-	host := strings.clone(hostname, c.allocator)
-
-	entry := map_insert(&c.cache, host, Cache_Entry{ resolving = true })
-	entry.callbacks = make([dynamic]Callback, 1, c.allocator)
-	entry.callbacks[0] = {cb, user, context}
+		cached.resolving = true
+		cached.callbacks.inline = {cb, user, context}
+		cached.callbacks.overflow.allocator = c.allocator
+	}
 
 	req := new(Request, c.allocator)
 	req.hostname = host
 	req.family   = .IP4
+	req.client = c
+	req.name_server = -1
 
 	packet, err := net.make_dns_packet(req.packet[:], 0, hostname, .IP4)
 	if err != nil {
-		free(req, req.client.allocator)
+		delete_key(&c.cache, host)
+		delete(host, c.allocator)
+		free(req, c.allocator)
 		cb(user, {}, err)
 		return
 	}
 	req.packet_len = len(packet)
-
-	req.client = c
-	req.name_server = -1
 
 	next(req, nil)
 
@@ -309,16 +336,10 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 				entry.resolving = false
 				log.warn("no DNS results gotten from IP6 either, calling callbacks with error:", entry.err)
 
-				// Evict the cached error after a minute.
+				do_callbacks(entry)
+				// NOTE: cache the error, user can `cache_evict` to remove and try the resolve again.
 				nbio.timeout_poly2(time.Minute, req.client, req.hostname, evict_record)
-
 				free(req, req.client.allocator)
-
-				for cb in entry.callbacks {
-					context = cb.ctx
-					cb.cb(cb.ud, {}, entry.err)
-				}
-				delete(entry.callbacks)
 			case:
 				unreachable()
 			}
@@ -332,13 +353,13 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 		sock, oerr := nbio.create_socket(family, .UDP)
 		if oerr != nil {
-			log.warnf("could not open UDP socket to name server: %v", oerr)
+			log.warnf("could not open UDP socket: %v", oerr)
 			next(req, oerr)
 			return
 		}
 		req.socket = sock.(net.UDP_Socket)
 
-		nbio.send_poly(req.socket, req.packet[:req.packet_len], req, on_sent, ns)
+		nbio.send_poly(req.socket, req.packet[:req.packet_len], req, on_sent, ns, timeout=DNS_SERVER_TIMEOUT)
 	}
 
 	on_record :: proc(req: ^Request, rec: Record) {
@@ -346,27 +367,39 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		nbio.close(req.socket)
 
 		entry := &req.client.cache[req.hostname]
+		assert(entry != nil)
 		entry.resolving = false
 		entry.record = rec
 
 		expires := time.Second*time.Duration(clamp(rec.ttl_secs, 0, MAX_TTL_SECONDS))
 		entry.evictor = nbio.timeout_poly2(expires, req.client, req.hostname, evict_record)
 
-		for cb in entry.callbacks {
-			context = cb.ctx
-			cb.cb(cb.ud, rec, nil)
-		}
-
 		free(req, req.client.allocator)
-		delete(entry.callbacks)
+		do_callbacks(entry)
 	}
 
-	evict_record :: proc(_: ^nbio.Operation, c: ^Client, hostname: string) {
+	evict_record :: proc(op: ^nbio.Operation, c: ^Client, hostname: string) {
+		assert(op != nil, "use cache_evict")
 		if entry, ok := c.cache[hostname]; ok {
+			assert(!entry.resolving)
+			assert(entry.evictor == op)
 			log.debugf("DNS TTL of %vs from %q has expired", entry.record.ttl_secs, hostname)
 			delete_key(&c.cache, hostname)
 			delete(hostname, c.allocator)
 		}
+	}
+
+	do_callbacks :: proc(entry: ^Cache_Entry) {
+		{
+			context = entry.callbacks.inline.ctx
+			entry.callbacks.inline.cb(entry.callbacks.inline.ud, entry.record, entry.err)
+			for cb in entry.callbacks.overflow {
+				context = cb.ctx
+				cb.cb(cb.ud, entry.record, entry.err)
+			}
+		}
+		delete(entry.callbacks.overflow)
+		entry.callbacks = {}
 	}
 
 	on_sent :: proc(op: ^nbio.Operation, req: ^Request) {
@@ -387,7 +420,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		}
 
 		if op.recv.received == 0 {
-			next(req, nil)
+			next(req, net.UDP_Recv_Error.Connection_Refused)
 			return
 		}
 
@@ -396,20 +429,20 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 		HEADER_SIZE_BYTES :: 12
 		if len(response) < HEADER_SIZE_BYTES {
-			next(req, nil)
+			next(req, .Server_Error)
 			return
 		}
 
 		dns_hdr_chunks := mem.slice_data_cast([]u16be, response[:HEADER_SIZE_BYTES])
 		hdr := net.unpack_dns_header(dns_hdr_chunks[0], dns_hdr_chunks[1])
 		if !hdr.is_response {
-			next(req, nil)
+			next(req, .Server_Error)
 			return
 		}
 
 		question_count := int(dns_hdr_chunks[2])
 		if question_count != 1 {
-			next(req, nil)
+			next(req, .Server_Error)
 			return
 		}
 
@@ -422,7 +455,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 		dq_sz :: 4
 		hn_sz, hs_ok := net.skip_hostname(response, cur_idx)
 		if !hs_ok {
-			next(req, nil)
+			next(req, .Server_Error)
 			return
 		}
 		cur_idx += hn_sz + dq_sz
@@ -434,7 +467,7 @@ resolve :: proc(c: ^Client, hostname: string, user: rawptr, cb: On_Resolve) {
 
 			family, rec, ok := parse_record(response, &cur_idx)
 			if !ok {
-				next(req, nil)
+				next(req, .Server_Error)
 				return
 			}
 
