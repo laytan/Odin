@@ -41,7 +41,7 @@ _client_init :: proc(c: ^Client, allocator := context.allocator) -> bool {
 		assert(client_ssl.send != nil)
 		assert(client_ssl.recv != nil)
 
-		c.ssl = client_ssl.client_create()
+		c.ssl = client_ssl.client_create(c.allocator)
 	}
 
 	return true
@@ -222,15 +222,15 @@ _client_request_on :: proc(r: ^In_Flight) {
 	}
 
 	switch t in host_or_endpoint {
-    case net.Endpoint:
+	case net.Endpoint:
 		r.ep.net = t
 		on_dns_resolve(r, { t.address, max(u32) }, nil)
-    case net.Host:
+	case net.Host:
 		r.ep.port = t.port
 		dns.resolve(&r.c.dnsc, t.hostname, r, on_dns_resolve)
-    case:
+	case:
 		unreachable()
-    }
+	}
 
 	on_dns_resolve :: proc(r: rawptr, record: dns.Record, err: net.Network_Error) {
 		r := (^In_Flight)(r)
@@ -331,10 +331,7 @@ _client_request_on :: proc(r: ^In_Flight) {
 				}
 
 				host := url_parse(r.url).host
-				// TODO: just pass string and clone in client_ssl
-				chost := strings.clone_to_cstring(host, r.c.allocator)
-				defer delete(chost, r.c.allocator)
-				r.conn.ssl = client_ssl.connection_create(r.c.ssl, op.dial.socket, chost)
+				r.conn.ssl = client_ssl.connection_create(r.c.ssl, op.dial.socket, host, r.c.allocator)
 
 				ssl_connect(nil, r)
 
@@ -408,7 +405,7 @@ _client_request_on :: proc(r: ^In_Flight) {
 			}
 
 			if !headers_has(r.headers, "user-agent") {
-				ws(buf, "user-agent: odin-http\r\n")
+				ws(buf, "user-agent: Odin/" + ODIN_VERSION + "\r\n")
 			}
 
 			if !headers_has(r.headers, "host") {
@@ -577,7 +574,6 @@ _client_request_on :: proc(r: ^In_Flight) {
 
 			switch r.ep.scheme {
 			case .HTTP:
-				log.debug("executing non-SSL read")
 				nbio.recv_poly2(
 					r.conn.socket, buf, s, callback,
 					proc(op: ^nbio.Operation, s: ^Scanner, callback: On_Scanner_Read) {
@@ -607,7 +603,6 @@ _client_request_on :: proc(r: ^In_Flight) {
 					receiving: for {
 						switch n, res := client_ssl.recv(r.conn.ssl, buf[total:]); res {
 						case .None:
-							// log.debugf("Successfully received %m/%m from the connection", n, len(buf))
 							total += n
 							if total < len(buf) {
 								continue receiving
@@ -615,7 +610,6 @@ _client_request_on :: proc(r: ^In_Flight) {
 							r.recursion += 1
 							callback(&r.conn.scanner, total, nil)
 						case .Want_Read:
-							// log.debug("SSL read want read")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {
@@ -623,7 +617,6 @@ _client_request_on :: proc(r: ^In_Flight) {
 								nbio.poll_poly3(r.conn.socket, {.Read}, r, buf, callback, ssl_recv)
 							}
 						case .Want_Write:
-							// log.debug("SSL read want write")
 							if total > 0 {
 								callback(&r.conn.scanner, total, nil)
 							} else {

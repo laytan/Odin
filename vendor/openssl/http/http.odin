@@ -1,6 +1,9 @@
+#+vet explicit-allocators
 #+build !js
 package openssl_http
 
+import      "core:strings"
+import      "core:mem"
 import      "core:log"
 import      "core:http"
 import      "core:net"
@@ -23,7 +26,7 @@ client_implementation :: proc() -> http.Client_SSL {
 	// ossl.ERR_print_errors_fp(libc.stderr)
 
 	return {
-		client_create = proc() -> http.SSL_Client {
+		client_create = proc(_: mem.Allocator) -> http.SSL_Client {
 			method := ossl.TLS_client_method()
 			if method == nil { return nil }
 
@@ -35,14 +38,16 @@ client_implementation :: proc() -> http.Client_SSL {
 		client_destroy = proc(c: http.SSL_Client) {
 			ossl.SSL_CTX_free((ossl.SSL_CTX)(c))
 		},
-		connection_create = proc(c: http.SSL_Client, socket: net.TCP_Socket, host: cstring) -> http.SSL_Connection {
+		connection_create = proc(c: http.SSL_Client, socket: net.TCP_Socket, host: string, allocator: mem.Allocator) -> http.SSL_Connection {
 			conn := ossl.SSL_new((ossl.SSL_CTX)(c))
 			if conn == nil { return nil }
-			free(nil)
+
+			chost, err := strings.clone_to_cstring(host, allocator)
+			if err != nil { return nil }
+			defer delete(chost, allocator)
 
 			ret: i32
-
-			ret = ossl.SSL_set_tlsext_host_name(conn, host)
+			ret = ossl.SSL_set_tlsext_host_name(conn, chost)
 			if ret != 1 { return nil }
 
 			ret = ossl.SSL_set_fd(conn, i32(socket))

@@ -1,5 +1,6 @@
 package http
 
+import "core:mem"
 import "core:net"
 
 @(private)
@@ -23,9 +24,9 @@ SSL_Result :: enum {
 
 Client_SSL :: struct {
 	user_data:          rawptr,
-	client_create:      proc() -> SSL_Client,
+	client_create:      proc(allocator: mem.Allocator) -> SSL_Client,
 	client_destroy:     proc(client: SSL_Client),
-	connection_create:  proc(client: SSL_Client, socket: net.TCP_Socket, host: cstring) -> SSL_Connection,
+	connection_create:  proc(client: SSL_Client, socket: net.TCP_Socket, host: string, allocator: mem.Allocator) -> SSL_Connection,
 	connection_destroy: proc(client: SSL_Client, connection: SSL_Connection),
 	connect:            proc(c: SSL_Connection) -> SSL_Result,
 	send:               proc(c: SSL_Connection, data: []byte) -> (int, SSL_Result),

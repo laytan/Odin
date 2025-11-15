@@ -310,6 +310,8 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			return
 		}
 
+		s.max_length -= len(size_line)
+
 		// If there is a semicolon, discard everything after it,
 		// that would be chunk extensions which we currently have no interest in.
 		if semi := strings.index_byte(size_line, ';'); semi > -1 {
@@ -333,12 +335,10 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			_body_do_cbs(s.sub, nil, .Exceeds_Max_Size)
 			return
 		}
-		s.max_length -= size
 
 		s.sub._scanner.max_token_size = size
-
-		s.sub._scanner.split      = scan_whatever
-		s.sub._scanner.split_data = s.sub
+		s.sub._scanner.split          = scan_whatever
+		s.sub._scanner.split_data     = s.sub
 
 		scanner_scan(s.sub._scanner, s, on_body_content)
 		on_body_content :: proc(s: ^Chunked_State, token: string, err: bufio.Scanner_Error) {
@@ -348,7 +348,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			}
 
 			s.max_length -= len(token)
-			s.sub._scanner.max_token_size -= s.max_length
+			s.sub._scanner.max_token_size -= len(token)
 			assert(s.sub._scanner.max_token_size >= 0)
 
 			_body_do_cbs(s.sub, token, .Partial)
@@ -372,9 +372,6 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 			}
 			// TODO: an actual error.
 			assert(len(token) == 0)
-
-			s.max_length -= len(token)
-			s.sub._scanner.max_token_size = s.max_length
 
 			scanner_scan(s.sub._scanner, s, on_scan)
 		}
