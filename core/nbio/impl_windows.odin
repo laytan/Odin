@@ -25,6 +25,8 @@ MAX_RW :: mem.Gigabyte
 // Windows seems to have designed it for that use case.
 // BUT! I don't think we can then guarantee that a socket is "owned" by a thread, like the other impls do, is that a problem?
 
+// TODO: handle operation timeouts.
+
 @(private="package")
 _Event_Loop :: struct /* #no_copy */ {
 	iocp:       win.HANDLE,
@@ -58,7 +60,7 @@ _Close :: struct {}
 
 @(private="package")
 _Dial :: struct {
-	addr:    win.SOCKADDR_STORAGE_LH,
+//	addr:    win.SOCKADDR_STORAGE_LH,
 	pending: bool,
 }
 
@@ -94,6 +96,7 @@ _Timeout :: struct {
 _Poll :: struct {
 	fd:        win.WSA_POLLFD,
 	operation: ^Operation,
+//	ticks:     int,
 }
 
 @(private="package")
@@ -165,10 +168,12 @@ __tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 			operation := l.timeouts[i]
 			cexpires := time.diff(curr, operation.timeout._impl.expires)
 
-			// Timeout done.
-			if (cexpires <= 0 || operation._impl.timeout == (^Operation)(REMOVED)) {
-				ordered_remove(&l.timeouts, i) // TODO: ordered remove bad.
+			removed := operation._impl.timeout == (^Operation)(REMOVED)
+			done    := cexpires <= 0
+			if removed { assert(operation._impl.in_kernel == false) }
+			if removed || done {
 				queue.push_back(&l.completed, operation)
+				ordered_remove(&l.timeouts, i) // TODO: ordered remove bad.
 				timeout_len -= 1
 				continue
 			}
@@ -263,6 +268,20 @@ __tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 
 			op.recv.err = err
 			op.cb(op)
+		case .Dial:
+			err := dial_callback(op)
+			if wsa_err_incomplete(err) {
+				op.l.io_pending += 1
+				return
+			}
+
+			if err != nil { win.closesocket(win.SOCKET(op.dial.socket)) }
+
+			op.dial.err = err
+			op.cb(op)
+		case .Timeout:
+			op.cb(op)
+		case .Poll: unreachable()
 		case:
 			fmt.panicf("unimplemented: %v", op.type)
 		}
@@ -289,19 +308,31 @@ __tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 
 		if len(l.polls) > 0 {
 			ret := win.WSAPoll(l.polls.fd, u32(min(int(max(u32)), len(l.polls))), i32(wait_ms))
+			assert(ret != win.SOCKET_ERROR) // TODO:
 
 			if ret > 0 {
 				#reverse for &poll, i in l.polls {
 					operation := poll.operation
+					assert(operation.type == .Poll)
+					assert(poll.fd.fd != {})
+					assert(poll.fd.events != {})
 					if poll.fd.revents != 0 {
 						context = operation.ctx
 
-						res: Poll_Result
-						if poll.fd.revents & win.POLLERR|win.POLLHUP > 0 {
-							res = .Error
+						if poll.fd.revents & win.POLLERR > 0 {
+							operation.poll.result = .Error
 						} else if poll.fd.revents & win.POLLNVAL > 0 {
-							res = .Invalid_Argument
+							operation.poll.result = .Invalid_Argument
+						} else {
+							if poll.fd.revents & win.POLLWRNORM > 0 {
+								operation.poll.result_events += {.Write}
+							}
+							if poll.fd.revents & win.POLLRDNORM > 0 {
+								operation.poll.result_events += {.Read}
+							}
 						}
+
+						// TODO: should we handle POLLHUP as an error?: A stream-oriented connection was either disconnected or aborted.
 
 						operation.cb(operation)
 
@@ -366,7 +397,24 @@ __tick :: proc(l: ^Event_Loop) -> (err: General_Error) {
 @(private="package")
 _exec :: proc(op: ^Operation) {
 	assert(op.l == &_tls_event_loop)
-	queue.push_back(&op.l.completed, op)
+	#partial switch op.type {
+	case .Timeout:
+		append(&op.l.timeouts, op)
+	case .Poll:
+		winevent: win.c_short
+		if .Read  in op.poll.events { winevent |= win.POLLRDNORM }
+		if .Write in op.poll.events { winevent |= win.POLLWRNORM }
+
+		append(&op.l.polls, _Poll{
+			fd = win.WSA_POLLFD {
+				fd     = win.SOCKET(net.any_socket_to_socket(op.poll.socket)),
+				events = winevent,
+			},
+			operation = op,
+		})
+	case:
+		queue.push_back(&op.l.completed, op)
+	}
 }
 
 // Basically a copy of `os.open`, where a flag is added to signal async io, and creation of IOCP.
@@ -490,53 +538,51 @@ _create_socket :: proc(
 	return
 }
 
+// TODO: figure out what happens to the operation when a cancel is done
 @(private="package")
 _remove :: proc(target: ^Operation) {
-	unimplemented()
-//	target.timeout = (^Completion)(TIMED_OUT)
-//
-//	#partial switch &op in target.op {
-//	case Op_Poll:
-//	// TODO: inneficient.
-//		for poll, i in io.polls {
-//			if poll.completion == target {
-//				unordered_remove_soa(&io.polls, i)
-//				break
-//			}
-//		}
-//		return
-//	case Op_Timeout, Op_Next_Tick:
-//		return
-//	case Op_Remove:
-//		panic("can't remove a remove")
-//
-//	// TODO: with timeout_completion we need to remove the target.
-//	}
-//
-//	if target.in_kernel {
-//		handle: win.HANDLE
-//		switch &op in target.op {
-//		case Op_Accept:          handle = win.HANDLE(op.socket)
-//		case Op_Close:
-//			switch fd in op.fd {
-//			case net.TCP_Socket: handle = win.HANDLE(uintptr(fd))
-//			case net.UDP_Socket: handle = win.HANDLE(uintptr(fd))
-//			case net.Socket:     handle = win.HANDLE(uintptr(fd))
-//			case Handle:         handle = win.HANDLE(uintptr(fd))
-//			}
-//		case Op_Connect:         handle = win.HANDLE(op.socket)
-//		case Op_Read:            handle = win.HANDLE(op.fd)
-//		case Op_Write:           handle = win.HANDLE(op.fd)
-//		case Op_Recv:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(op.socket)))
-//		case Op_Send:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(op.socket)))
-//		case Op_Timeout,
-//		Op_Next_Tick,
-//		Op_Poll,
-//		Op_Remove: unreachable()
-//		}
-//		ok := win.CancelIoEx(handle, &target.over)
-//		assert(ok == true) // TODO
-//	}
+	target._impl.timeout = (^Operation)(REMOVED)
+
+	#partial switch target.type {
+	case .Poll:
+		// TODO: inneficient.
+		for poll, i in target.l.polls {
+			if poll.operation == target {
+				unordered_remove_soa(&target.l.polls, i)
+				break
+			}
+		}
+		return
+	case .Timeout:
+		return
+	case ._Remove:
+		panic("can't remove a removal")
+	}
+
+	if target._impl.in_kernel {
+		handle: win.HANDLE
+		switch target.type {
+		case .Accept:          handle = win.HANDLE(uintptr(target.accept.socket))
+		case .Close:
+			switch fd in target.close.subject {
+			case net.TCP_Socket: handle = win.HANDLE(uintptr(fd))
+			case net.UDP_Socket: handle = win.HANDLE(uintptr(fd))
+			case Handle:         handle = win.HANDLE(uintptr(fd))
+			}
+		case .Dial:            handle = win.HANDLE(uintptr(target.dial.socket))
+		case .Read:            handle = win.HANDLE(target.read.fd)
+		case .Write:           handle = win.HANDLE(target.write.fd)
+		case .Recv:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(target.recv.socket)))
+		case .Send:            handle = win.HANDLE(uintptr(net.any_socket_to_socket(target.send.socket)))
+
+		case .Timeout, .Poll, ._Remove:
+			unreachable() // handled above
+		case .Send_File, ._Splice, ._Link_Timeout:
+			unimplemented()
+		}
+		ok := win.CancelIoEx(handle, &target._impl.over)
+		assert(ok == true) // TODO
+	}
 }
 
 _prepare_socket :: proc(l: ^Event_Loop, socket: net.Any_Socket) -> net.Network_Error {
@@ -573,6 +619,52 @@ _prepare_socket :: proc(l: ^Event_Loop, socket: net.Any_Socket) -> net.Network_E
 //	if ep.port == 0 {
 //		return nil, net.Dial_Error.Port_Required
 //	}
+
+SO_UPDATE_ACCEPT_CONTEXT :: 28683
+
+WSAID_CONNECTEX :: win.GUID{0x25a207b9, 0xddf3, 0x4660, [8]win.BYTE{0x8e, 0xe9, 0x76, 0xe5, 0x8c, 0x74, 0x06, 0x3e}}
+
+LPFN_CONNECTEX :: #type proc "stdcall" (
+	socket: win.SOCKET,
+	addr: ^win.SOCKADDR_STORAGE_LH,
+	namelen: win.c_int,
+	send_buf: win.PVOID,
+	send_data_len: win.DWORD,
+	bytes_sent: win.LPDWORD,
+	overlapped: win.LPOVERLAPPED,
+) -> win.BOOL
+
+dial_callback :: proc(op: ^Operation) -> net.Network_Error {
+	transferred: win.DWORD
+	ok: win.BOOL
+	if op.dial._impl.pending {
+		flags: win.DWORD
+		ok = win.WSAGetOverlappedResult(win.SOCKET(op.dial.socket), &op._impl.over, &transferred, win.FALSE, &flags)
+	} else {
+		op.dial._impl.pending = true
+
+		osocket := _create_socket(op.l, .IP4, .TCP) or_return
+
+		op.dial.socket = osocket.(net.TCP_Socket)
+
+		sockaddr := endpoint_to_sockaddr({net.IP4_Any, 0})
+		res := win.bind(win.SOCKET(op.dial.socket), &sockaddr, size_of(sockaddr))
+		if res < 0 { return net._bind_error() }
+
+		addr := endpoint_to_sockaddr(op.dial.endpoint)
+
+		connect_ex: LPFN_CONNECTEX
+		load_socket_fn(win.SOCKET(op.dial.socket), WSAID_CONNECTEX, &connect_ex)
+		// TODO: size_of(win.sockaddr_in6) when ip6.
+		ok = connect_ex(win.SOCKET(op.dial.socket), &addr, size_of(win.sockaddr_in) + 16, nil, 0, &transferred, &op._impl.over)
+	}
+	if !ok { return net._dial_error() }
+
+	// enables getsockopt, setsockopt, getsockname, getpeername.
+	win.setsockopt(win.SOCKET(op.dial.socket), win.SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, nil, 0)
+	return nil
+}
+
 //
 //	return submit(io, user, Op_Connect{
 //		callback = callback,
@@ -922,4 +1014,23 @@ endpoint_to_sockaddr :: proc(ep: net.Endpoint) -> (sockaddr: win.SOCKADDR_STORAG
 		return
 	}
 	unreachable()
+}
+
+// TODO: loading this takes a overlapped parameter, maybe we can do this async?
+load_socket_fn :: proc(subject: win.SOCKET, guid: win.GUID, fn: ^$T) {
+	guid := guid
+	bytes: u32
+	rc := win.WSAIoctl(
+		subject,
+		win.SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&guid,
+		size_of(guid),
+		fn,
+		size_of(fn),
+		&bytes,
+		nil,
+		nil,
+	)
+	assert(rc != win.SOCKET_ERROR)
+	assert(bytes == size_of(fn^))
 }
