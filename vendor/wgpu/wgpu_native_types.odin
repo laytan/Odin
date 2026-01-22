@@ -2,8 +2,8 @@ package wgpu
 
 import "base:runtime"
 
-BINDINGS_VERSION        :: [4]u8{27, 0, 2, 0}
-BINDINGS_VERSION_STRING :: "27.0.2.0"
+BINDINGS_VERSION        :: [4]u8{27, 0, 4, 0}
+BINDINGS_VERSION_STRING :: "27.0.4.0"
 
 LogLevel :: enum i32 {
 	Off,
@@ -72,6 +72,12 @@ GLFenceBehaviour :: enum i32 {
 	AutoFinish,
 }
 
+Dx12SwapchainKind :: enum i32 {
+	Undefined,
+	DxgiFromHwnd,
+	DxgiFromVisual,
+}
+
 InstanceExtras :: struct {
 	using chain: ChainedStruct,
 	backends: InstanceBackendFlags,
@@ -81,6 +87,7 @@ InstanceExtras :: struct {
 	glFenceBehaviour: GLFenceBehaviour,
 	dxcPath: StringView,
 	dcxMaxShaderModel: DxcMaxShaderModel,
+	dx12PresentationSystem: Dx12SwapchainKind,
 	budgetForDeviceCreation: ^u8,
 	budgetForDeviceLoss: ^u8,
 }
