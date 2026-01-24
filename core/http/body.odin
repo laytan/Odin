@@ -46,6 +46,8 @@ _Cb :: struct {
 	user_data: rawptr,
 }
 
+// TODO: streamable
+
 /*
 Retrieves the request's body.
 

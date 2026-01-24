@@ -427,6 +427,8 @@ loop_conn :: #force_inline proc(l: ^Loop) -> ^Connection {
 Context :: struct {
 	req:  ^Request,
 	res:  ^Response,
+	// Maybe just be a list?
+	vals: map[typeid]rawptr,
 }
 
 @(private)
@@ -706,7 +708,8 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 				context.temp_allocator = no_free_all_allocator(conn)
 			}
 
-			conn.ctx = {&l.req, &l.res}
+			conn.ctx = {&l.req, &l.res, {}}
+			conn.ctx.vals.allocator = context.temp_allocator
 			conn.server.handler.handle(&conn.server.handler, &conn.ctx)
 		}
 	}
