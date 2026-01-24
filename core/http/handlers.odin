@@ -36,6 +36,10 @@ middleware_proc :: proc(next: Maybe(^Handler), handle: Handler_Proc) -> Handler 
 	return h
 }
 
+handler_404 :: proc(ctx: ^Context) {
+	respond_with_status(ctx.res, .Not_Found)
+}
+
 Rate_Limit_On_Limit :: struct {
 	user_data: rawptr,
 	on_limit:  proc(req: ^Request, res: ^Response, user_data: rawptr),
@@ -146,16 +150,16 @@ body_parser :: proc(next: ^Handler) -> Handler {
 	on_body :: proc(userdata: rawptr, body: []byte, err: Body_Error) {
 		state := (^State)(userdata)
 
-		state.ctx.vals[Body_Parser_Result] = new_clone(Body_Parser_Result{
+		context_add(state.ctx, Body_Parser_Result{
 			body = body,
 			err  = err,
-		}, context.temp_allocator)
-		
+		})
+
 		state.next.handle(state.next, state.ctx)
 	}
 }
 
 body_parser_result :: proc(ctx: ^Context) -> ([]byte, Body_Error) {
-	res := (^Body_Parser_Result)(ctx.vals[Body_Parser_Result])
+	res := context_get(ctx, Body_Parser_Result)
 	return res.body, res.err
 }

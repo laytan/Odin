@@ -428,7 +428,31 @@ Context :: struct {
 	req:  ^Request,
 	res:  ^Response,
 	// Maybe just be a list?
-	vals: map[typeid]rawptr,
+	vars: [dynamic]Context_Var,
+}
+
+Context_Var :: struct {
+	id:  typeid,
+	val: rawptr,
+}
+
+context_add :: proc(ctx: ^Context, var: $T) -> ^T {
+	val := new_clone(var, context.temp_allocator)
+	append(&ctx.vars, Context_Var{
+		id  = T,
+		val = val,
+	})
+	return val
+}
+
+context_get :: proc(ctx: ^Context, $T: typeid) -> ^T {
+	#reverse for var in ctx.vars {
+		if var.id == T {
+			return (^T)(var.val)
+		}
+	}
+
+	return nil
 }
 
 @(private)
@@ -521,8 +545,6 @@ conn_handle_reqs :: proc(c: ^Connection) {
 			if op.recv.err != nil {
 				err = op.recv.err.(net.TCP_Recv_Error)
 			}
-
-			log.info(op.recv.received, err)
 
 			callback(&c.scanner, op.recv.received, err)
 		}
@@ -709,7 +731,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 			}
 
 			conn.ctx = {&l.req, &l.res, {}}
-			conn.ctx.vals.allocator = context.temp_allocator
+			conn.ctx.vars.allocator = context.temp_allocator
 			conn.server.handler.handle(&conn.server.handler, &conn.ctx)
 		}
 	}

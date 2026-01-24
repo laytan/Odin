@@ -1,40 +1,16 @@
 #+build !js
 package http
 
-import "core:testing"
 import "base:runtime"
+import "base:intrinsics"
 
 import "core:fmt"
-import "core:log"
+import "core:io"
 import "core:strings"
-import "core:bytes"
-import "core:text/regex"
 
-
-
-
-
-
-
-// "/"
-// "/."
-// "/."
-// "/$arg/..."
-// "/hello/world/"
-// "/hello/world/{"
-// "/hello/world/<>*/"
-
-
-
-// "/" -> index_handler
-// "/static/." -> static_handler
-// "/api/." -> api_v1_handler
-// "/api/v2/." -> api_v2_handler
-
-ROUTE_404 := Route{handler(handle_404), ""}
-
-handle_404 :: proc(ctx: ^Context) {
-	respond_with_status(ctx.res, .Not_Found)
+Router :: struct {
+	routes: [Method]_Route_Trie,
+	all:    _Route_Trie,
 }
 
 Route :: struct {
@@ -42,456 +18,425 @@ Route :: struct {
 	pattern: string,
 }
 
-Router :: struct {
-	routes: [Method][dynamic]Route,
-	all:    [dynamic]Route,
-}
-
-Route_Match :: struct {
-	vars:   [dynamic]string,
-	suffix: string,
+Route_Param :: struct {
+	name:  string,
+	value: string,
 }
 
 router :: proc(router: ^Router) -> Handler {
 	h: Handler
 	h.user_data = router
 
-	// TODO: sort routes based on specificity
-	// TODO: panic if 2 routes are the same specificity
-	// TODO: routes_match can then stop at first match
-
-	h.handle = proc(handler: ^Handler, using ctx: ^Context) {
-		router := (^Router)(handler.user_data)
+	h.handle = proc(h: ^Handler, using ctx: ^Context) {
+		router := (^Router)(h.user_data)
 		rline := req.line.(Requestline)
 
 		// TODO: URL decoded
 		target := rline.target.(string)
 
-		match_ptr, has_match := ctx.vals[Route_Match]
-		match := (^Route_Match)(match_ptr)
-		if has_match {
-			if match.suffix != "" {
-				target = match.suffix
+		match := context_get(ctx, _Route_Match)
+		if match == nil {
+			match = context_add(ctx, _Route_Match{})
+		}
+		if match.suffix != "" {
+			target = match.suffix
+		}
+
+		route, has_route := _route_trie_match(router.routes[rline.method], target, &match.vars, &match.suffix)
+		if !has_route {
+			route, has_route = _route_trie_match(router.all, target, &match.vars, &match.suffix)
+			if !has_route {
+				route = Route{handler(handler_404), ""}
 			}
-		} else {
-			match_ptr = new(Route_Match, context.temp_allocator)
-			ctx.vals[Route_Match] = match_ptr
-			match = (^Route_Match)(match_ptr)
 		}
 
-		// _, match_ptr, is_new, _ := map_entry(&ctx.vals, typeid_of(Route_Match))
-		// if is_new {
-		// 	match_ptr^ = new(Route_Match, context.temp_allocator)
-		// }
-		//
-		// // ^rawptr
-		// // ^^Route_Match
-		//
-		// match := (^^Route_Match)(match_ptr)^
-		// if match.suffix != "" {
-		// 	target = match.suffix
-		// }
-		fmt.println(has_match, match, target)
-
-		route := routes_match(router.routes[rline.method][:], target, &match.vars, &match.suffix)
-		if route == ROUTE_404 {
-			route = routes_match(router.all[:], target, &match.vars, &match.suffix)
-		}
-
-		fmt.println(has_match, match, target)
-
+		match.route = route
 		route.handler.handle(&route.handler, ctx)
 	}
 
 	return h
 }
 
-route_params :: proc(ctx: ^Context) -> (params: []string, suffix: string) {
-	match := (^Route_Match)(ctx.vals[typeid_of(Route_Match)])
-	fmt.println(match)
-	return match.vars[:], match.suffix
+router_destroy :: proc(r: ^Router) {
+	for trie in r.routes {
+		_route_trie_destroy(trie)
+	}
+	_route_trie_destroy(r.all)
 }
 
-Route_Score :: enum {
-	None,
-	Not_Found,
-	Prefix,
-	Var,
-	Exact,
+router_write :: proc(w: io.Writer, r: Router) {
+	for routes, method in r.routes {
+		fmt.wprint(w, method_string(method))
+		fmt.wprint(w, " ")
+		_route_trie_write(w, routes)
+	}
+	fmt.wprint(w, "ALL ")
+	_route_trie_write(w, r.all)
 }
 
-routes_match :: proc(routes: []Route, path: string, vars: ^[dynamic]string, suffix: ^string) -> Route {
-	start_vars := len(vars)
-	match := ROUTE_404
-	score := Route_Score.Not_Found
-	for route in routes {
-		match_vars := len(vars)
-		this_suffix: string
-		this_score := route_match(route, path, .Case_Insensitive, vars, &this_suffix)
-		if this_score == .Exact {
-			suffix^ = this_suffix
-			remove_range(vars, start_vars, match_vars)
-			return route
-		}
+route_params :: proc(ctx: ^Context) -> (params: []Route_Param) {
+	return context_get(ctx, _Route_Match).vars[:]
+}
 
-		if this_score > score {
-			score = this_score
-			match = route
-			suffix^ = this_suffix
-			remove_range(vars, start_vars, match_vars)
-			continue
-		}
-
-		resize(vars, match_vars)
+route_param :: proc(params: []Route_Param, name: string) -> string {
+	for param in params {
+		if param.name == name { return param.value }
 	}
 
-	return match
+	return ""
 }
 
-route_match :: proc(route: Route, path: string, casing := Route_Casing.Case_Sensitive, vars: ^[dynamic]string, suffix: ^string) -> Route_Score {
-	switch route.pattern {
-	case "":
-		return path == "/" ? .Exact : .None
-	case "/":
-		suffix^ = path
-		return .Prefix
+route_param_int :: proc(params: []Route_Param, name: string) -> (value: int, ok: bool) {
+	val := route_param(params, name)
+	if val == "" { return }
+
+	as_int: int
+	for ch in transmute([]byte)val {
+		switch ch {
+		case '0'..='9':
+			overflow: bool
+			if as_int, overflow = intrinsics.overflow_mul(as_int, 10);          overflow { return }
+			if as_int, overflow = intrinsics.overflow_add(as_int, int(ch-'0')); overflow { return }
+		case:
+			return
+		}
 	}
 
-	assert(path[0] == '/')
-	path    := path[1:]
-	pattern := route.pattern
+	return as_int, true
+}
 
+route_get_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Get], Route{handler, pattern}, loc)
+}
+
+route_get_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Get], Route{handler(p), pattern}, loc)
+}
+
+route_get :: proc {
+	route_get_handler,
+	route_get_proc,
+}
+
+
+route_post_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Post], Route{handler, pattern}, loc)
+}
+
+route_post_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Post], Route{handler(p), pattern}, loc)
+}
+
+route_post :: proc {
+	route_post_handler,
+	route_post_proc,
+}
+
+
+route_delete_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Delete], Route{handler, pattern}, loc)
+}
+
+route_delete_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Delete], Route{handler(p), pattern}, loc)
+}
+
+route_delete :: proc {
+	route_delete_handler,
+	route_delete_proc,
+}
+
+
+route_patch_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Patch], Route{handler, pattern}, loc)
+}
+
+route_patch_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Patch], Route{handler(p), pattern}, loc)
+}
+
+route_patch :: proc {
+	route_patch_handler,
+	route_patch_proc,
+}
+
+
+route_put_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Put], Route{handler, pattern}, loc)
+}
+
+route_put_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Put], Route{handler(p), pattern}, loc)
+}
+
+route_put :: proc {
+	route_put_handler,
+	route_put_proc,
+}
+
+
+route_head_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Head], Route{handler, pattern}, loc)
+}
+
+route_head_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Head], Route{handler(p), pattern}, loc)
+}
+
+route_head :: proc {
+	route_head_handler,
+	route_head_proc,
+}
+
+
+route_connect_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Connect], Route{handler, pattern}, loc)
+}
+
+route_connect_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Connect], Route{handler(p), pattern}, loc)
+}
+
+route_connect :: proc {
+	route_connect_handler,
+	route_connect_proc,
+}
+
+
+route_options_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Options], Route{handler, pattern}, loc)
+}
+
+route_options_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Options], Route{handler(p), pattern}, loc)
+}
+
+route_options :: proc {
+	route_options_handler,
+	route_options_proc,
+}
+
+
+route_trace_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Trace], Route{handler, pattern}, loc)
+}
+
+route_trace_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.routes[.Trace], Route{handler(p), pattern}, loc)
+}
+
+route_trace :: proc {
+	route_trace_handler,
+	route_trace_proc,
+}
+
+
+route_all_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
+	_route_trie_add(&r.all, Route{handler, pattern}, loc)
+}
+
+route_all_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
+	_route_trie_add(&r.all, Route{handler(p), pattern}, loc)
+}
+
+route_all :: proc {
+	route_all_handler,
+	route_all_proc,
+}
+
+_Route_Match :: struct {
+	route:  Route,
+	vars:   [dynamic]Route_Param,
+	suffix: string,
+}
+
+_Route_Trie :: struct {
+	segments: [dynamic]_Route_Trie,
+	segment:  string,
+	route:    Route,
+}
+
+_route_trie_destroy :: proc(t: _Route_Trie) {
+	for st in t.segments {
+		_route_trie_destroy(st)
+	}
+	delete(t.segments)
+}
+
+_route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count := 0) -> Maybe(Route) {
+	param_count := param_count
+
+	pattern := pattern
+	is_prefix := len(pattern) > 0 && pattern[len(pattern)-1] == '/'
 	if len(pattern) > 0 && pattern[0] == '/' {
 		pattern = pattern[1:]
 	}
 
-	is_prefix: bool
-	if len(pattern) > 0 && pattern[len(pattern)-1] == '/' {
-		pattern = pattern[:len(pattern)-1]
-		is_prefix = true
-	}
-
-	max_score := Route_Score.Exact
-	for {
-		pattern_part, more_pattern := next_segment(&pattern)
-		path_part,    more_path    := next_segment(&path)
-		switch {
-		case !more_pattern && !more_path:
-			return is_prefix ? .None : max_score
-
-		case !more_pattern && more_path:
+	curr := t
+	segments: for {
+		segment, ok := _next_segment(&pattern)
+		if !ok {
 			if is_prefix {
-				suffix^ = string(raw_data(path)[-len(path_part)-1:][:len(path)+len(path_part)+1])
-				return .Prefix
+				if len(curr.segments) > 0 {
+					last := curr.segments[len(curr.segments)-1]
+					if last.segment == "/" {
+						return last.route
+					}
+				}
+			} else {
+				if curr.route.handler.handle != nil && pattern_param_count(curr.route.pattern) == param_count {
+					return curr.route
+				}
 			}
-
-			return .None
-
-		case more_pattern && !more_path:
-			return .None
-
-		case len(pattern_part) == 1 && pattern_part[0] == '*':
-			// TODO: named vars
-			append(vars, path_part)
-			max_score = .Var
-
-		case casing == .Case_Insensitive && string(pattern_part) != string(path_part):
-			return .None
-
-		case casing == .Case_Sensitive && !strings.equal_fold(string(pattern_part), string(path_part)):
-			return .None
 		}
+
+		is_param := false
+		if len(segment) > 0 && segment[len(segment)-1] == ':' {
+			is_param     = true
+			param_count += 1
+		}
+
+		for &st in curr.segments {
+			if is_param || (len(st.segment) > 0 && st.segment[len(st.segment)-1] == ':') {
+				if conflict := _route_trie_check_conflicts(st, pattern, param_count); conflict != nil { return conflict }
+			}
+		}
+
+		for &st in curr.segments {
+			if st.segment == segment {
+				if conflict := _route_trie_check_conflicts(st, pattern, param_count); conflict != nil { return conflict }
+				curr = st
+				continue segments
+			}
+		}
+
+		return nil
 	}
 
-	next_segment :: #force_inline proc(s: ^string) -> (res: string, ok: bool) {
-		m := strings.index_byte(s^, '/')
-		if m < 0 {
-			res = s[:]
-			ok  = len(res) > 0
-			s^  = s[len(s):]
-		} else {
-			ok  = true
-			res = s[:m]
-			s^  = s[m+1:]
+	pattern_param_count :: proc(pattern: string) -> (param_count: int) {
+		pattern := pattern
+		for segment in _next_segment(&pattern) {
+			if len(segment) > 0 && segment[len(segment)-1] == ':' {
+				param_count += 1
+			}
 		}
 		return
 	}
 }
 
-@(test)
-test_route_match :: proc(t: ^testing.T) {
-	Case :: struct {
-		pattern, path: string,
-		score: Route_Score,
-		casing: Route_Casing,
-		vars: []string,
-		suffix: string,
+_route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) {
+	if conflict, has_conflict := _route_trie_check_conflicts(t^, route.pattern).?; has_conflict {
+		fmt.panicf("route determinism conflict: %q and %q can both match the same path", route.pattern, conflict.pattern, loc=loc)
 	}
-	cases := [?]Case{
-		{"", "/", .Exact, .Case_Insensitive, {}, ""},
-		{"/", "/", .Prefix, .Case_Insensitive, {}, "/"},
-		{"/hello", "/hello", .Exact, .Case_Insensitive, {}, ""},
-		{"/*", "/hello", .Var, .Case_Insensitive, {"hello"}, ""},
-		{"/*", "/", .None, .Case_Insensitive, {}, ""},
-		{"/hello/", "/hello", .None, .Case_Insensitive, {}, ""},
-		{"/hello/", "/hello/world", .Prefix, .Case_Insensitive, {}, "/world"},
-		{"/hello/*", "/hello/world", .Var, .Case_Insensitive, {"world"}, ""},
-		{"/hello/*/", "/hello/world/foo", .Prefix, .Case_Insensitive, {"world"}, "/foo"},
-		{"/api/", "/api/status", .Prefix, .Case_Insensitive, {}, "/status"},
-		{"/api/*/", "/api/v2/status", .Prefix, .Case_Insensitive, {"v2"}, "/status"},
+
+	pattern := route.pattern
+
+	is_prefix := len(pattern) > 0 && pattern[len(pattern)-1] == '/'
+	if len(pattern) > 0 && pattern[0] == '/' {
+		pattern = pattern[1:]
 	}
-	vars: [dynamic]string
-	for tc, i in cases {
-		log.info(i)
-		clear(&vars)
-		suffix: string
-		score := route_match({{}, tc.pattern}, tc.path, tc.casing, &vars, &suffix)
-		testing.expectf(t, score == tc.score, "%v: %q, %q = %v (expected %v)", i, tc.pattern, tc.path, score, tc.score)
-		testing.expect_value(t, suffix, tc.suffix)
-		testing.expectf(t, len(vars) == len(tc.vars), "%v != %v", vars, tc.vars)
-		for ev, i in tc.vars {
-			testing.expect_value(t, vars[i], ev)
+
+	curr := t
+	segments: for {
+		segment, ok := _next_segment(&pattern)
+		if !ok {
+			if is_prefix {
+				prefix_segment := make_trie("/", curr.segments.allocator)
+				prefix_segment.route = route
+				append(&curr.segments, prefix_segment)
+			} else {
+				assert(curr.route.handler.handle == nil)
+				curr.route = route
+			}
+			return
 		}
+
+		insertion_point := len(curr.segments)
+		insertion_check: for &st, i in curr.segments {
+			switch {
+			case st.segment == segment:
+				curr = &st
+				continue segments
+			case st.segment == "/" || st.segment[len(st.segment)-1] == ':':
+				insertion_point = i
+				break insertion_check
+			}
+		}
+
+		inject_at(&curr.segments, insertion_point, make_trie(segment, curr.segments.allocator))
+		curr = &curr.segments[insertion_point]
+	}
+
+	make_trie :: proc(segment: string, allocator: runtime.Allocator) -> _Route_Trie {
+		t: _Route_Trie
+		t.segment = segment
+		t.segments.allocator = allocator
+		return t
 	}
 }
 
+_route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, suffix: ^string) -> (Route, bool) {
+	assert(path[0] == '/')
+	return _trie_match(t, path[1:], vars, len(vars), suffix)
 
+	_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string) -> (Route, bool) {
+		path := path
+		segment, ok := _next_segment(&path)
+		if !ok {
+			return t.route, t.route.handler.handle != nil
+		}
 
+		// NOTE: could binary search but I don't think it's worth it for the amount of paths you usually have.
 
+		for ts in t.segments {
+			switch {
+			case ts.segment == "/":
+				assert(ts.route.handler.handle != nil)
+				suffix^ = string(raw_data(path)[-len(segment)-1:][:len(path)+len(segment)+1])
+				return ts.route, true
 
+			case len(ts.segment) > 0 && ts.segment[len(ts.segment)-1] == ':':
+				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix); has_match {
+					inject_at(vars, vars_start, Route_Param{
+						name  = ts.segment[:len(ts.segment)-1],
+						value = segment,
+					})
+					return match, true
+				}
 
+			case ts.segment == segment:
+				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix); has_match {
+					return match, true
+				}
+			}
+		}
 
-
-
-
-
-// Router :: struct {
-// 	// Compiled patterns go here.
-// 	pattern_allocator: runtime.Allocator,
-// 	// Route lists go here.
-// 	list_allocator:    runtime.Allocator,
-// 	// Temporary allocations while setting up the routes go here.
-// 	temp_allocator:    runtime.Allocator,
-//
-// 	routes: [Method][dynamic]Route,
-// 	all:    [dynamic]Route,
-// }
-//
-// @(private)
-// Route :: struct {
-// 	regex:   regex.Regular_Expression,
-// 	handler: Handler,
-// }
-//
-// router_init :: proc(router: ^Router, pattern_allocator := context.allocator, list_allocator := context.allocator, temp_allocator := context.temp_allocator) {
-// 	router.pattern_allocator = pattern_allocator
-// 	router.list_allocator = list_allocator
-// 	router.temp_allocator = temp_allocator
-//
-// 	router.all.allocator = list_allocator
-// 	for &routes in router.routes {
-// 		routes.allocator = list_allocator
-// 	}
-// }
-//
-// router :: proc(router: ^Router) -> Handler {
-// 	h: Handler
-// 	h.user_data = router
-//
-// 	h.handle = proc(handler: ^Handler, using ctx: ^Context) {
-// 		router := (^Router)(handler.user_data)
-// 		rline := req.line.(Requestline)
-//
-// 		if routes_try(router.routes[rline.method][:], ctx) {
-// 			return
-// 		}
-//
-// 		if routes_try(router.all[:], ctx) {
-// 			return
-// 		}
-//
-// 		log.infof("no route matched %s %s", method_string(rline.method), req.url.path)
-// 		respond(res, Status.Not_Found)
-// 	}
-//
-// 	return h
-// }
-//
-Route_Casing :: enum {
-	Case_Insensitive,
-	Case_Sensitive,
+		return {}, false
+	}
 }
-//
-//
-// route_get_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Get], pattern, handler, casing, loc)
-// }
-//
-// route_get_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_get_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_get :: proc {
-// 	route_get_handler,
-// 	route_get_proc,
-// }
-//
-//
-// route_post_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Post], pattern, handler, casing, loc)
-// }
-//
-// route_post_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_post_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_post :: proc {
-// 	route_post_handler,
-// 	route_post_proc,
-// }
-//
-//
-// route_delete_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Delete], pattern, handler, casing, loc)
-// }
-//
-// route_delete_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_delete_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_delete :: proc {
-// 	route_delete_handler,
-// 	route_delete_proc,
-// }
-//
-//
-// route_patch_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Patch], pattern, handler, casing, loc)
-// }
-//
-// route_patch_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_patch_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_patch :: proc {
-// 	route_patch_handler,
-// 	route_patch_proc,
-// }
-//
-//
-// route_put_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Put], pattern, handler, casing, loc)
-// }
-//
-// route_put_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_put_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_put :: proc {
-// 	route_put_handler,
-// 	route_put_proc,
-// }
-//
-//
-// route_head_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Head], pattern, handler, casing, loc)
-// }
-//
-// route_head_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_head_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_head :: proc {
-// 	route_head_handler,
-// 	route_head_proc,
-// }
-//
-//
-// route_connect_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Connect], pattern, handler, casing, loc)
-// }
-//
-// route_connect_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_connect_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_connect :: proc {
-// 	route_connect_handler,
-// 	route_connect_proc,
-// }
-//
-//
-// route_options_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Options], pattern, handler, casing, loc)
-// }
-//
-// route_options_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_options_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_options :: proc {
-// 	route_options_handler,
-// 	route_options_proc,
-// }
-//
-//
-// route_trace_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.routes[.Trace], pattern, handler, casing, loc)
-// }
-//
-// route_trace_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_trace_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_trace :: proc {
-// 	route_trace_handler,
-// 	route_trace_proc,
-// }
-//
-//
-// route_all_handler :: proc(router: ^Router, pattern: string, handler: Handler, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_add(router, &router.all, pattern, handler, casing, loc)
-// }
-//
-// route_all_proc :: proc(router: ^Router, pattern: string, p: Handle_Proc, casing: Route_Casing = .Case_Insensitive, loc := #caller_location) {
-// 	route_all_handler(router, pattern, handler(p), casing, loc)
-// }
-//
-// route_all :: proc {
-// 	route_all_handler,
-// 	route_all_proc,
-// }
-//
-//
-// @(private)
-// route_add :: proc(router: ^Router, routes: ^[dynamic]Route, pattern: string, handler: Handler, casing: Route_Casing, loc := #caller_location) {
-// 	assert(len(pattern) > 0 && pattern[0] == '/', "route pattern must start with a /", loc)
-//
-// 	if router.pattern_allocator.procedure == nil {
-// 		router_init(router)
-// 	}
-//
-// 	anchored := strings.concatenate({"^", pattern, "$"}, router.temp_allocator)
-// 	flags := regex.Flags{} if casing == .Case_Sensitive else regex.Flags{.Case_Insensitive}
-// 	regex, err := regex.create(anchored, flags, router.pattern_allocator, router.temp_allocator)
-// 	if err != nil {
-// 		fmt.panicf("invalid route pattern: %v", err, loc=loc)
-// 	}
-//
-// 	_ = append(routes, Route{regex, handler}) or_else panic("could not append route", loc=loc)
-// }
-//
-// @(private)
-// routes_try :: proc(routes: []Route, using ctx: ^Context) -> bool {
-// 	for route in routes {
-// 		capture, matched := regex.match(route.regex, req.url.path, context.temp_allocator, context.temp_allocator)
-// 		if matched {
-// 			req.url_params = capture.groups[1:]
-// 			rh := route.handler
-// 			rh.handle(&rh, ctx)
-// 			return true
-// 		}
-// 	}
-//
-// 	return false
-// }
+
+_route_trie_write :: proc(w: io.Writer, t: _Route_Trie, indent := 0) {
+	for _ in 0..<indent { fmt.wprint(w, "\t") }
+	if t.route.handler.handle != nil {
+		fmt.wprintfln(w, "/%s -> %p", t.segment, rawptr(t.route.handler.handle))
+	} else {
+		fmt.wprintfln(w, "/%s", t.segment)
+	}
+	for ts in t.segments {
+		_route_trie_write(w, ts, indent+1)
+	}
+}
+
+_next_segment :: proc(s: ^string) -> (res: string, ok: bool) {
+	m := strings.index_byte(s^, '/')
+	if m < 0 {
+		res = s[:]
+		ok  = len(res) > 0
+		s^  = s[len(s):]
+	} else {
+		ok  = true
+		res = s[:m]
+		s^  = s[m+1:]
+	}
+	return
+}
