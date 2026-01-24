@@ -16,7 +16,7 @@ Handler :: struct {
 	handle:    Handler_Proc,
 }
 
-handler :: proc(handle: Handle_Proc) -> Handler {
+handler :: proc "contextless" (handle: Handle_Proc) -> Handler {
 	h: Handler
 	h.user_data = rawptr(handle)
 
@@ -120,4 +120,42 @@ rate_limit :: proc(data: ^Rate_Limit_Data, next: ^Handler, opts: ^Rate_Limit_Opt
 	}
 
 	return h
+}
+
+Body_Parser_Result :: struct {
+	body: []byte,
+	err:  Body_Error,
+}
+
+body_parser :: proc(next: ^Handler) -> Handler {
+	return middleware_proc(next, body_parser_proc)
+
+	State :: struct {
+		next: ^Handler,
+		ctx:  ^Context,
+	}
+
+	body_parser_proc :: proc(h: ^Handler, ctx: ^Context) {
+
+		// TODO: configurable limit.
+		// TODO: check if not GET / all the conditions for a body.
+
+		body(ctx.req, -1, new_clone(State{h.next.(^Handler), ctx}, context.temp_allocator), on_body)
+	}
+
+	on_body :: proc(userdata: rawptr, body: []byte, err: Body_Error) {
+		state := (^State)(userdata)
+
+		state.ctx.vals[Body_Parser_Result] = new_clone(Body_Parser_Result{
+			body = body,
+			err  = err,
+		}, context.temp_allocator)
+		
+		state.next.handle(state.next, state.ctx)
+	}
+}
+
+body_parser_result :: proc(ctx: ^Context) -> ([]byte, Body_Error) {
+	res := (^Body_Parser_Result)(ctx.vals[Body_Parser_Result])
+	return res.body, res.err
 }

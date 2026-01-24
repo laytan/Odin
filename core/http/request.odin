@@ -15,9 +15,6 @@ Request :: struct {
 	url:        URL,
 	client:     net.Endpoint,
 
-	// Route params/captures.
-	url_params: []string,
-
 	using _: Has_Body,
 }
 
