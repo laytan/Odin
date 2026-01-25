@@ -66,12 +66,15 @@ router_destroy :: proc(r: ^Router) {
 
 router_write :: proc(w: io.Writer, r: Router) {
 	for routes, method in r.routes {
-		fmt.wprint(w, method_string(method))
-		fmt.wprint(w, " ")
-		_route_trie_write(w, routes)
+		fmt.wprintln(w, method_string(method))
+		for st in routes.segments {
+			_route_trie_write(w, st)
+		}
 	}
-	fmt.wprint(w, "ALL ")
-	_route_trie_write(w, r.all)
+	fmt.wprintln(w, "ALL")
+	for st in r.all.segments {
+		_route_trie_write(w, st)
+	}
 }
 
 route_params :: proc(ctx: ^Context) -> (params: []Route_Param) {
@@ -264,22 +267,18 @@ _route_trie_destroy :: proc(t: _Route_Trie) {
 }
 
 _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count := 0) -> Maybe(Route) {
-	param_count := param_count
+	param_count, pattern := param_count, pattern
 
-	pattern := pattern
-	is_prefix := len(pattern) > 0 && pattern[len(pattern)-1] == '/'
-	if len(pattern) > 0 && pattern[0] == '/' {
-		pattern = pattern[1:]
-	}
+	is_prefix := pattern == "*" || strings.has_suffix(pattern, "/*")
 
 	curr := t
 	segments: for {
-		segment, ok := _next_segment(&pattern)
+		segment, ok := _next_pattern_segment(&pattern)
 		if !ok {
 			if is_prefix {
 				if len(curr.segments) > 0 {
 					last := curr.segments[len(curr.segments)-1]
-					if last.segment == "/" {
+					if last.segment == "*" {
 						return last.route
 					}
 				}
@@ -288,16 +287,16 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 					return curr.route
 				}
 			}
+			return nil
 		}
 
-		is_param := false
-		if len(segment) > 0 && segment[len(segment)-1] == ':' {
-			is_param     = true
+		is_param := _is_param(segment)
+		if is_param {
 			param_count += 1
 		}
 
 		for &st in curr.segments {
-			if is_param || (len(st.segment) > 0 && st.segment[len(st.segment)-1] == ':') {
+			if is_param || _is_param(st.segment) {
 				if conflict := _route_trie_check_conflicts(st, pattern, param_count); conflict != nil { return conflict }
 			}
 		}
@@ -315,8 +314,8 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 
 	pattern_param_count :: proc(pattern: string) -> (param_count: int) {
 		pattern := pattern
-		for segment in _next_segment(&pattern) {
-			if len(segment) > 0 && segment[len(segment)-1] == ':' {
+		for segment in _next_pattern_segment(&pattern) {
+			if _is_param(segment) {
 				param_count += 1
 			}
 		}
@@ -325,23 +324,21 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 }
 
 _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) {
-	if conflict, has_conflict := _route_trie_check_conflicts(t^, route.pattern).?; has_conflict {
+	pattern := route.pattern
+	assert(pattern != "", loc=loc)
+
+	if conflict, has_conflict := _route_trie_check_conflicts(t^, pattern).?; has_conflict {
 		fmt.panicf("route determinism conflict: %q and %q can both match the same path", route.pattern, conflict.pattern, loc=loc)
 	}
 
-	pattern := route.pattern
-
-	is_prefix := len(pattern) > 0 && pattern[len(pattern)-1] == '/'
-	if len(pattern) > 0 && pattern[0] == '/' {
-		pattern = pattern[1:]
-	}
+	is_prefix := pattern == "*" || strings.has_suffix(pattern, "/*")
 
 	curr := t
 	segments: for {
-		segment, ok := _next_segment(&pattern)
+		segment, ok := _next_pattern_segment(&pattern)
 		if !ok {
 			if is_prefix {
-				prefix_segment := make_trie("/", curr.segments.allocator)
+				prefix_segment := make_trie("*", curr.segments.allocator)
 				prefix_segment.route = route
 				append(&curr.segments, prefix_segment)
 			} else {
@@ -357,7 +354,7 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 			case st.segment == segment:
 				curr = &st
 				continue segments
-			case st.segment == "/" || st.segment[len(st.segment)-1] == ':':
+			case st.segment == "*" || _is_param(st.segment):
 				insertion_point = i
 				break insertion_check
 			}
@@ -377,11 +374,11 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 
 _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, suffix: ^string) -> (Route, bool) {
 	assert(path[0] == '/')
-	return _trie_match(t, path[1:], vars, len(vars), suffix)
+	return _trie_match(t, path, vars, len(vars), suffix)
 
 	_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string) -> (Route, bool) {
 		path := path
-		segment, ok := _next_segment(&path)
+		segment, ok := _next_path_segment(&path)
 		if !ok {
 			return t.route, t.route.handler.handle != nil
 		}
@@ -390,15 +387,15 @@ _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Pa
 
 		for ts in t.segments {
 			switch {
-			case ts.segment == "/":
+			case ts.segment == "*":
 				assert(ts.route.handler.handle != nil)
 				suffix^ = string(raw_data(path)[-len(segment)-1:][:len(path)+len(segment)+1])
 				return ts.route, true
 
-			case len(ts.segment) > 0 && ts.segment[len(ts.segment)-1] == ':':
+			case _is_param(ts.segment):
 				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix); has_match {
 					inject_at(vars, vars_start, Route_Param{
-						name  = ts.segment[:len(ts.segment)-1],
+						name  = ts.segment[1:],
 						value = segment,
 					})
 					return match, true
@@ -417,17 +414,42 @@ _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Pa
 
 _route_trie_write :: proc(w: io.Writer, t: _Route_Trie, indent := 0) {
 	for _ in 0..<indent { fmt.wprint(w, "\t") }
+	pre := "/" if t.segment == "" else ""
 	if t.route.handler.handle != nil {
-		fmt.wprintfln(w, "/%s -> %p", t.segment, rawptr(t.route.handler.handle))
+		fmt.wprintfln(w, "%s%s -> %p", pre, t.segment, rawptr(t.route.handler.handle))
 	} else {
-		fmt.wprintfln(w, "/%s", t.segment)
+		fmt.wprintfln(w, "%s%s", pre, t.segment)
 	}
 	for ts in t.segments {
 		_route_trie_write(w, ts, indent+1)
 	}
 }
 
-_next_segment :: proc(s: ^string) -> (res: string, ok: bool) {
+@(private="file")
+_next_pattern_segment :: proc(s: ^string) -> (res: string, ok: bool) {
+	st := s^
+
+	if st == "*" {
+		return st, false
+	} else if len(st) > len("/*") && st[:len(st)-len("/*")] == "/*" {
+		st = st[:len(st)-len("/*")]
+	}
+
+	m := strings.index_byte(st, '/')
+	if m < 0 {
+		res = st[:]
+		ok  = len(res) > 0
+		s^  = s[len(st):]
+	} else {
+		ok  = true
+		res = s[:m]
+		s^  = s[m+1:]
+	}
+	return
+}
+
+@(private="file")
+_next_path_segment :: proc(s: ^string) -> (res: string, ok: bool) {
 	m := strings.index_byte(s^, '/')
 	if m < 0 {
 		res = s[:]
@@ -439,4 +461,9 @@ _next_segment :: proc(s: ^string) -> (res: string, ok: bool) {
 		s^  = s[m+1:]
 	}
 	return
+}
+
+@(private="file")
+_is_param :: proc(segment: string) -> bool {
+	return len(segment) > 0 && segment[0] == ':'
 }
