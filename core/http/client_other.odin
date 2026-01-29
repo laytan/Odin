@@ -69,12 +69,12 @@ _incoming_response_destroy :: proc(res: Incoming_Response) {
 
 	allocator := res.body.allocator
 
-	iter := headers_iterator(&res.headers)
-	for k, v in headers_next(&iter) {
+	i: int
+	for k, v in headers_iter(&res.headers, &i) {
 		delete(k, allocator)
 		delete(v, allocator)
 	}
-	headers_destroy(&res.headers)
+	headers_destroy(res.headers)
 	delete(res.body)
 }
 
@@ -136,7 +136,7 @@ client_connection_destroy :: proc(c: ^Client, conn: ^Client_Connection) {
 		}
 
 		scanner_destroy(&conn.scanner)
-		headers_destroy(&conn.headers)
+		headers_destroy(conn.headers)
 	})
 }
 
@@ -290,13 +290,13 @@ _client_request_on :: proc(r: ^In_Flight) {
 		#partial switch err {
 		case .Partial:
 			append(&r.res.body, ..res.body)
-			r.res.headers.readonly = true
+			_headers_set_writable(&r.res.headers)
 			_callback(r, &r.res, .Partial)
-			r.res.headers.readonly = false
+			_headers_set_readonly(&r.res.headers)
 		case .None:
 			r.conn.body = {}
 			res.headers^ = {}
-			r.res.headers.readonly = true
+			_headers_set_readonly(&r.res.headers)
 
 			// TODO: what other statussus/special handling (like only on specific method, changing method, check spec).
 			// TODO: have a max amount of redirects to follow.

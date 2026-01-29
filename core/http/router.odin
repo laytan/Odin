@@ -57,7 +57,7 @@ router :: proc(router: ^Router) -> Handler {
 	return h
 }
 
-router_destroy :: proc(r: ^Router) {
+router_destroy :: proc(r: Router) {
 	for trie in r.routes {
 		_route_trie_destroy(trie)
 	}

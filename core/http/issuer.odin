@@ -598,7 +598,7 @@ issue :: proc(conn: ^Issuer_Connection) {
 
 		// TODO: max header size.
 
-		headers_init(&conn.headers, conn.curr_req.allocator)
+		conn.headers = headers_make(conn.curr_req.allocator)
 
 		scanner_scan(&conn.scanner, conn, on_header_line)
 	}
@@ -721,7 +721,7 @@ write_request :: proc(conn: ^Issuer_Connection) -> (allocations_ok: bool) {
 	if !headers_has(r.headers, "Content-Length") {
 		body_size := body_size(conn)
 		if body_size < 0 {
-			_, val := headers_delete(&r.headers, "Transfer-Encoding")
+			_, val := headers_delete(r.headers, "Transfer-Encoding")
 			if val == "" {
 				if _, err := append(buffer, "Transfer-Encoding: chunked\r\n"); err != nil { return }
 			} else {
@@ -758,7 +758,21 @@ write_request :: proc(conn: ^Issuer_Connection) -> (allocations_ok: bool) {
 		append_multiple_strings(buffer, "Host: ", url_parse(r.url).host, "\r\n") or_return
 	}
 
-	if headers_write(writer, &r.headers) != nil { return }
+	// TODO: think about if we need to do this here (skipping invalid headers).
+	// TODO: where does it make sense to validate/sanitize?
+	{
+		i: int
+		for header, value in headers_iter(&r.headers, &i) {
+			headers_valid_key(header) or_continue
+			append_multiple_strings(buffer, header, ": ")
+			value := value
+			for part in header_value_iterator(&value) {
+				append(buffer, part)
+			}
+
+			append(buffer, "\r\n")
+		}
+	}
 
 	if _, err := append(buffer, "\r\n"); err != nil { return }
 
