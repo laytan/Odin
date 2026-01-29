@@ -393,23 +393,23 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 	on_scan_trailer :: proc(sub: ^Has_Body, line: string, err: bufio.Scanner_Error) {
 		// Headers are done, success.
 		if err != nil || len(line) == 0 {
-			sub.headers.readonly = false
+			_headers_set_writable(&sub.headers)
 
-			key, val := headers_delete(&sub.headers, "trailer")
+			key, val := headers_delete(sub.headers, "trailer")
 			delete(key, sub.body_allocator)
 			delete(val, sub.body_allocator)
 
-			entry := headers_entry(&sub.headers, "transfer-encoding")
+			entry := headers_entry(sub.headers, "transfer-encoding")
 			// TODO: is the space required?
-			if strings.has_suffix(entry^, ", chunked") {
-				entry^ = strings.trim_suffix(entry^, ", chunked")
-			} else if entry^ == "chunked" {
-				key, val = headers_delete(&sub.headers, "transfer-encoding")
+			if strings.has_suffix(entry.value, ", chunked") {
+				entry.value = strings.trim_suffix(entry.value, ", chunked")
+			} else if entry.value == "chunked" {
+				key, val = headers_delete(sub.headers, "transfer-encoding")
 				delete(key, sub.body_allocator)
 				delete(val, sub.body_allocator)
 			}
 
-			sub.headers.readonly = true
+			_headers_set_readonly(&sub.headers)
 
 			_body_do_cbs(sub, nil, nil)
 			return
@@ -425,7 +425,7 @@ _body_chunked :: proc(sub: ^Has_Body, max_length: int = -1) {
 		// A recipient MUST ignore (or consider as an error) any fields that are forbidden to be sent in a trailer.
 		if !header_allowed_trailer(key) {
 			log.infof("Invalid trailer header received, discarding it: %q", key)
-			headers_delete(&sub.headers, key)
+			headers_delete(sub.headers, key)
 		}
 
 		sub._max_length -= len(line)

@@ -35,8 +35,8 @@ form_data_add_to_request :: proc(fd: ^Form_Data, req: ^Outgoing_Request, allocat
 	}
 	req.body.content = form_data_reader(fd)
 
-	if req.headers._kv._cmp_fn == nil {
-		headers_init(&req.headers, allocator)
+	if req.headers.spots == nil {
+		req.headers = headers_make(allocator)
 	}
 
 	headers_set(&req.headers, "Content-Type", form_data_content_type(fd, allocator) or_return)
@@ -45,7 +45,7 @@ form_data_add_to_request :: proc(fd: ^Form_Data, req: ^Outgoing_Request, allocat
 }
 
 form_data_remove_from_request :: proc(fd: ^Form_Data, req: ^Outgoing_Request, allocator := context.allocator) {
-	_, val := headers_delete(&req.headers, "Content-Type")
+	_, val := headers_delete(req.headers, "Content-Type")
 	delete(val, allocator)
 }
 

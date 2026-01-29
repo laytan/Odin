@@ -172,7 +172,7 @@ header_parse :: proc(headers: ^Headers, line: string, clone_value := true, alloc
 
 	// RFC 7230 5.4: Server MUST respond with 400 to any request
 	// with multiple "Host" header fields.
-	if headers_cmp(key, "host") == .Equal && headers_has(headers^, "host") {
+	if _headers_eq(key, "host") && headers_has(headers^, "host") {
 		return
 	}
 
@@ -181,7 +181,7 @@ header_parse :: proc(headers: ^Headers, line: string, clone_value := true, alloc
 	// field-values or a single Content-Length header field having an
 	// invalid value, then the message framing is invalid and the
 	// recipient MUST treat it as an unrecoverable error.
-	if headers_cmp(key, "content-length") == .Equal {
+	if _headers_eq(key, "content-length") {
 		if cl, has_cl := headers_get(headers^, "content-length"); has_cl {
 			if cl != value {
 				return
@@ -191,9 +191,9 @@ header_parse :: proc(headers: ^Headers, line: string, clone_value := true, alloc
 
 	key = strings.clone(key, allocator)
 
-	if headers_has(headers^, key) {
+	if entry := headers_entry(headers^, key); entry != nil {
 		log.error("TODO: handle multiple of the same headers")
-		headers_delete(headers, key)
+		entry.hash = 0
 	}
 
 	// TODO: figure out if we need to clone on both client and server, probably don't need to on the server.
@@ -209,7 +209,7 @@ init_allowed_trailers :: proc() {
 	@(static) allowed_trailers_sync: sync.Once
 	sync.once_do(&allowed_trailers_sync, proc() {
 		context.allocator = runtime.heap_allocator()
-		headers_init(&allowed_trailers)
+		allowed_trailers = headers_make()
 		// Message framing:
 		headers_set(&allowed_trailers, "transfer-encoding", "")
 		headers_set(&allowed_trailers, "content-length", "")
@@ -258,6 +258,39 @@ init_allowed_trailers :: proc() {
 header_allowed_trailer :: proc(key: string) -> bool {
 	init_allowed_trailers()
 	return headers_has(allowed_trailers, key)
+}
+
+// Validates the headers of a request, from the pov of the server.
+headers_sanitize_for_server :: proc(headers: ^Headers) -> bool {
+	// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
+	// HTTP/1.1 request message that lacks a Host header field.
+	if !headers_has(headers^, "host") {
+		return false
+	}
+
+	return headers_sanitize(headers)
+}
+
+// Validates the headers, use `headers_validate_for_server` if these are request headers
+// that should be validated from the server side.
+headers_sanitize :: proc(headers: ^Headers) -> bool {
+	// RFC 7230 3.3.3: If a Transfer-Encoding header field
+	// is present in a request and the chunked transfer coding is not
+	// the final encoding, the message body length cannot be determined
+	// reliably; the server MUST respond with the 400 (Bad Request)
+	// status code and then close the connection.
+	if enc_header, ok := headers_get(headers^, "transfer-encoding"); ok {
+		strings.has_suffix(enc_header, "chunked") or_return
+
+		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
+		// Content-Length header field, the Transfer-Encoding overrides the
+		// Content-Length.  Such a message might indicate an attempt to
+		// perform request smuggling (Section 9.5) or response splitting
+		// (Section 9.4) and ought to be handled as an error.
+		headers_delete(headers^, "content-length")
+	}
+
+	return true
 }
 
 @(private)

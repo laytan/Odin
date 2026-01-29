@@ -1,198 +1,163 @@
 package http
 
-import    "base:intrinsics"
-import rb "core:container/rbtree"
-import    "core:strings"
-import    "core:simd"
-import    "core:io"
-import    "core:fmt"
+import "base:intrinsics"
+import "base:runtime"
 
+import "core:encoding/endian"
+import "core:mem"
+import "core:strings"
 
-// TODO: validate/normalize headers according to spec.
-// TODO: during insert or during request?
+INITIAL_CAP :: 16
+LOAD_FACTOR :: .7
+
+Header_Spot :: struct {
+	key:   string,
+	value: string,
+	hash:  u64,
+}
 
 Headers :: struct {
-	_kv:      rb.Tree(string, string),
-	readonly: bool,
+	allocator: runtime.Allocator,
+	spots:     []Header_Spot,
+	len:       int,
+	threshold: int,
 }
 
-headers_init :: proc(h: ^Headers, allocator := context.allocator) {
-	rb.init_cmp(&h._kv, headers_cmp, allocator)
-}
-
-headers_make :: proc(keyvals: ..[2]string, allocator := context.allocator) -> (h: Headers) {
-	headers_init(&h, allocator)	
-
-	for keyval in keyvals {
-		headers_set(&h, keyval[0], keyval[1]) // TODO: error
+headers_make :: proc(allocator := context.allocator) -> Headers {
+	return {
+		allocator = allocator,
 	}
-	return
 }
 
-headers_cmp :: proc(a, b: string) -> rb.Ordering #no_bounds_check {
-	if len(a) < len(b) {
-		return .Less
-	} else if len(a) > len(b) {
-		return .Greater
+headers_len :: proc(m: Headers) -> int {
+	return m.len
+}
+
+headers_destroy :: proc(m: Headers) {
+	delete(m.spots, m.allocator)
+}
+
+headers_iter :: proc(m: ^Headers, state: ^int) -> (string, string, bool) {
+	if state^ >= len(m.spots) {
+		return {}, {}, false
 	}
 
-	if true {
-		// TODO: test if this is actually faster in practice, keys aren't long in practice.
-
-		// NOTE: vectorized version
-
-		LANES :: 8
-
-		check: #simd [LANES]byte: 'A' - 1
-		mask:  #simd [LANES]byte: 0x20
-
-		i: int
-		for ; i + LANES < len(a); i += LANES {
-			a_chars := intrinsics.unaligned_load((^#simd [LANES]byte)(raw_data(a)[i:]))
-			b_chars := intrinsics.unaligned_load((^#simd [LANES]byte)(raw_data(b)[i:]))
-
-			a_lower := simd.bit_or(
-				a_chars,
-				simd.bit_and(
-					simd.lanes_gt(
-						a_chars,
-						check,
-					),
-					mask,
-				),
-			)
-			b_lower := simd.bit_or(
-				b_chars,
-				simd.bit_and(
-					simd.lanes_gt(
-						b_chars,
-						check,
-					),
-					mask,
-				),
-			)
-
-			ne_set := simd.extract_msbs(simd.lanes_ne(a_lower, b_lower))
-			ne     := transmute(intrinsics.type_bit_set_underlying_type(type_of(ne_set)))ne_set
-			if ne == 0 {
-				continue
-			}
-
-			off := intrinsics.count_trailing_zeros(ne)
-			return a[i + int(off)] > b[i + int(off)] ? .Greater : .Less
-		}
-
-		for ; i < len(a); i += 1 {
-			ac := a[i]
-			if ac >= 'A' && ac <= 'Z' {
-				ac |= 0x20
-			}
-
-			bc := b[i]
-			if bc >= 'A' && bc <= 'Z' {
-				bc |= 0x20
-			}
-
-			if ac < bc {
-				return .Less
-			} else if ac > bc {
-				return .Greater
-			}
-		}
-	} else {
-		// NOTE: scalar version
-
-		for i in 0 ..< len(a) {
-			ac := a[i]
-			if ac >= 'A' && ac <= 'Z' {
-				ac |= 0x20
-			}
-
-			bc := b[i]
-			if bc >= 'A' && bc <= 'Z' {
-				bc |= 0x20
-			}
-
-			if ac < bc {
-				return .Less
-			} else if ac > bc {
-				return .Greater
-			}
+	for spot, i in m.spots[state^:] {
+		if spot.hash != 0 {
+			state^ += i + 1
+			return spot.key, spot.value, true
 		}
 	}
 
-	return .Equal
+	return {}, {}, false
 }
 
-// NOTE: only call this if the allocator is not temporary and you have individual free, this
-// iterates the entire tree and is expensive.
-headers_destroy :: proc(h: ^Headers) {
-	rb.destroy(&h._kv, false)
-}
+headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) {
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 
-Headers_Iterator :: rb.Iterator(string, string)
-
-headers_iterator :: proc(h: ^Headers) -> Headers_Iterator {
-	return rb.iterator(&h._kv, .Forward)
-}
-
-headers_next :: proc(iter: ^Headers_Iterator) -> (key: string, val: string, ok: bool) {
-	n: ^rb.Node(string, string)
-	n, ok = rb.iterator_next(iter)
-	if n != nil {
-		key = n.key
-		val = n.value
+	if m.len >= m.threshold {
+		_headers_grow(m)
 	}
+
+	_headers_set_internal(m, Header_Spot{
+		key   = key,
+		value = value,
+		hash  = _headers_hash_key(m^, key),
+	})
+}
+
+headers_add :: proc(m: ^Headers, key, value: string, loc := #caller_location) {
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
+
+	if m.len >= m.threshold {
+		_headers_grow(m)
+	}
+
+	_headers_add_internal(m, Header_Spot{
+		key   = key,
+		value = value,
+		hash  = _headers_hash_key(m^, key),
+	})
+}
+
+/*
+Returns the first instance of this header key.
+
+If you expect multiple of the same headers, use the `headers_get_all_iterator` procedures.
+*/
+headers_get :: proc(m: Headers, key: string) -> (value: string, ok: bool) #optional_ok {
+	entry := #force_inline headers_entry(m, key)
+	if entry == nil { return }
+	return entry.value, true
+}
+
+Headers_Get_All_Iterator :: struct {
+	h:    ^Headers,
+	key:  string,
+	hash: u64,
+	mask: u64,
+	idx:  u64,
+}
+
+headers_get_all_iterator :: proc(h: ^Headers, key: string) -> Headers_Get_All_Iterator {
+	hash := _headers_hash_key(h^, key)
+	mask := u64(len(h.spots) - 1)
+	return {
+		h    = h,
+		key  = key,
+		hash = hash,
+		mask = mask,
+		idx  = hash & mask,
+	}
+}
+
+headers_get_all_iter :: proc(iter: ^Headers_Get_All_Iterator) -> (value: string, ok: bool) {
+	if iter.h.len == 0 { return }
+
+	for {
+		entry := &iter.h.spots[iter.idx]
+		if entry.hash == 0 { return }
+
+		iter.idx = (iter.idx + 1) & iter.mask
+
+		if iter.hash == entry.hash && _headers_eq(iter.key, entry.key) {
+			return entry.value, true
+		}
+	}
+}
+
+headers_has :: proc(m: Headers, key: string) -> bool #no_bounds_check {
+	_, has := #force_inline headers_get(m, key)
+	return has
+}
+
+headers_entry :: proc(m: Headers, key: string) -> ^Header_Spot #no_bounds_check {
+	if m.len == 0 { return nil }
+
+	hashed := _headers_hash_key(m, key)
+	mask   := u64(len(m.spots) - 1)
+	idx    := hashed & mask
+
+	for {
+		entry := &m.spots[idx]
+		if entry.hash == 0 { return nil }
+
+		if entry.hash == hashed && _headers_eq(key, entry.key) {
+			return entry
+		}
+
+		idx = (idx + 1) & mask
+	}
+}
+
+headers_delete :: proc(m: Headers, key: string) -> (deleted_key, deleted_value: string) #no_bounds_check {
+	entry := headers_entry(m, key)
+	if entry == nil { return }
+	entry.hash = 0
+	deleted_key   = entry.key
+	deleted_value = entry.value
 	return
 }
-
-headers_count :: #force_inline proc(h: Headers) -> int {
-	return rb.len(h._kv)
-}
-
-headers_set :: proc(h: ^Headers, k: string, v: string, loc := #caller_location) {
-	assert(!h.readonly, "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
-	n, ok, _ := rb.find_or_insert(&h._kv, k, v) // TODO: error
-	assert(ok)
-	assert(n.value == v)
-}
-
-headers_get :: proc(h: Headers, k: string) -> (string, bool) #optional_ok {
-	return rb.find_value(h._kv, k)
-}
-
-headers_has :: proc(h: Headers, k: string) -> bool {
-	n := rb.find(h._kv, k)
-	return n != nil
-}
-
-headers_delete :: proc(h: ^Headers, k: string, loc := #caller_location) -> (deleted_key: string, deleted_value: string) {
-	assert(!h.readonly, "these headers are readonly, did you accidentally try to delete a header on the server request or client response?", loc)
-
-	n := rb.find(h._kv, k)
-	if n == nil {
-		return
-	}
-
-	deleted_key   = n.key
-	deleted_value = n.value
-
-	rb.remove_node(&h._kv, n, false)
-	return
-}
-
-headers_entry :: proc(h: ^Headers, k: string, loc := #caller_location) -> (val: ^string) {
-	assert(!h.readonly, "these headers are readonly, did you accidentally try to get a header on the server request or client response?", loc)
-
-	n := rb.find(h._kv, k)
-	if n == nil {
-		return
-	}
-
-	return &n.value
-}
-
-/* Common Helpers */
 
 headers_set_content_type :: proc {
 	headers_set_content_type_mime,
@@ -200,91 +165,20 @@ headers_set_content_type :: proc {
 }
 
 headers_set_content_type_string :: #force_inline proc(h: ^Headers, ct: string) {
-	headers_set(h, "content-type", ct)
+	headers_set(h, "Content-Type", ct)
 }
 
 headers_set_content_type_mime :: #force_inline proc(h: ^Headers, ct: Mime_Type) {
-	headers_set(h, "content-type", mime_to_content_type(ct))
+	headers_set(h, "Content-Type", mime_to_content_type(ct))
 }
 
 headers_set_close :: #force_inline proc(h: ^Headers) {
-	headers_set(h, "connection", "close")
-}
-
-// Validates the headers of a request, from the pov of the server.
-headers_sanitize_for_server :: proc(headers: ^Headers) -> bool {
-	// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
-	// HTTP/1.1 request message that lacks a Host header field.
-	if !headers_has(headers^, "host") {
-		return false
-	}
-
-	return headers_sanitize(headers)
-}
-
-// Validates the headers, use `headers_validate_for_server` if these are request headers
-// that should be validated from the server side.
-headers_sanitize :: proc(headers: ^Headers) -> bool {
-	// RFC 7230 3.3.3: If a Transfer-Encoding header field
-	// is present in a request and the chunked transfer coding is not
-	// the final encoding, the message body length cannot be determined
-	// reliably; the server MUST respond with the 400 (Bad Request)
-	// status code and then close the connection.
-	if enc_header, ok := headers_get(headers^, "transfer-encoding"); ok {
-		strings.has_suffix(enc_header, "chunked") or_return
-
-		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
-		// Content-Length header field, the Transfer-Encoding overrides the
-		// Content-Length.  Such a message might indicate an attempt to
-		// perform request smuggling (Section 9.5) or response splitting
-		// (Section 9.4) and ought to be handled as an error.
-		headers_delete(headers, "content-length")
-	}
-
-	return true
-}
-
-// TODO: escaping?, streams (slow?)?
-headers_write :: proc(w: io.Writer, headers: ^Headers) -> io.Error {
-	iter := headers_iterator(headers)
-	for header, value in headers_next(&iter) {
-		io.write_string(w, header) or_return
-		io.write_string(w, ": ")   or_return
-		io.write_string(w, value)  or_return
-		io.write_string(w, "\r\n") or_return
-	}
-	return nil
-}
-
-// TODO: allocator
-headers_to_string :: proc(headers: ^Headers) -> string {
-	sb: strings.Builder
-	headers_write(strings.to_stream(&sb), headers)
-	return strings.to_string(sb)
-}
-
-// Can be used with `fmt.register_user_formatter(http.Headers, http.headers_formatter)`.
-headers_formatter :: proc(fi: ^fmt.Info, arg: any, verb: rune) -> bool {
-	if verb != 'v' {
-		return false
-	}
-
-	headers_write(fi.writer, (^Headers)(arg.data))
-	return true
-}
-
-_token_set: strings.Ascii_Set
-
-@(init, private)
-init_token_set :: proc "contextless" () {
-	ok: bool
-	_token_set, ok = strings.ascii_set_make("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-	assert_contextless(ok)
+	headers_set(h, "Connection", "close")
 }
 
 headers_valid_key :: proc(key: string) -> bool {
 	for b in transmute([]byte)key {
-		(#force_inline strings.ascii_set_contains(_token_set, b)) or_return
+		(#force_inline strings.ascii_set_contains(TOKEN_SET, b)) or_return
 	}
 	return len(key) > 0
 }
@@ -314,4 +208,237 @@ header_value_iterator :: proc(value: ^string) -> (part: string, ok: bool) {
 
 	ok = true
 	return
+}
+
+_HEADERS_ARE_READONLY :: proc(h: Headers) -> bool {
+	return h.threshold < 0
+}
+
+_headers_set_readonly :: proc(h: ^Headers) {
+	if h.threshold > 0 { h.threshold = -h.threshold }
+}
+
+_headers_set_writable :: proc(h: ^Headers) {
+	if h.threshold < 0 { h.threshold = -h.threshold }
+}
+
+_headers_set_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check {
+	mask := u64(len(m.spots) - 1)
+	idx  := entry.hash & mask
+	for {
+		candidate := &m.spots[idx]
+
+		if candidate.hash == 0 || (candidate.hash == entry.hash && _headers_eq(candidate.key, entry.key)) {
+			if candidate.hash == 0 {
+				m.len += 1
+			}
+
+			candidate^ = entry 
+			return
+		}
+
+		idx = (idx + 1) & mask
+	}
+}
+
+_headers_add_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check {
+	mask := u64(len(m.spots) - 1)
+	idx  := entry.hash & mask
+	for {
+		candidate := &m.spots[idx]
+
+		if candidate.hash == 0 {
+			m.len += 1
+			candidate^ = entry 
+			return
+		}
+
+		idx = (idx + 1) & mask
+	}
+}
+
+_headers_grow :: proc(m: ^Headers) {
+	nm: Headers
+	nm.allocator = m.allocator.procedure == nil ? context.allocator : m.allocator
+
+	err: mem.Allocator_Error
+	nm.spots, err = make([]Header_Spot, max(len(m.spots)*2, INITIAL_CAP), m.allocator)
+	nm.threshold = int(f32(len(nm.spots)) * f32(LOAD_FACTOR))
+	assert(err == nil, "headers: resize error")
+
+	for spot in m.spots {
+		if spot.hash != 0 {
+			_headers_add_internal(&nm, spot)
+		}
+	}
+
+	delete(m.spots, m.allocator)
+
+	m^ = nm
+	return
+}
+
+_headers_hash_key :: #force_no_inline proc(hdrs: Headers, header: string) -> (res: u64) #no_bounds_check {
+	// siphash modified to ascii lowercase and never return 0.
+
+	CROUNDS :: 2
+	DROUNDS :: 4
+
+	ROTL :: #force_inline proc "contextless" (x, b: u64) -> u64 {
+		return (x << b) | (x >> (64 - b))
+	}
+
+	U8TO64_LE :: endian.unchecked_get_u64le
+
+	v0 := u64(0x736f6d6570736575)
+	v1 := u64(0x646f72616e646f6d)
+	v2 := u64(0x6c7967656e657261)
+	v3 := u64(0x7465646279746573)
+	k0 := U8TO64_LE(SECRET[:])
+	k1 := U8TO64_LE(SECRET[8:])
+
+	v3 ~= k1
+	v2 ~= k0
+	v1 ~= k1
+	v0 ~= k0
+
+	ni   := transmute([]byte)header
+	left := len(ni) & 7
+	b    := u64(len(ni)) << 56
+	for ; len(ni) >= size_of(u64); ni = ni[size_of(u64):] {
+		m := ASCII_LOWER_U64(U8TO64_LE(ni))
+		v3 ~= m
+
+		for _ in 0..<CROUNDS {
+			v0 += v1
+			v1 = ROTL(v1, 13)
+			v1 ~= v0
+			v0 = ROTL(v0, 32)
+			v2 += v3
+			v3 = ROTL(v3, 16)
+			v3 ~= v2
+			v0 += v3
+			v3 = ROTL(v3, 21)
+			v3 ~= v0
+			v2 += v1
+			v1 = ROTL(v1, 17)
+			v1 ~= v2
+			v2 = ROTL(v2, 32)
+		}
+
+		v0 ~= m
+	}
+
+	switch left {
+	case 7:
+		b |= u64(ASCII_LOWER_U8(ni[6])) << 48
+		fallthrough
+	case 6:
+		b |= u64(ASCII_LOWER_U8(ni[5])) << 40
+		fallthrough
+	case 5:
+		b |= u64(ASCII_LOWER_U8(ni[4])) << 32
+		fallthrough
+	case 4:
+		b |= u64(ASCII_LOWER_U8(ni[3])) << 24
+		fallthrough
+	case 3:
+		b |= u64(ASCII_LOWER_U8(ni[2])) << 16
+		fallthrough
+	case 2:
+		b |= u64(ASCII_LOWER_U8(ni[1])) << 8
+		fallthrough
+	case 1:
+		b |= u64(ASCII_LOWER_U8(ni[0]))
+	}
+
+	v3 ~= b
+
+	for _ in 0..<CROUNDS {
+		v0 += v1
+		v1 = ROTL(v1, 13)
+		v1 ~= v0
+		v0 = ROTL(v0, 32)
+		v2 += v3
+		v3 = ROTL(v3, 16)
+		v3 ~= v2
+		v0 += v3
+		v3 = ROTL(v3, 21)
+		v3 ~= v0
+		v2 += v1
+		v1 = ROTL(v1, 17)
+		v1 ~= v2
+		v2 = ROTL(v2, 32)
+	}
+
+	v0 ~= b
+	v2 ~= 0xff
+
+	for _ in 0..<DROUNDS {
+		v0 += v1
+		v1 = ROTL(v1, 13)
+		v1 ~= v0
+		v0 = ROTL(v0, 32)
+		v2 += v3
+		v3 = ROTL(v3, 16)
+		v3 ~= v2
+		v0 += v3
+		v3 = ROTL(v3, 21)
+		v3 ~= v0
+		v2 += v1
+		v1 = ROTL(v1, 17)
+		v1 ~= v2
+		v2 = ROTL(v2, 32)
+	}
+
+	b = v0 ~ v1 ~ v2 ~ v3
+	return max(1, b)
+}
+
+_headers_eq :: proc(a, b: string) -> bool #no_bounds_check {
+	(len(a) == len(b)) or_return
+
+	i: int
+	for ; i + size_of(u64) <= len(a); i += size_of(u64) {
+		ac := ASCII_LOWER_U64(intrinsics.unaligned_load((^u64)(raw_data(a[i:]))))
+		bc := ASCII_LOWER_U64(intrinsics.unaligned_load((^u64)(raw_data(b[i:]))))
+		(ac == bc) or_return
+	}
+
+	for j in i ..< len(a) {
+		ac := ASCII_LOWER_U8(a[j])
+		bc := ASCII_LOWER_U8(b[j])
+		(ac == bc) or_return
+	}
+
+	return true
+}
+
+@(private="file")
+SECRET: [16]byte
+
+@(private="file", init)
+init_secret :: proc "contextless" () {
+	runtime.rand_bytes(SECRET[:])
+}
+
+@(private="file")
+ASCII_LOWER_U64 :: #force_inline proc "contextless" (x: u64) -> u64 {
+	mask := ((x + 0x3f3f3f3f3f3f3f3f) ~ (x + 0x2525252525252525)) & 0x8080808080808080
+	return x | (mask >> 2)
+}
+
+@(private="file")
+ASCII_LOWER_U8 :: #force_inline proc "contextless" (x: u8) -> u8 {
+	return x | (u8(x >= 'A' && x <= 'Z') << 5)
+}
+
+@(private="file")
+TOKEN_SET: strings.Ascii_Set
+
+@(init, private)
+init_token_set :: proc "contextless" () {
+	ok: bool
+	TOKEN_SET, ok = strings.ascii_set_make("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+	assert_contextless(ok)
 }

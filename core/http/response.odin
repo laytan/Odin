@@ -35,7 +35,7 @@ response_init :: proc(r: ^Response, allocator := context.allocator, temp_allocat
 	r.cookies.allocator  = temp_allocator
 	r._buf.buf.allocator = allocator // PERF: dynamic allocation done every single response, could be pooled or something.
 
-	headers_init(&r.headers, temp_allocator)
+	r.headers = headers_make(temp_allocator)
 }
 
 /*
@@ -224,7 +224,7 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
-	reserve_size    := MIN + content_length + (AVG_HEADER_SIZE * headers_count(r.headers))
+	reserve_size    := MIN + content_length + (AVG_HEADER_SIZE * headers_len(r.headers))
 	bytes.buffer_grow(&r._buf, reserve_size)
 
 	// According to RFC 7230 3.1.2 the reason phrase is insignificant,
@@ -266,9 +266,11 @@ _response_write_heading :: proc(r: ^Response, content_length: int) {
 
 	bstream := bytes.buffer_to_stream(b)
 
+	// TODO: think about if we need to do this here (skipping invalid headers).
+	// TODO: where does it make sense to validate/sanitize?
 	{
-		iter := headers_iterator(&r.headers)
-		for header, value in headers_next(&iter) {
+		i: int
+		for header, value in headers_iter(&r.headers, &i) {
 			headers_valid_key(header) or_continue
 			ws(b, header)
 			ws(b, ": ")

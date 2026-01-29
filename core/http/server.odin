@@ -570,7 +570,7 @@ conn_handle_reqs :: proc(c: ^Connection) {
 conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 	context.temp_allocator = virtual.arena_allocator(&c.temp_allocator)
 
-	headers_init(&c.loop.req.headers, context.temp_allocator)
+	c.loop.req.headers = headers_make(context.temp_allocator)
 	response_init(&c.loop.res, c.server.conn_allocator, context.temp_allocator)
 
 	log.info("scanning request")
@@ -693,7 +693,7 @@ conn_handle_req :: proc(c: ^Connection, allocator := context.temp_allocator) {
 			return
 		}
 
-		l.req.headers.readonly = true
+		_headers_set_readonly(&l.req.headers)
 
 		conn.scanner.max_token_size = bufio.DEFAULT_MAX_SCAN_TOKEN_SIZE
 
