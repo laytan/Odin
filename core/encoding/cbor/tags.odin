@@ -3,7 +3,6 @@ package encoding_cbor
 import "base:runtime"
 
 import "core:encoding/base64"
-import "core:io"
 import "core:math"
 import "core:math/big"
 import "core:mem"
@@ -62,10 +61,10 @@ Tag_Implementation :: struct {
 }
 
 // Procedure responsible for umarshalling the tag out of the reader into the given `any`.
-Tag_Unmarshal_Proc :: #type proc(self: ^Tag_Implementation, d: Decoder, tag_nr: Tag_Number, v: any) -> Unmarshal_Error
+Tag_Unmarshal_Proc :: #type proc(self: ^Tag_Implementation, d: ^Decoder, tag_nr: Tag_Number, v: any) -> Unmarshal_Error
 
 // Procedure responsible for marshalling the tag in the given `any` into the given encoder.
-Tag_Marshal_Proc   :: #type proc(self: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_Error
+Tag_Marshal_Proc   :: #type proc(self: ^Tag_Implementation, e: ^Encoder, v: any) -> Marshal_Error
 
 // When encountering a tag in the CBOR being unmarshalled, the implementation is used to unmarshal it.
 // When encountering a struct tag like `cbor_tag:"Tag_Number"`, the implementation is used to marshal it. 
@@ -124,8 +123,8 @@ tags_register_defaults :: proc "contextless" () {
 //
 // See RFC 8949 section 3.4.2.
 @(private)
-tag_time_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, v: any) -> (err: Unmarshal_Error) {
-	hdr := _decode_header(d.reader) or_return
+tag_time_unmarshal :: proc(_: ^Tag_Implementation, d: ^Decoder, _: Tag_Number, v: any) -> (err: Unmarshal_Error) {
+	hdr := _decode_header(&d.reader) or_return
 	#partial switch hdr {
 	case .U8, .U16, .U32, .U64, .Neg_U8, .Neg_U16, .Neg_U32, .Neg_U64:
 		switch &dst in v {
@@ -175,13 +174,13 @@ tag_time_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, v:
 }
 
 @(private)
-tag_time_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_Error {
+tag_time_marshal :: proc(_: ^Tag_Implementation, e: ^Encoder, v: any) -> Marshal_Error {
 	switch vv in v {
 	case time.Time:
 		// NOTE: we lose precision here, which is one of the reasons for this tag being opt-in.
 		i := time.time_to_unix(vv)
 
-		_encode_u8(e.writer, TAG_EPOCH_TIME_NR, .Tag) or_return
+		_encode_u8(&e.writer, TAG_EPOCH_TIME_NR, .Tag) or_return
 		return err_conv(_encode_uint(e, _int_to_uint(i)))
 	case:
 		unreachable()
@@ -189,8 +188,8 @@ tag_time_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_
 }
 
 @(private)
-tag_big_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, tnr: Tag_Number, v: any) -> (err: Unmarshal_Error) {
-	hdr := _decode_header(d.reader) or_return
+tag_big_unmarshal :: proc(_: ^Tag_Implementation, d: ^Decoder, tnr: Tag_Number, v: any) -> (err: Unmarshal_Error) {
+	hdr := _decode_header(&d.reader) or_return
 	maj, add := _header_split(hdr)
 	if maj != .Bytes {
 		// Only bytes are supported in this tag.
@@ -217,12 +216,12 @@ tag_big_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, tnr: Tag_Number, v
 }
 
 @(private)
-tag_big_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_Error {
+tag_big_marshal :: proc(_: ^Tag_Implementation, e: ^Encoder, v: any) -> Marshal_Error {
 	switch &vv in v {
 	case big.Int:
 		if !big.int_is_initialized(&vv) {
-			_encode_u8(e.writer, TAG_UNSIGNED_BIG_NR, .Tag) or_return
-			return _encode_u8(e.writer, 0, .Bytes)
+			_encode_u8(&e.writer, TAG_UNSIGNED_BIG_NR, .Tag) or_return
+			return _encode_u8(&e.writer, 0, .Bytes)
 		}
 
 		// NOTE: using the panic_allocator because all procedures should only allocate if the Int
@@ -232,7 +231,7 @@ tag_big_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_E
 		assert(err == nil, "should only error if not initialized, which has been checked")
 		
 		tnr: u8 = TAG_NEGATIVE_BIG_NR if is_neg else TAG_UNSIGNED_BIG_NR
-		_encode_u8(e.writer, tnr, .Tag) or_return
+		_encode_u8(&e.writer, tnr, .Tag) or_return
 
 		size_in_bytes, berr := big.int_to_bytes_size(&vv, false, mem.panic_allocator())
 		assert(berr == nil, "should only error if not initialized, which has been checked")
@@ -244,7 +243,7 @@ tag_big_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_E
 			bits, derr := big.int_bitfield_extract(&vv, offset, 8, mem.panic_allocator())
 			assert(derr == nil, "should only error if not initialized or invalid argument (offset and count), which won't happen")
 
-			io.write_full(e.writer, {u8(bits & 255)}) or_return
+			write_full(&e.writer, {u8(bits & 255)}) or_return
 		}
 		return nil
 
@@ -253,8 +252,8 @@ tag_big_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_E
 }
 
 @(private)
-tag_cbor_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, v: any) -> Unmarshal_Error {
-	hdr := _decode_header(d.reader) or_return
+tag_cbor_unmarshal :: proc(_: ^Tag_Implementation, d: ^Decoder, _: Tag_Number, v: any) -> Unmarshal_Error {
+	hdr := _decode_header(&d.reader) or_return
 	major, add := _header_split(hdr)
 	#partial switch major {
 	case .Bytes:
@@ -266,32 +265,32 @@ tag_cbor_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, v:
 }
 
 @(private)
-tag_cbor_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_Error {
-	_encode_u8(e.writer, TAG_CBOR_NR, .Tag) or_return
+tag_cbor_marshal :: proc(_: ^Tag_Implementation, e: ^Encoder, v: any) -> Marshal_Error {
+	_encode_u8(&e.writer, TAG_CBOR_NR, .Tag) or_return
 	ti := runtime.type_info_base(type_info_of(v.id))
 	#partial switch t in ti.variant {
 	case runtime.Type_Info_String:
-		return marshal_into(e, v)
+		return _marshal_value_into_encoder(e, v)
 	case runtime.Type_Info_Array:
 		elem_base := reflect.type_info_base(t.elem)
 		if elem_base.id != byte { return .Bad_Tag_Value }
-		return marshal_into(e, v)
+		return _marshal_value_into_encoder(e, v)
 	case runtime.Type_Info_Slice:
 		elem_base := reflect.type_info_base(t.elem)
 		if elem_base.id != byte { return .Bad_Tag_Value }
-		return marshal_into(e, v)
+		return _marshal_value_into_encoder(e, v)
 	case runtime.Type_Info_Dynamic_Array:
 		elem_base := reflect.type_info_base(t.elem)
 		if elem_base.id != byte { return .Bad_Tag_Value }
-		return marshal_into(e, v)
+		return _marshal_value_into_encoder(e, v)
 	case:
 		return .Bad_Tag_Value
 	}
 }
 
 @(private)
-tag_base64_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, v: any) -> (err: Unmarshal_Error) {
-	hdr        := _decode_header(d.reader) or_return
+tag_base64_unmarshal :: proc(_: ^Tag_Implementation, d: ^Decoder, _: Tag_Number, v: any) -> (err: Unmarshal_Error) {
+	hdr        := _decode_header(&d.reader) or_return
 	major, add := _header_split(hdr)
 	ti         := reflect.type_info_base(type_info_of(v.id))
 
@@ -358,8 +357,8 @@ tag_base64_unmarshal :: proc(_: ^Tag_Implementation, d: Decoder, _: Tag_Number, 
 }
 
 @(private)
-tag_base64_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marshal_Error {
-	_encode_u8(e.writer, TAG_BASE64_NR, .Tag) or_return
+tag_base64_marshal :: proc(_: ^Tag_Implementation, e: ^Encoder, v: any) -> Marshal_Error {
+	_encode_u8(&e.writer, TAG_BASE64_NR, .Tag) or_return
 
 	ti := runtime.type_info_base(type_info_of(v.id))
 	a := any{v.data, ti.id}
@@ -382,5 +381,7 @@ tag_base64_marshal :: proc(_: ^Tag_Implementation, e: Encoder, v: any) -> Marsha
 
 	out_len := base64.encoded_len(bytes)
 	err_conv(_encode_u64(e, u64(out_len), .Text)) or_return
-	return base64.encode_into(e.writer, bytes)
+
+	flush(&e.writer)
+	return base64.encode_into(e.writer.w, bytes)
 }

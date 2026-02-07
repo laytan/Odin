@@ -688,35 +688,35 @@ test_encode_lists :: proc(t: ^testing.T) {
 		bytes.buffer_init_allocator(&buf, 0, 0)
 		defer bytes.buffer_destroy(&buf)
 		stream  := bytes.buffer_to_stream(&buf)
-		encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, stream, {}}
+		encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, cbor.Buffered_Writer{w=stream}, {}}
 		
 		err: cbor.Encode_Error
-		err = cbor.encode_stream_begin(stream, .Array)
+		err = cbor.encode_stream_begin(&encoder.writer, .Array)
 		testing.expect_value(t, err, nil)
 
 		{
-			err = cbor.encode_stream_array_item(encoder, u8(1))
+			err = cbor.encode_stream_array_item(&encoder, u8(1))
 			testing.expect_value(t, err, nil)
 
-			err = cbor.encode_stream_array_item(encoder, &cbor.Array{u8(2), u8(3)})
+			err = cbor.encode_stream_array_item(&encoder, &cbor.Array{u8(2), u8(3)})
 			testing.expect_value(t, err, nil)
 
-			err = cbor.encode_stream_begin(stream, .Array)
+			err = cbor.encode_stream_begin(&encoder.writer, .Array)
 			testing.expect_value(t, err, nil)
 
 			{
-				err = cbor.encode_stream_array_item(encoder, u8(4))
+				err = cbor.encode_stream_array_item(&encoder, u8(4))
 				testing.expect_value(t, err, nil)
 
-				err = cbor.encode_stream_array_item(encoder, u8(5))
+				err = cbor.encode_stream_array_item(&encoder, u8(5))
 				testing.expect_value(t, err, nil)
 			}
 
-			err = cbor.encode_stream_end(stream)
+			err = cbor.encode_stream_end(&encoder.writer)
 			testing.expect_value(t, err, nil)
 		}
 
-		err = cbor.encode_stream_end(stream)
+		err = cbor.encode_stream_end(&encoder.writer)
 		testing.expect_value(t, err, nil)
 		
 		testing.expect_value(t, fmt.tprint(bytes.buffer_to_bytes(&buf)), fmt.tprint(transmute([]byte)string("\x9f\x01\x82\x02\x03\x9f\x04\x05\xff\xff")))
@@ -727,26 +727,26 @@ test_encode_lists :: proc(t: ^testing.T) {
 		bytes.buffer_init_allocator(&buf, 0, 0)
 		defer bytes.buffer_destroy(&buf)
 		stream  := bytes.buffer_to_stream(&buf)
-		encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, stream, {}}
+		encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, cbor.Buffered_Writer{w=stream}, {}}
 	
 		err: cbor.Encode_Error
-		err = cbor._encode_u8(stream, 2, .Array)
+		err = cbor._encode_u8(&encoder.writer, 2, .Array)
 		testing.expect_value(t, err, nil)
 		
 		a := "a"
-		err = cbor.encode(encoder, &a)
+		err = cbor.encode_value(&encoder, &a)
 		testing.expect_value(t, err, nil)
 		
 		{
-			err = cbor.encode_stream_begin(stream, .Map)
+			err = cbor.encode_stream_begin(&encoder.writer, .Map)
 			testing.expect_value(t, err, nil)
 			
 			b := "b"
 			c := "c"
-			err = cbor.encode_stream_map_entry(encoder, &b, &c)
+			err = cbor.encode_stream_map_entry(&encoder, &b, &c)
 			testing.expect_value(t, err, nil)
 
-			err = cbor.encode_stream_end(stream)
+			err = cbor.encode_stream_end(&encoder.writer)
 			testing.expect_value(t, err, nil)
 		}
 		
@@ -859,9 +859,9 @@ expect_encoding :: proc(t: ^testing.T, val: cbor.Value, encoded: string, loc := 
 	bytes.buffer_init_allocator(&buf, 0, 0)
 	defer bytes.buffer_destroy(&buf)
 	stream  := bytes.buffer_to_stream(&buf)
-	encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, stream, {}}
+	encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, cbor.Buffered_Writer{w=stream}, {}}
 
-	err := cbor.encode(encoder, val, loc)
+	err := cbor.encode(encoder, val)
 	testing.expect_value(t, err, nil, loc)
 	testing.expect_value(t, fmt.tprint(bytes.buffer_to_bytes(&buf)), fmt.tprint(transmute([]byte)encoded), loc)
 }
@@ -871,28 +871,28 @@ expect_streamed_encoding :: proc(t: ^testing.T, encoded: string, values: ..cbor.
 	bytes.buffer_init_allocator(&buf, 0, 0)
 	defer bytes.buffer_destroy(&buf)
 	stream  := bytes.buffer_to_stream(&buf)
-	encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, stream, {}}
+	encoder := cbor.Encoder{cbor.ENCODE_FULLY_DETERMINISTIC, cbor.Buffered_Writer{w=stream}, {}}
 
 	for value, i in values {
 		err: cbor.Encode_Error
 		err2: cbor.Encode_Error
 		#partial switch v in value {
 		case ^cbor.Bytes:
-			if i == 0 { err = cbor.encode_stream_begin(stream, .Bytes) }
-			err2 = cbor._encode_bytes(encoder, v^)
+			if i == 0 { err = cbor.encode_stream_begin(&encoder.writer, .Bytes) }
+			err2 = cbor._encode_bytes(&encoder, v^)
 		case ^cbor.Text:
-			if i == 0 { err = cbor.encode_stream_begin(stream, .Text) }
-			err2 = cbor._encode_text(encoder, v^)
+			if i == 0 { err = cbor.encode_stream_begin(&encoder.writer, .Text) }
+			err2 = cbor._encode_text(&encoder, v^)
 		case ^cbor.Array:
-			if i == 0 { err = cbor.encode_stream_begin(stream, .Array) }
+			if i == 0 { err = cbor.encode_stream_begin(&encoder.writer, .Array) }
 			for item in v {
-				err2 = cbor.encode_stream_array_item(encoder, item)
+				err2 = cbor.encode_stream_array_item(&encoder, item)
 				if err2 != nil { break } 
 			}
 		case ^cbor.Map:
-			err = cbor.encode_stream_begin(stream, .Map)
+			err = cbor.encode_stream_begin(&encoder.writer, .Map)
 			for item in v {
-				err2 = cbor.encode_stream_map_entry(encoder, item.key, item.value)
+				err2 = cbor.encode_stream_map_entry(&encoder, item.key, item.value)
 				if err2 != nil { break }
 			}
 		case:
@@ -903,7 +903,7 @@ expect_streamed_encoding :: proc(t: ^testing.T, encoded: string, values: ..cbor.
 		testing.expect_value(t, err2, nil, loc)
 	}
 
-	err := cbor.encode_stream_end(stream)
+	err := cbor.encode_stream_end(&encoder.writer)
 	testing.expect_value(t, err, nil, loc)
 
 	testing.expect_value(t, fmt.tprint(bytes.buffer_to_bytes(&buf)), fmt.tprint(transmute([]byte)encoded), loc)

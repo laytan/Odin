@@ -70,7 +70,7 @@ marshal_into_builder :: proc(b: ^strings.Builder, v: any, flags := ENCODE_SMALL,
 // Marshals the given value into a CBOR byte stream written to the given writer.
 // See docs on the `marshal_into` proc group for more info.
 marshal_into_writer :: proc(w: io.Writer, v: any, flags := ENCODE_SMALL, temp_allocator := context.temp_allocator) -> Marshal_Error {
-	encoder := Encoder{flags, w, temp_allocator}
+	encoder := Encoder{flags, Buffered_Writer{w=w}, temp_allocator}
 	return marshal_into_encoder(encoder, v)
 }
 
@@ -79,17 +79,23 @@ marshal_into_writer :: proc(w: io.Writer, v: any, flags := ENCODE_SMALL, temp_al
 marshal_into_encoder :: proc(e: Encoder, v: any) -> (err: Marshal_Error) {
 	e := e
 
+	defer flush(&e.writer)
+
 	if e.temp_allocator.procedure == nil {
 		e.temp_allocator = context.temp_allocator
 	}
 
 	if .Self_Described_CBOR in e.flags {
-		err_conv(_encode_u64(e, TAG_SELF_DESCRIBED_CBOR, .Tag)) or_return
+		err_conv(_encode_u64(&e, TAG_SELF_DESCRIBED_CBOR, .Tag)) or_return
 		e.flags -= { .Self_Described_CBOR }
 	}
 
+	return _marshal_value_into_encoder(&e, v)
+}
+
+_marshal_value_into_encoder :: proc(e: ^Encoder, v: any) -> (err: Marshal_Error) {
 	if v == nil {
-		return _encode_nil(e.writer)
+		return _encode_nil(&e.writer)
 	}
 	
 	// Check if type has a tag implementation to use.
@@ -101,7 +107,7 @@ marshal_into_encoder :: proc(e: Encoder, v: any) -> (err: Marshal_Error) {
 	return _marshal_into_encoder(e, v, ti)
 }
 
-_marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (err: Marshal_Error) {
+_marshal_into_encoder :: proc(e: ^Encoder, v: any, ti: ^runtime.Type_Info) -> (err: Marshal_Error) {
 	a := any{v.data, ti.id}
 	#partial switch info in ti.variant {
 	case runtime.Type_Info_Named, runtime.Type_Info_Enum, runtime.Type_Info_Bit_Field:
@@ -109,28 +115,28 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 	case runtime.Type_Info_Pointer:
 		switch vv in v {
-		case Undefined: return _encode_undefined(e.writer)
-		case Nil:       return _encode_nil(e.writer)
+		case Undefined: return _encode_undefined(&e.writer)
+		case Nil:       return _encode_nil(&e.writer)
 		}
 
 	case runtime.Type_Info_Integer:
 		switch vv in v {
-		case Simple:       return err_conv(_encode_simple(e.writer, vv))
-		case Negative_U8:  return _encode_u8(e.writer, u8(vv), .Negative)
+		case Simple:       return err_conv(_encode_simple(&e.writer, vv))
+		case Negative_U8:  return _encode_u8(&e.writer, u8(vv), .Negative)
 		case Negative_U16: return err_conv(_encode_u16(e, u16(vv), .Negative))
 		case Negative_U32: return err_conv(_encode_u32(e, u32(vv), .Negative))
 		case Negative_U64: return err_conv(_encode_u64(e, u64(vv), .Negative))
 		}
 
 		switch i in a {
-		case i8:      return _encode_uint(e.writer, _int_to_uint(i))
+		case i8:      return _encode_uint(&e.writer, _int_to_uint(i))
 		case i16:     return err_conv(_encode_uint(e, _int_to_uint(i)))
 		case i32:     return err_conv(_encode_uint(e, _int_to_uint(i)))
 		case i64:     return err_conv(_encode_uint(e, _int_to_uint(i)))
 		case i128:    return err_conv(_encode_uint(e, _int_to_uint(i128(i)) or_return))
 		case int:     return err_conv(_encode_uint(e, _int_to_uint(i64(i))))
 
-		case u8:      return _encode_uint(e.writer, i)
+		case u8:      return _encode_uint(&e.writer, i)
 		case u16:     return err_conv(_encode_uint(e, i))
 		case u32:     return err_conv(_encode_uint(e, i))
 		case u64:     return err_conv(_encode_uint(e, i))
@@ -165,15 +171,15 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 	case runtime.Type_Info_Float:
 		switch f in a {
-		case f16: return _encode_f16(e.writer, f)
+		case f16: return _encode_f16(&e.writer, f)
 		case f32: return _encode_f32(e, f)
 		case f64: return _encode_f64(e, f)
 
-		case f16le: return _encode_f16(e.writer, f16(f))
+		case f16le: return _encode_f16(&e.writer, f16(f))
 		case f32le: return _encode_f32(e, f32(f))
 		case f64le: return _encode_f64(e, f64(f))
 
-		case f16be: return _encode_f16(e.writer, f16(f))
+		case f16be: return _encode_f16(&e.writer, f16(f))
 		case f32be: return _encode_f32(e, f32(f))
 		case f64be: return _encode_f64(e, f64(f))
 		}
@@ -212,11 +218,11 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 	case runtime.Type_Info_Boolean:
 		switch b in a {
-		case bool: return _encode_bool(e.writer, b)
-		case b8:   return _encode_bool(e.writer, bool(b))
-		case b16:  return _encode_bool(e.writer, bool(b))
-		case b32:  return _encode_bool(e.writer, bool(b))
-		case b64:  return _encode_bool(e.writer, bool(b))
+		case bool: return _encode_bool(&e.writer, b)
+		case b8:   return _encode_bool(&e.writer, bool(b))
+		case b16:  return _encode_bool(&e.writer, bool(b))
+		case b32:  return _encode_bool(&e.writer, bool(b))
+		case b64:  return _encode_bool(&e.writer, bool(b))
 		}
 
 	case runtime.Type_Info_Array:
@@ -327,8 +333,8 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 					key   := rawptr(runtime.map_cell_index_dynamic(ks, info.map_info.ks, bucket_index))
 					value := rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, bucket_index))
 
-					marshal_into(e, any{ key, info.key.id }) or_return
-					marshal_into(e, any{ value, info.value.id }) or_return
+					_marshal_value_into_encoder(e, any{ key, info.key.id }) or_return
+					_marshal_value_into_encoder(e, any{ value, info.value.id }) or_return
 				}
 
 				return
@@ -346,12 +352,12 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 			// To sort a string/cstring we need to first sort by their encoded header/length.
 			// This fits in 9 bytes at most.
-			pre_key :: #force_inline proc(e: Encoder, str: string) -> (res: [10]byte) {
-				e := e
+			pre_key :: #force_inline proc(pe: ^Encoder, str: string) -> (res: [10]byte) {
+				e := pe^
 				builder := strings.builder_from_slice(res[:])
-				e.writer = strings.to_stream(&builder)
+				e.writer = Buffered_Writer{w=strings.to_stream(&builder)}
 
-				err := _encode_u64(e, u64(len(str)), .Text)
+				err := _encode_u64(&e, u64(len(str)), .Text)
 				assert(err == nil)
 				res[9] = u8(len(builder.buf))
 				assert(res[9] < 10)
@@ -396,11 +402,11 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 				})
 				
 				for &entry in entries {
-					io.write_full(e.writer, entry.pre_key[:entry.pre_key[9]]) or_return
-					io.write_full(e.writer, entry.key^) or_return
+					write_full(&e.writer, entry.pre_key[:entry.pre_key[9]]) or_return
+					write_full(&e.writer, entry.key^) or_return
 
 					value := rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, entry.val_idx))
-					marshal_into(e, any{ value, info.value.id }) or_return
+					_marshal_value_into_encoder(e, any{ value, info.value.id }) or_return
 				}
 				return
 
@@ -432,11 +438,11 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 				})
 
 				for &entry in entries {
-					io.write_full(e.writer, entry.pre_key[:entry.pre_key[9]]) or_return
-					io.write_full(e.writer, transmute([]byte)string(entry.key^)) or_return
+					write_full(&e.writer, entry.pre_key[:entry.pre_key[9]]) or_return
+					write_full(&e.writer, transmute([]byte)string(entry.key^)) or_return
 
 					value := rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, entry.val_idx))
-					marshal_into(e, any{ value, info.value.id }) or_return
+					_marshal_value_into_encoder(e, any{ value, info.value.id }) or_return
 				}
 				return
 
@@ -449,7 +455,8 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 					key := rawptr(runtime.map_cell_index_dynamic(ks, info.map_info.ks, bucket_index))
 					key_builder := strings.builder_make(0, 8, e.temp_allocator) or_return
-					marshal_into(Encoder{e.flags, strings.to_stream(&key_builder), e.temp_allocator}, any{ key, info.key.id }) or_return
+					key_encoder := Encoder{e.flags, Buffered_Writer{w=strings.to_stream(&key_builder)}, e.temp_allocator}
+					marshal_into(key_encoder, any{ key, info.key.id }) or_return
 					append(&entries, Encoded_Entry{ &key_builder.buf, bucket_index }) or_return
 				}
 
@@ -458,11 +465,11 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 				})
 
 				for entry in entries {
-					io.write_full(e.writer, entry.key[:]) or_return
+					write_full(&e.writer, entry.key[:]) or_return
 					delete(entry.key^)
 
 					value := rawptr(runtime.map_cell_index_dynamic(vs, info.map_info.vs, entry.val_idx))
-					marshal_into(e, any{ value, info.value.id }) or_return
+					_marshal_value_into_encoder(e, any{ value, info.value.id }) or_return
 				}
 				return
 			}
@@ -481,7 +488,7 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 			}
 		}
 
-		marshal_entry :: #force_inline proc(e: Encoder, info: runtime.Type_Info_Struct, v: any, i: int) -> Marshal_Error {
+		marshal_entry :: #force_inline proc(e: ^Encoder, info: runtime.Type_Info_Struct, v: any, i: int) -> Marshal_Error {
 			id := info.types[i].id
 			data := rawptr(uintptr(v.data) + info.offsets[i])
 			field_any := any{data, id}
@@ -501,7 +508,7 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 				err_conv(_encode_u64(e, nr, .Tag)) or_return
 			}
 
-			return marshal_into(e, field_any)
+			return _marshal_value_into_encoder(e, field_any)
 		}
 		
 		n: u64; {
@@ -528,7 +535,8 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 				}
 
 				key_builder := strings.builder_make(e.temp_allocator) or_return
-				err_conv(_encode_text(Encoder{e.flags, strings.to_stream(&key_builder), e.temp_allocator}, fname)) or_return
+				key_encoder := Encoder{e.flags, Buffered_Writer{w=strings.to_stream(&key_builder)}, e.temp_allocator}
+				err_conv(_encode_text(&key_encoder, fname)) or_return
 				append(&entries, Name{key_builder.buf[:], i}) or_return
 			}
 
@@ -538,7 +546,7 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 			})
 
 			for entry in entries {
-				io.write_full(e.writer, entry.name) or_return
+				write_full(&e.writer, entry.name) or_return
 				marshal_entry(e, info, v, entry.field) or_return
 			}
 		} else {
@@ -556,16 +564,16 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 
 	case runtime.Type_Info_Union:
 		switch vv in v {
-		case Value: return err_conv(encode(e, vv))
+		case Value: return err_conv(encode_value(e, vv))
 		}
 
 		id := reflect.union_variant_typeid(v)
 		if v.data == nil || id == nil {
-			return _encode_nil(e.writer)
+			return _encode_nil(&e.writer)
 		}
 
 		if len(info.variants) == 1 {
-			return marshal_into(e, any{v.data, id})
+			return _marshal_value_into_encoder(e, any{v.data, id})
 		}
 
 		// Encode a non-nil multi-variant union as the `TAG_OBJECT_TYPE`.
@@ -573,7 +581,7 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 		// that follows it.
 
 		err_conv(_encode_u16(e, TAG_OBJECT_TYPE, .Tag)) or_return
-		_encode_u8(e.writer, 2, .Array) or_return
+		_encode_u8(&e.writer, 2, .Array) or_return
 
 		vti := reflect.union_variant_type_info(v)
 		#partial switch vt in vti.variant {
@@ -586,17 +594,17 @@ _marshal_into_encoder :: proc(e: Encoder, v: any, ti: ^runtime.Type_Info) -> (er
 			err_conv(_encode_text(e, strings.to_string(builder))) or_return
 		}
 
-		return marshal_into(e, any{v.data, vti.id})
+		return _marshal_value_into_encoder(e, any{v.data, vti.id})
 
 	case runtime.Type_Info_Bit_Set:
 		// Store bit_set as big endian just like the protocol.
 		do_byte_swap := !reflect.bit_set_is_big_endian(v)
 		switch ti.size * 8 {
 		case  0:
-			return _encode_u8(e.writer, 0)
+			return _encode_u8(&e.writer, 0)
 		case  8:
 			x := (^u8)(v.data)^
-			return _encode_u8(e.writer, x)
+			return _encode_u8(&e.writer, x)
 		case 16:
 			x := (^u16)(v.data)^
 			if do_byte_swap { x = intrinsics.byte_swap(x) }

@@ -33,7 +33,7 @@ unmarshal :: proc {
 }
 
 unmarshal_from_reader :: proc(r: io.Reader, ptr: ^$T, flags := Decoder_Flags{}, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
-	err = unmarshal_from_decoder(Decoder{ DEFAULT_MAX_PRE_ALLOC, flags, r }, ptr, allocator, temp_allocator, loc)
+	err = unmarshal_from_decoder(Decoder{ DEFAULT_MAX_PRE_ALLOC, flags, Buffered_Reader{r=r} }, ptr, allocator, temp_allocator, loc)
 
 	// Normal EOF does not exist here, we try to read the exact amount that is said to be provided.
 	if err == .EOF { err = .Unexpected_EOF }
@@ -60,7 +60,7 @@ unmarshal_from_bytes :: proc(bytes: []byte, ptr: ^$T, flags := Decoder_Flags{}, 
 unmarshal_from_decoder :: proc(d: Decoder, ptr: ^$T, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
 	d := d
 
-	err = _unmarshal_any_ptr(d, ptr, nil, allocator, temp_allocator, loc)
+	err = _unmarshal_any_ptr(&d, ptr, nil, allocator, temp_allocator, loc)
 
 	// Normal EOF does not exist here, we try to read the exact amount that is said to be provided.
 	if err == .EOF { err = .Unexpected_EOF }
@@ -68,7 +68,7 @@ unmarshal_from_decoder :: proc(d: Decoder, ptr: ^$T, allocator := context.alloca
 
 }
 
-_unmarshal_any_ptr :: proc(d: Decoder, v: any, hdr: Maybe(Header) = nil, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> Unmarshal_Error {
+_unmarshal_any_ptr :: proc(d: ^Decoder, v: any, hdr: Maybe(Header) = nil, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> Unmarshal_Error {
 	context.allocator = allocator
 	context.temp_allocator = temp_allocator
 	v := v
@@ -84,13 +84,13 @@ _unmarshal_any_ptr :: proc(d: Decoder, v: any, hdr: Maybe(Header) = nil, allocat
 	}
 	
 	data := any{(^rawptr)(v.data)^, ti.variant.(reflect.Type_Info_Pointer).elem.id}	
-	return _unmarshal_value(d, data, hdr.? or_else (_decode_header(d.reader) or_return), allocator, temp_allocator, loc)
+	return _unmarshal_value(d, data, hdr.? or_else (_decode_header(&d.reader) or_return), allocator, temp_allocator, loc)
 }
 
-_unmarshal_value :: proc(d: Decoder, v: any, hdr: Header, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
+_unmarshal_value :: proc(d: ^Decoder, v: any, hdr: Header, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
 	v := v
 	ti := reflect.type_info_base(type_info_of(v.id))
-	r := d.reader
+	r := &d.reader
 
 	// If it's a union with only one variant, then treat it as that variant
 	if u, ok := ti.variant.(reflect.Type_Info_Union); ok && len(u.variants) == 1 {
@@ -332,7 +332,7 @@ _unmarshal_value :: proc(d: Decoder, v: any, hdr: Header, allocator := context.a
 	}
 }
 
-_unmarshal_bytes :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
+_unmarshal_bytes :: proc(d: ^Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
 	#partial switch t in ti.variant {
 	case reflect.Type_Info_String:
 		assert(t.encoding == .UTF_8)
@@ -394,7 +394,7 @@ _unmarshal_bytes :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header
 	return _unsupported(v, hdr)
 }
 
-_unmarshal_string :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
+_unmarshal_string :: proc(d: ^Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, temp_allocator := context.temp_allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
 	#partial switch t in ti.variant {
 	case reflect.Type_Info_String:
 		text := err_conv(_decode_text(d, add, allocator, loc)) or_return
@@ -439,9 +439,9 @@ _unmarshal_string :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Heade
 	return _unsupported(v, hdr)
 }
 
-_unmarshal_array :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
+_unmarshal_array :: proc(d: ^Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
 	assign_array :: proc(
-		d: Decoder,
+		d: ^Decoder,
 		da: ^mem.Raw_Dynamic_Array,
 		elemt: ^reflect.Type_Info,
 		length: int,
@@ -450,7 +450,7 @@ _unmarshal_array :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header
 		loc := #caller_location,
 	) -> (out_of_space: bool, err: Unmarshal_Error) {
 		for idx: uintptr = 0; length == -1 || idx < uintptr(length); idx += 1 {
-			hdr := _decode_header(d.reader) or_return
+			hdr := _decode_header(&d.reader) or_return
 			
 			// Double size if out of capacity.
 			if da.cap <= da.len {
@@ -622,10 +622,10 @@ _unmarshal_array :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header
 	}
 }
 
-_unmarshal_map :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
-	r := d.reader
-	decode_key :: proc(d: Decoder, v: any, allocator := context.allocator, loc := #caller_location) -> (k: string, err: Unmarshal_Error) {
-		entry_hdr := _decode_header(d.reader) or_return
+_unmarshal_map :: proc(d: ^Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, add: Add, allocator := context.allocator, loc := #caller_location) -> (err: Unmarshal_Error) {
+	r := &d.reader
+	decode_key :: proc(d: ^Decoder, v: any, allocator := context.allocator, loc := #caller_location) -> (k: string, err: Unmarshal_Error) {
+		entry_hdr := _decode_header(&d.reader) or_return
 		entry_maj, entry_add := _header_split(entry_hdr)
 		#partial switch entry_maj {
 		case .Text:
@@ -781,8 +781,8 @@ _unmarshal_map :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, 
 // Unmarshal into a union, based on the `TAG_OBJECT_TYPE` tag of the spec, it denotes a tag which
 // contains an array of exactly two elements, the first is a textual representation of the following
 // CBOR value's type.
-_unmarshal_union :: proc(d: Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, loc := #caller_location) -> (err: Unmarshal_Error) {
-	r := d.reader
+_unmarshal_union :: proc(d: ^Decoder, v: any, ti: ^reflect.Type_Info, hdr: Header, loc := #caller_location) -> (err: Unmarshal_Error) {
+	r := &d.reader
 	#partial switch t in ti.variant {
 	case reflect.Type_Info_Union:
 		idhdr: Header
