@@ -6,8 +6,7 @@ import "core:io"
 import "core:math/rand"
 import "core:mem"
 import "core:strings"
-
-import os "core:os/os2"
+import "core:os"
 
 Form_Data :: struct {
 	fields:   [dynamic]Form_Data_Part,

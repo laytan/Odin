@@ -10,7 +10,7 @@ import "core:nbio"
 import "core:net"
 import "core:strings"
 import "core:time"
-import os "core:os/os2"
+import "core:os"
 
 // Time we wait for a response from a DNS server in nanoseconds.
 DNS_SERVER_TIMEOUT :: #config(DNS_CLIENT_NAMESERVER_TIMEOUT, time.Second)

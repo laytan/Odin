@@ -1,3 +1,4 @@
+#+feature using-stmt
 #+build !js
 package http
 

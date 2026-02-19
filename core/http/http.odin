@@ -7,7 +7,7 @@ import "core:io"
 import "core:log"
 import "core:reflect"
 import "core:slice"
-import "core:os/os2"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -563,7 +563,7 @@ Mime_Type :: enum {
 }
 
 mime_from_extension :: proc(s: string) -> Mime_Type {
-	_, ext := os2.split_filename(s)
+	_, ext := os.split_filename(s)
 	switch ext {
 	case "html": return .Html
 	case "js":   return .Js

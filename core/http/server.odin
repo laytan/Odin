@@ -12,8 +12,7 @@ import "core:container/queue"
 import "core:mem/virtual"
 import "core:nbio"
 import "core:net"
-import "core:os" // NOTE: os.processor_core_count has no alternative yet
-import "core:os/os2"
+import "core:os"
 import "core:slice"
 import "core:sync"
 import "core:thread"
@@ -22,7 +21,6 @@ import win "core:sys/windows"
 import "core:c/libc"
 
 _ :: libc
-_ :: os2
 _ :: win
 
 Server_Opts :: struct {
@@ -149,7 +147,7 @@ listen :: proc(
 
 	s.tcp_sock = nbio.listen_tcp(endpoint) or_return
 
-	thread_count := max(0, s.opts.thread_count.? or_else os.processor_core_count())
+	thread_count := max(1, s.opts.thread_count.? or_else os.get_processor_core_count())
 	s.threads = make([]Server_Thread, thread_count, s.conn_allocator)
 	td = &s.threads[0]
 	td.state = .Listening
@@ -338,7 +336,7 @@ server_shutdown_on_interrupt :: proc(s: ^Server) {
 
 				// Force close on second signal.
 				if td.state == .Closing {
-					os2.exit(1)
+					os.exit(1)
 				}
 
 				server_shutdown(on_interrupt_server)
