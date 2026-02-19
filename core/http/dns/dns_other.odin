@@ -1,10 +1,10 @@
 #+build !windows
 package dns
 
-import    "core:log"
-import    "core:nbio"
-import    "core:net"
-import os "core:os/os2"
+import "core:log"
+import "core:nbio"
+import "core:net"
+import "core:os"
 
 @(private)
 _load_name_servers :: proc(c: ^Client) {
