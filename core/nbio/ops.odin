@@ -2255,9 +2255,10 @@ Stat :: struct {
 	handle: Handle,
 
 	// The type of the file.
-	type:   File_Type,
+	type:          File_Type,
 	// Size of the file in bytes.
-	size:   i64        `fmt:"M"`,
+	size:          i64        `fmt:"M"`,
+	last_modified: time.Time,
 
 	// An error, if it occurred.
 	err:    FS_Error,
