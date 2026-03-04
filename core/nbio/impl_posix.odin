@@ -1155,6 +1155,8 @@ stat_exec :: proc(op: ^Operation) {
 	}
 
 	op.stat.size = i64(stat.st_size)
+
+	op.stat.last_modified = time.Time{_nsec = i64(stat.st_mtim.tv_sec) * 1e9 + i64(stat.st_mtim.tv_nsec)}
 }
 
 add_pending :: proc(op: ^Operation, filter: kq.Filter, ident: uintptr) {

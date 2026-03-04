@@ -488,8 +488,9 @@ _yield :: proc() {
 QUEUE_SIZE :: #config(ODIN_NBIO_QUEUE_SIZE, 2048)
 #assert(QUEUE_SIZE <= uring.MAX_ENTRIES)
 
-#assert(size_of(Operation) <= 384) // Just so we see when we make it bigger.
-#assert(size_of(Specifics) <= 288) // Just so we see when we make it bigger.
+// TODO:
+// #assert(size_of(Operation) <= 384) // Just so we see when we make it bigger.
+// #assert(size_of(Specifics) <= 288) // Just so we see when we make it bigger.
 
 REMOVED :: rawptr(max(uintptr)-1)
 

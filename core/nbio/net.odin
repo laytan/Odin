@@ -13,6 +13,7 @@ TCP_Recv_Error :: net.TCP_Recv_Error
 UDP_Recv_Error :: net.UDP_Recv_Error
 Listen_Error   :: net.Listen_Error
 Create_Socket_Error :: net.Create_Socket_Error
+Bind_Error :: net.Bind_Error
 
 Address_Family  :: net.Address_Family
 Socket_Protocol :: net.Socket_Protocol
@@ -37,3 +38,4 @@ bind                 :: net.bind
 bound_endpoint       :: net.bound_endpoint
 parse_endpoint       :: net.parse_endpoint
 endpoint_to_string   :: net.endpoint_to_string
+shutdown             :: net.shutdown
