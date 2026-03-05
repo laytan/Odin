@@ -266,6 +266,7 @@ handle_upgrade :: proc(handler: ^http.Handler, req: ^http.Request, res: ^http.Re
 
 				http.set_header(&c.res, "Connection", "close")
 				http.respond(&c.res)
+				return
 			}
 		}
 	}
