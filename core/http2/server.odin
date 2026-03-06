@@ -774,6 +774,8 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 
 Scan_Cb :: #type proc(c: ^Connection)
 
+NO_TIMEOUT :: nbio.NO_TIMEOUT
+
 scan_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) {
 	timeout := timeout
 	if timeout < 0 {
@@ -1025,6 +1027,19 @@ write_response_heading :: proc(res: ^Response) {
 		return true
 	}
 }
+
+Response_State :: enum {
+	None,            // Send called: write heading, send both heading and given buffer. state is sent_heading
+	Written_Heading, // Send called: send both heading and given buffer. state is sent_heading
+	Sent_Heading,    // Send called: just send given content (add n)
+	Responding,      // Send called: panic? Send callback: close transaction
+}
+
+// send: adds 1 to a counter
+// if response heading isn't sent yet (state or some flag), send it first/together
+// callback: removes 1 from the counter
+// `respond`: set a flag/state that we are done
+// check in callback if counter is 0 and we are done: cleanup connection
 
 send_response_heading :: proc(res: ^Response) {
 	write_response_heading(res)
