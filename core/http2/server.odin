@@ -145,17 +145,14 @@ ARENA_SIZE :: 4096
 server_thread_get_free_arena :: proc(min_size: int = 0) -> ^mem.Arena {
 	size := max(ARENA_SIZE, uint(max(0, min_size+size_of(mem.Arena)+align_of(mem.Arena))))
 
-	if len(td.free_arenas) > 0 {
-		free_arena := td.free_arenas[len(td.free_arenas)-1]
+	if free_arena, has_free_arena := pop_safe(&td.free_arenas); has_free_arena {
 		if uint(len(free_arena.data)) >= size {
-			resize(&td.free_arenas, len(td.free_arenas)-1)
-
 			free_arena.offset     = 0
 			free_arena.peak_used  = 0
 			free_arena.temp_count = 0
-
 			return free_arena
 		}
+		append(&td.free_arenas, free_arena)
 	}
 
 	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, size, mem.DEFAULT_ALIGNMENT)
@@ -189,9 +186,6 @@ connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 			// log.debugf("http[t=%v][c=%v]: mode=%v, size=%M", td.id, c.socket, mode, size, location=location)
 
 			if len(c.arenas) == 0 {
-				// TODO: can we bootstrap this, we can have the first arena be a "bootstrap arena" which doesn't get freed every request.
-				c.arenas.allocator = td.connections.array.allocator
-
 				new_arena := server_thread_get_free_arena()
 				append(&c.arenas, new_arena)
 			}
@@ -401,6 +395,7 @@ _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 	thread.s = s
 	thread.id = id
+	thread.free_arenas.allocator = s.allocator
 	td = thread
 
 	if err := nbio.acquire_thread_event_loop(); err != nil {
@@ -550,6 +545,7 @@ _serve_connection :: proc(c: ^Connection) {
 	c.headers_quota = DEFAULT_HEADERS_QUOTA
 	c.body_quota    = DEFAULT_BODY_QUOTA
 
+	c.arenas.allocator       = td.s.allocator
 	c.buf.allocator          = allocator
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
@@ -608,8 +604,6 @@ _serve_connection :: proc(c: ^Connection) {
 				on_headers(c)
 				return
 			}
-
-			log.debugf("http[t=%v][c=%v]: header_line=%q", td.id, c.socket, line)
 
 			key, value, ok := header_parse(string(line))
 			if !ok {

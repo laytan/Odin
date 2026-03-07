@@ -2,12 +2,83 @@ package websocket
 
 import "base:intrinsics"
 
-import "core:unicode/utf8"
-import "core:log"
+import "core:crypto/hash"
+import "core:crypto/legacy/sha1"
+import "core:encoding/base64"
 import "core:encoding/endian"
+import "core:log"
+import "core:strings"
 import "core:time"
+import "core:unicode/utf8"
 
 import http "core:http2"
+
+// Predefined (by the WebSocket RFC) status codes.
+// Range `0   ..<1000` is unused.
+// Range `1000..<3000` is reserved for use by the WebSocket specification.
+// Range `3000..<4000` can be used by libraries, frameworks and applications and have to be registered with IANA.
+// Range `4000..<5000` can be used by users for private use between endpoints that agree on a meaning.
+Status :: enum u16be {
+	// Indicates a normal closure, meaning that the purpose for which the connection was
+	// established has been fulfilled.
+	Normal = 1000,
+	// Indicates that an endpoint is "going away",
+	// such as a server going down or browser having navigated away from a page.
+	Going_Away = 1001,
+	// Indicates that an endpoint is terminating the connection due to a protocol error.
+	Protocol_Error = 1002,
+	// Indicates that an endpoint is terminating the connection because it has
+	// received a type of data it cannot accept (e.g., an endpoint that understands only text
+	// data MAY send this if it receives a binary message).
+	Invalid_Type = 1003,
+	// Indicates no status code was present.
+	// NOTE: MUST not be set as a status code in a Close control frame by an endpoint.
+	No_Status = 1005,
+	// Indicates that the connection was closed abnormally, e.g., without sending or receiving
+	// a Close control frame.
+	// NOTE: MUST not be set as a status code in a Close control frame by an endpoint.
+	Abnormal_Close = 1006,
+	// Indicates that an endpoint is terminating the connection because it has received data
+	// within a message that was not consistent with the type of the message.
+	// (e.g., non-UTF8 data within a text message).
+	Inconsistent_Data = 1007,
+	// Indicates an endpoint is terminating the connection because it has received a message that
+	// violates its policy. This is a generic status code when there is no other more
+	// suitable status code (e.g., 1003 or 1009) or if there is a need to hide specific details
+	// about the policy.
+	Violates_Policy = 1008,
+	// Indicates an endpoint is terminating the connection because it has received a message that
+	// is too big for it to process.
+	Too_Big = 1009,
+	// Indicates that a client is terminating the connection because it has expected the server
+	// to negotiate one or more extensions, but the server didn't return them in the response
+	// message of the WebSocket handshake. The list of extensions that are needed SHOULD appear
+	// in the reason part of the Close frame. Note that this status code is not used by the server,
+	// because it can fail the WebSocket handshake instead.
+	Insufficient_Extension_Support = 1010,
+	// Indicates that a server is terminating the connection because it encountered an unexpected
+	// condition that prevented it from fulfilling the request.
+	Unexpected_Condition = 1011,
+	// Indicates that the connection was closed due to a failure to perform a TLS handshake.
+	// NOTE: MUST not be set as a status code in a Close control frame by an endpoint.
+	TLS_Handshake_Failure = 1015,
+}
+
+is_valid_status :: proc(s: Status) -> bool {
+	si := u16be(s)
+
+	if si >= 3000 && si < 5000 {
+		return true
+	}
+
+	#partial switch s {
+	case .Normal, .Going_Away, .Protocol_Error, .Invalid_Type, .Inconsistent_Data,
+		 .Violates_Policy, .Too_Big, .Insufficient_Extension_Support, .Unexpected_Condition:
+		return true
+	case:
+		return false
+	}
+}
 
 Closure :: struct #all_or_none {
 	type:   Closure_Type,
@@ -26,187 +97,62 @@ Message_Type :: enum {
 }
 
 Server :: struct {
+	// The spec mandates all `.Text` message types to have their UTF-8 encoding validated.
+	// This option can be used to bypass that, which might help with performance on large text messages.
 	no_utf8_validation: bool,
+	// Time that a connection is allowed to be idle.
+	// Zero means no timeout.
 	idle_timeout:       time.Duration,
+	// The maximum size of a message, this is without the header size.
 	max_message_size:   int,
 
+	// Called after the WebSocket handshake has been done and messages can start to be sent.
 	on_open:    proc(s: ^Server, c: ^http.Connection),
 	on_message: proc(s: ^Server, c: ^http.Connection, type: Message_Type, message: []byte),
+	// Called when the connection is either gracefully or abruptly closed.
+	// Guaranteed to be called in any situation for every connection.
+	// `closure` is `nil` if the close was not done through the WebSocket protocol (abrupt close for example).
 	on_close:   proc(s: ^Server, c: ^http.Connection, closure: Maybe(Closure)),
 
 	user_data: rawptr,
 }
 
+/*
+A HTTP handler that handles upgrade requests, adding upgraded connections to the server.
+*/
 handler :: proc(s: ^Server) -> http.Handler {
 	return http.Handler {
 		user_data = s,
-		handle = handle_upgrade,
-	}
-}
-
-handle_upgrade :: proc(handler: ^http.Handler, req: ^http.Request, res: ^http.Response) {
-	s := (^Server)(handler.user_data)
-	if !upgrade(req, res) {
-		return
-	}
-
-	c := http.connection_of_response(res)
-
-	http.context_add(&c.ctx, s)
-
-	if s.on_open != nil {
-		s.on_open(s, c)
-	}
-
-	if s.on_close != nil {
-		http.response_defer(res, proc(res: ^http.Response) {
-			c := http.connection_of_response(res)
-			s := http.context_get(&c.ctx, ^Server)^
-			closure := http.context_get(&c.ctx, Closure)
-			s.on_close(s, c, closure == nil ? nil : closure^)
-		})
-	}
-
-	handle_frame(c)
-
-	handle_frame :: proc(c: ^http.Connection) {
-		s := http.context_get(&c.ctx, ^Server)^
-
-		for {
-			head: ^Frame
-			head_idx: int
-			size: int
-			#reverse for var, i in c.ctx.vars {
-				(var.id == Frame) or_continue
-				var_frame := (^Frame)(var.val)
-				if var_frame.header.opcode == .Continuation {
-					size += len(var_frame.payload_data)
-				}
-				if var_frame.header.opcode != .Continuation {
-					if var_frame.header.fin { break }
-					if var_frame.header.opcode != .Text && var_frame.header.opcode != .Binary { break }
-					head = var_frame
-					head_idx = i
-					size += len(var_frame.payload_data)
-					break
-				}
-			}
-
-			max_size := s.max_message_size
-			if max_size <= 0 {
-				max_size = -1
-			} else {
-				max_size = max(0, max_size-size)
-			}
-
-			frame_val, scan_res := scan_frame_or_recv(c, max_size, s.idle_timeout, handle_frame)
-			switch scan_res {
-			case .Ok:
-			case .Needs_Recv:        unreachable()
-			case .Will_Callback:     return
-			case .Max_Size_Exceeded: send_close(c, .Too_Big, "message size too big"); continue
-			case:                    unreachable()
-			}
-
-			frame := http.context_add(&c.ctx, frame_val)
-
-			size += len(frame.payload_data)
-
-			log.debugf("websocket[t=%v][c=%v]: opcode=%v, fin=%v", http.td.id, c.socket, frame.header.opcode, frame.header.fin)
-
-			switch frame.header.opcode {
-			case .Binary, .Text:
-				if head != nil {
-					send_close(c, .Protocol_Error, "non-continuation frame while expecting a continuation")
-					continue
-				}
-
-				if !frame.header.fin {
-					continue
-				}
-
-				if frame.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(frame.payload_data)) {
-					send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
-					continue
-				}
-
-				assert(s.on_message != nil, "no message handler set")
-				s.on_message(s, c, Message_Type(frame.header.opcode), frame.payload_data)
-
-			case .Continuation:
-				if head == nil {
-					send_close(c, .Protocol_Error, "Continuation frame while no message is in progress")
-					continue
-				}
-
-				if !frame.header.fin {
-					continue
-				}
-
-				message, err := make([]byte, size, http.connection_allocator(c))
-				if err != nil {
-					send_close(c, .Too_Big, "out of memory")
-					continue
-				}
-
-				n := 0
-				for var, i in c.ctx.vars[head_idx:] {
-					assert(i != 0 || var.val == head)
-					(var.id == Frame) or_continue
-					var_frame := (^Frame)(var.val)
-					n += copy(message, var_frame.payload_data)
-				}
-				assert(n == size)
-
-				if head.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(message)) {
-					send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
-					continue
-				}
-
-				assert(s.on_message != nil, "no message handler set")
-				s.on_message(s, c, Message_Type(head.header.opcode), message)
-
-			case .Ping:
-				_send(c, .Pong, frame.payload_data)
-
-			case .Pong:
-
-			case .Close:
-				status := Status.No_Status
-				reason: string
-				if frame.payload_len >= 2 {
-					status = Status(endian.unchecked_get_u16be(frame.payload_data))
-					reason = string(frame.payload_data[2:])
-
-					if !is_valid_status(status) {
-						send_close(c, .Protocol_Error, "invalid close status code")
-						continue
-					}
-				}
-
-				if !s.no_utf8_validation && !utf8.valid_string(reason) {
-					send_close(c, .Inconsistent_Data, "close frame with invalid UTF-8 reason")
-					continue
-				}
-
-				closure := http.context_get(&c.ctx, Closure)
-				if closure == nil {
-					http.context_add(&c.ctx, Closure{
-						type   = .Client,
-						status = status,
-						reason = reason,
-					})
-					_send(c, .Close, frame.payload_data)
-				}
-
-				http.set_header(&c.res, "Connection", "close")
-				http.respond(&c.res)
+		handle = proc(handler: ^http.Handler, req: ^http.Request, res: ^http.Response) {
+			s := (^Server)(handler.user_data)
+			if !_upgrade(req, res) {
 				return
 			}
-		}
+
+			c := http.connection_of_response(res)
+			_serve_connection(s, c)
+		},
 	}
 }
 
+/*
+Immediately close a connection without a WebSocket handshake.
+
+Usually used for protocol errors, when a handshake wouldn't work anymore.
+
+Note that the HTTP layer still shuts down the socket and waits a bit before closing the socket.
+*/
+immediately_close :: proc(c: ^http.Connection, status: Status, reason: string) {
+	send_close(c, status, reason)
+	http.set_header(&c.res, "Connection", "close")
+	http.respond(&c.res)
+}
+
+/*
+Sends a close message to the client.
+
+The client is expected to acknowledge the closure to the server, after which the connection is closed.
+*/
 send_close :: proc(c: ^http.Connection, status: Status, reason: string) {
 	closure := http.context_add(&c.ctx, Closure{
 		type   = .Server,
@@ -214,11 +160,11 @@ send_close :: proc(c: ^http.Connection, status: Status, reason: string) {
 		reason = reason,
 	})
 
-	log.debugf("websocket[t=%v][c=%v]: status=%v, reason=%q", status, reason)
+	log.debugf("websocket[t=%v][c=%v]: status=%v, reason=%q", http.td.id, c.socket, status, reason)
 
 	if status == .Too_Big {
 		s := http.context_get(&c.ctx, ^Server)^
-		log.infof("websocket[t=%v][c=%v]: msg=\"max message size exceeded\", max=%v", s.max_message_size)
+		log.infof("websocket[t=%v][c=%v]: msg=\"max message size exceeded\", max=%v", http.td.id, c.socket, s.max_message_size)
 	}
 
 	#assert(intrinsics.type_core_type(Status) == u16be)
@@ -227,17 +173,311 @@ send_close :: proc(c: ^http.Connection, status: Status, reason: string) {
 	_send_multi(c, .Close, {status_bytes, transmute([]byte)reason})
 }
 
-send_message :: proc(c: ^http.Connection, type: Message_Type, data: []byte) {
-	_send(c, Opcode(type), data)
+/*
+Send a message to the client.
+*/
+send :: proc(c: ^http.Connection, type: Message_Type, data: []byte) {
+	_send(c, _Opcode(type), data)
 }
 
-_send :: proc(c: ^http.Connection, opcode: Opcode, data: []byte, fin := true) {
+@(rodata)
+_GUID := "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+_Opcode :: enum u8 {
+	Continuation,
+	Text,
+	Binary,
+	Close = 8,
+	Ping,
+	Pong,
+}
+
+_Frame_Header :: bit_field u16 {
+	opcode:       _Opcode | 4,
+	rsv3:         bool    | 1,
+	rsv2:         bool    | 1,
+	rsv1:         bool    | 1,
+	fin:          bool    | 1,
+	hpayload_len: u8      | 7,
+	masked:       bool    | 1,
+}
+
+_Frame :: struct {
+	header:       _Frame_Header,
+	payload_len:  u64,
+	payload_data: []byte,
+}
+
+_Mask :: [4]byte
+
+// Magic frame header length indicates length of payload is the following 2 bytes (as a u16be).
+_LEN_2_BYTES :: 126
+
+// Magic frame header length indicates length of payload is the following 8 bytes (as a u64be).
+_LEN_8_BYTES :: 127
+
+_prepare_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
+	res.status = .Bad_Request
+
+	upgrade, has_upgrade := http.get_header(req, "Upgrade")
+	if !has_upgrade {
+		return false
+	}
+
+	if !strings.equal_fold(upgrade, "websocket") {
+		return false
+	}
+
+	connection, _ := http.get_header(req, "Connection")
+	if !strings.equal_fold(connection, "upgrade") {
+		return false
+	}
+
+	version, _ := http.get_header(req, "Sec-WebSocket-Version")
+	if version != "13" {
+		http.set_header(res, "Sec-WebSocket-Version", "13")
+		return false
+	}
+
+	key, _ := http.get_header(req, "Sec-WebSocket-Key")
+	if base64.decoded_len(key) != 16 {
+		return false
+	}
+
+	{
+		ctx: hash.Context
+		hash.init(&ctx, .Insecure_SHA1)
+		hash.update(&ctx, transmute([]byte)key)
+		hash.update(&ctx, transmute([]byte)_GUID)
+
+		accept_hash: [sha1.DIGEST_SIZE]byte
+		hash.final(&ctx, accept_hash[:])
+
+		accept := base64.encode(accept_hash[:], allocator=context.temp_allocator)
+		http.set_header(res, "Sec-WebSocket-Accept", accept)
+	}
+
+	http.set_header(res, "Upgrade", "websocket")
+	http.set_header(res, "Connection", "upgrade")
+	res.status = .Switching_Protocols
+	return true
+}
+
+_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
+	ok := _prepare_upgrade(req, res)
+	if !ok {
+		http.respond(res)
+	} else {
+		http.send_heading(res)
+	}
+	return ok
+}
+
+_serve_connection :: proc(s: ^Server, c: ^http.Connection) {
+	http.context_add(&c.ctx, s)
+
+	if s.on_open != nil {
+		s.on_open(s, c)
+	}
+
+	if s.on_close != nil {
+		http.response_defer(&c.res, proc(res: ^http.Response) {
+			c := http.connection_of_response(res)
+			s := http.context_get(&c.ctx, ^Server)^
+			closure := http.context_get(&c.ctx, Closure)
+			s.on_close(s, c, closure == nil ? nil : closure^)
+		})
+	}
+
+	handle_message(c)
+
+	handle_message :: proc(c: ^http.Connection) {
+		header, ok := _scan_frame_header(c)
+		if !ok {
+			s := http.context_get(&c.ctx, ^Server)^
+			_scan_recv(s, c, handle_message)
+			return
+		}
+
+		if header.rsv1 || header.rsv2 || header.rsv3 {
+			immediately_close(c, .Protocol_Error, "reserved bits set")
+			return
+		}
+
+		switch header.opcode {
+		case .Text, .Binary, .Continuation:
+		case .Ping, .Pong, .Close:
+			if !header.fin {
+				immediately_close(c, .Protocol_Error, "fragmented control frame")
+				return
+			}
+			if header.hpayload_len > 125 {
+				immediately_close(c, .Protocol_Error, "invalid control frame length")
+				return
+			}
+		case:
+			immediately_close(c, .Protocol_Error, "invalid opcode")
+			return
+		}
+
+		frame := http.context_add(&c.ctx, _Frame{header = header})
+		handle_scan_payload_len_with_frame(c, frame)
+	}
+
+	handle_scan_payload_len :: proc(c: ^http.Connection) {
+		handle_scan_payload_len_with_frame(c, http.context_get(&c.ctx, _Frame))
+	}
+
+	handle_scan_payload_len_with_frame :: proc(c: ^http.Connection, frame: ^_Frame) {
+		s := http.context_get(&c.ctx, ^Server)^
+		if !_scan_payload_len(c, frame) {
+			_scan_recv(s, c, handle_scan_payload_len)
+			return
+		}
+
+		_, _, size := _find_fragmented_head(c, frame)
+
+		max_size := s.max_message_size - size
+		if max_size <= 0       { max_size = max(int) }
+		if frame.header.masked { max_size = min(max_size, max(int)-size_of(_Mask)) }
+
+		if frame.payload_len > u64(max_size) {
+			immediately_close(c, .Too_Big, "message size too big")
+			return
+		}
+
+		handle_scan_payload_with_frame(c, s, frame)
+	}
+
+	handle_scan_payload :: proc(c: ^http.Connection) {
+		handle_scan_payload_with_frame(c, http.context_get(&c.ctx, ^Server)^, http.context_get(&c.ctx, _Frame))
+	}
+
+	handle_scan_payload_with_frame :: proc(c: ^http.Connection, s: ^Server, frame: ^_Frame) {
+		if !_scan_payload(c, frame) {
+			_scan_recv(s, c, handle_scan_payload)
+			return
+		}
+
+		head, head_idx, size := _find_fragmented_head(c, frame)
+		size += len(frame.payload_data)
+
+		log.debugf("websocket[t=%v][c=%v]: opcode=%v, fin=%v", http.td.id, c.socket, frame.header.opcode, frame.header.fin)
+
+		switch frame.header.opcode {
+		case .Binary, .Text:
+			if head != nil {
+				immediately_close(c, .Protocol_Error, "non-continuation frame while expecting a continuation")
+				return
+			}
+
+			if !frame.header.fin {
+				handle_message(c)
+				return
+			}
+
+			if frame.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(frame.payload_data)) {
+				send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
+				handle_message(c)
+				return
+			}
+
+			assert(s.on_message != nil, "no message handler set")
+			s.on_message(s, c, Message_Type(frame.header.opcode), frame.payload_data)
+			handle_message(c)
+			return
+
+		case .Continuation:
+			if head == nil {
+				immediately_close(c, .Protocol_Error, "Continuation frame while no message is in progress")
+				return
+			}
+
+			if !frame.header.fin {
+				handle_message(c)
+				return
+			}
+
+			message, err := make([]byte, size, http.connection_allocator(c))
+			if err != nil {
+				send_close(c, .Too_Big, "out of memory")
+				handle_message(c)
+				return
+			}
+
+			n := 0
+			for var, _ in c.ctx.vars[head_idx:] {
+				(var.id == _Frame) or_continue
+				var_frame := (^_Frame)(var.val)
+				(var_frame == head || var_frame.header.opcode == .Continuation) or_continue
+				n += copy(message[n:], var_frame.payload_data)
+			}
+			assert(n == size)
+
+			if head.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(message)) {
+				send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
+				handle_message(c)
+				return
+			}
+
+			assert(s.on_message != nil, "no message handler set")
+			s.on_message(s, c, Message_Type(head.header.opcode), message)
+			handle_message(c)
+			return
+
+		case .Ping:
+			_send(c, .Pong, frame.payload_data)
+			handle_message(c)
+			return
+
+		case .Pong:
+			handle_message(c)
+			return
+
+		case .Close:
+			status := Status.No_Status
+			reason: string
+			if frame.payload_len >= 2 {
+				status = Status(endian.unchecked_get_u16be(frame.payload_data))
+				reason = string(frame.payload_data[2:])
+
+				if !is_valid_status(status) {
+					immediately_close(c, .Protocol_Error, "invalid close status code")
+					return
+				}
+			}
+
+			if !s.no_utf8_validation && !utf8.valid_string(reason) {
+				send_close(c, .Inconsistent_Data, "close frame with invalid UTF-8 reason")
+				handle_message(c)
+				return
+			}
+
+			closure := http.context_get(&c.ctx, Closure)
+			if closure == nil {
+				http.context_add(&c.ctx, Closure{
+					type   = .Client,
+					status = status,
+					reason = reason,
+				})
+				_send(c, .Close, frame.payload_data)
+			}
+
+			http.set_header(&c.res, "Connection", "close")
+			http.respond(&c.res)
+			return
+		}
+	}
+
+}
+
+_send :: proc(c: ^http.Connection, opcode: _Opcode, data: []byte, fin := true) {
 	_send_multi(c, opcode, {data}, fin)
 }
 
-_send_multi :: proc(c: ^http.Connection, opcode: Opcode, data: [][]byte, fin := true) {
-	Outgoing_Frame_Header :: struct {
-		header: Frame_Header,
+_send_multi :: proc(c: ^http.Connection, opcode: _Opcode, data: [][]byte, fin := true) {
+	Outgoing_Frame_Header :: struct #packed {
+		header: _Frame_Header,
 		len:    struct #raw_union {
 			len_8_bytes: u64be,
 			len_2_bytes: u16be,
@@ -253,14 +493,14 @@ _send_multi :: proc(c: ^http.Connection, opcode: Opcode, data: [][]byte, fin := 
 	data_len := 0
 	for buf in data { data_len += len(buf) }
 
-	length := size_of(Frame_Header)
+	length := size_of(_Frame_Header)
 	switch {
 	case data_len > int(max(u16)):
-		f.header.hpayload_len = LEN_8_BYTES
+		f.header.hpayload_len = _LEN_8_BYTES
 		length += size_of(u64)
 		f.len.len_8_bytes = u64be(data_len)
 	case data_len > 125:
-		f.header.hpayload_len = LEN_2_BYTES
+		f.header.hpayload_len = _LEN_2_BYTES
 		length += size_of(u16)
 		f.len.len_2_bytes = u16be(data_len)
 	case:
@@ -274,4 +514,94 @@ _send_multi :: proc(c: ^http.Connection, opcode: Opcode, data: [][]byte, fin := 
 	copy(bufs[1:], data)
 
 	http.send(&c.res, bufs)
+}
+
+_scan_frame_header :: proc(c: ^http.Connection) -> (header: _Frame_Header, ok: bool) {
+	header_bytes := http.scan_n(c, size_of(_Frame_Header)) or_return
+	header = intrinsics.unaligned_load((^_Frame_Header)(raw_data(header_bytes)))
+	ok = true
+	return
+}
+
+_scan_payload_len :: proc(c: ^http.Connection, frame: ^_Frame) -> bool {
+	switch frame.header.hpayload_len {
+	case _LEN_2_BYTES:
+		len_bytes := http.scan_n(c, size_of(u16be)) or_return
+		frame.payload_len = u64(endian.unchecked_get_u16be(len_bytes))
+	case _LEN_8_BYTES:
+		len_bytes := http.scan_n(c, size_of(u64be)) or_return
+		frame.payload_len = u64(endian.unchecked_get_u64be(len_bytes))
+	case:
+		assert(frame.header.hpayload_len <= 125)
+		frame.payload_len = u64(frame.header.hpayload_len)
+	}
+	return true
+}
+
+_scan_payload :: proc(c: ^http.Connection, frame: ^_Frame) -> bool {
+	size := int(frame.payload_len)
+	if frame.header.masked {
+		size += size_of(_Mask)
+	}
+
+	buf := http.scan_n(c, size) or_return
+
+	if frame.header.masked {
+		unmask(buf)
+		frame.payload_data = buf[4:]
+	} else {
+		frame.payload_data = buf
+	}
+
+	return true
+
+	unmask :: proc(buf: []byte) #no_bounds_check {
+		buf  := buf
+		mask := (^[4]byte)(raw_data(buf))^
+		buf   = buf[4:]
+
+		SIZE :: 16
+
+		mask_vec: #simd [SIZE]byte = {
+			mask[0], mask[1], mask[2], mask[3],
+			mask[0], mask[1], mask[2], mask[3],
+			mask[0], mask[1], mask[2], mask[3],
+			mask[0], mask[1], mask[2], mask[3],
+		}
+
+		for len(buf) > SIZE {
+			chunk := intrinsics.unaligned_load((^#simd [SIZE]byte)(raw_data(buf)))
+			chunk  = intrinsics.simd_bit_xor(chunk, mask_vec)
+			intrinsics.mem_copy_non_overlapping(raw_data(buf), (^[SIZE]byte)(&chunk), SIZE)
+			buf = buf[SIZE:]
+		}
+
+		for &b, i in buf {
+			b ~= mask[i & 3]
+		}
+	}
+}
+
+_find_fragmented_head :: proc(c: ^http.Connection, exclude: ^_Frame) -> (head: ^_Frame, head_idx: int, size: int) {
+	#reverse for var, i in c.ctx.vars {
+		(var.id == _Frame) or_continue
+		var_frame := (^_Frame)(var.val)
+		if var_frame == exclude { continue }
+		if var_frame.header.opcode == .Continuation {
+			size += len(var_frame.payload_data)
+		}
+		if var_frame.header.opcode == .Binary || var_frame.header.opcode == .Text {
+			if var_frame.header.fin { break }
+			head = var_frame
+			head_idx = i
+			size += len(var_frame.payload_data)
+			return
+		}
+	}
+	return
+}
+
+_scan_recv :: proc(s: ^Server, c: ^http.Connection, cb: http.Scan_Cb) {
+	c.body_quota = {}
+	http.scan_recv(c, s.idle_timeout <= 0 ? http.NO_TIMEOUT : s.idle_timeout, cb)
 }
