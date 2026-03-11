@@ -110,22 +110,24 @@ Server_Thread :: struct {
 	curr_accept: ^nbio.Operation,
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
-	free_arenas: [dynamic]^mem.Arena,
+	free_arenas: ^Arena,
 	date: [DATE_LENGTH]byte,
 }
 
+Arena :: struct {
+	using base: mem.Arena,
+	prev: ^Arena,
+}
 
 Connection :: struct {
-	// next:    ^Connection,
-	socket:  nbio.TCP_Socket,
-	recv:    ^nbio.Operation,
-	// state:   Connection_State,
-	// scanner: Scanner, // TODO: simplify / inline scanner
+	socket: nbio.TCP_Socket,
+	recv:   ^nbio.Operation,
 
 	using temp: struct {
-		arenas: [dynamic]^mem.Arena,
-		pos: int,
-		buf: [dynamic]byte,
+		arenas:          ^Arena,
+		temp_arenas:     ^Arena,
+		pos:             int,
+		buf:             [dynamic]byte,
 		last_recv_start: time.Time,
 		last_recv_dur:   time.Duration,
 		last_recv_n:     int,
@@ -142,39 +144,68 @@ Connection :: struct {
 
 ARENA_SIZE :: 4096
 
-server_thread_get_free_arena :: proc(min_size: int = 0) -> ^mem.Arena {
-	size := max(ARENA_SIZE, uint(max(0, min_size+size_of(mem.Arena)+align_of(mem.Arena))))
+server_thread_get_free_arena :: proc(min_size: int = 0) -> ^Arena {
+	size := max(ARENA_SIZE, uint(max(0, min_size+size_of(Arena)+align_of(Arena))))
 
-	if free_arena, has_free_arena := pop_safe(&td.free_arenas); has_free_arena {
-		if uint(len(free_arena.data)) >= size {
-			free_arena.offset     = 0
-			free_arena.peak_used  = 0
-			free_arena.temp_count = 0
-			return free_arena
+	{
+		free_arena := td.free_arenas
+		if free_arena != nil {
+			if  uint(len(free_arena.data)) >= size {
+				td.free_arenas = free_arena.prev
+				free_arena.offset = size_of(Arena)
+				free_arena.peak_used, free_arena.temp_count = 0, 0
+				free_arena.prev = nil
+				return free_arena
+			}
 		}
-		append(&td.free_arenas, free_arena)
 	}
 
 	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, size, mem.DEFAULT_ALIGNMENT)
 	assert(err == nil) // TODO: Handle
 
-	arena: mem.Arena
-	mem.arena_init(&arena, data)
+	arena := (^Arena)(raw_data(data))
+	arena.data   = data
+	arena.offset = size_of(Arena)
 
-	new_arena, new_arena_err := new_clone(arena, mem.arena_allocator(&arena))
-	assert(new_arena_err == nil)
-
-	return new_arena
+	return arena
 }
 
-connection_allocator_destroy :: proc(c: ^Connection) {
-	for arena in c.arenas {
-		append(&td.free_arenas, arena)
+transaction_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
+	arena := c.arenas
+	for arena != nil {
+		prev_arena := arena.prev
+		mem_used += arena.peak_used
+		arena.prev = td.free_arenas
+		td.free_arenas = arena
+		arena = prev_arena
 	}
-	delete(c.arenas)
+	c.arenas = nil
+	return
 }
 
-connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+temp_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
+	arena := c.temp_arenas
+	for arena != nil {
+		prev_arena := arena.prev
+		mem_used += arena.peak_used
+		arena.prev = td.free_arenas
+		td.free_arenas = arena
+		arena = prev_arena
+	}
+	c.temp_arenas = nil
+	return
+}
+
+transaction_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+	return connection_allocator(c, "arenas", false)
+}
+
+temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+	return connection_allocator(c, "temp_arenas", true)
+}
+
+@(private="file")
+connection_allocator :: proc(c: ^Connection, $ARENAS_FIELD: string, $FREE_ALL: bool) -> runtime.Allocator {
 	return {
 		data = c,
 		procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode,
@@ -183,21 +214,31 @@ connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
                              location: runtime.Source_Code_Location) -> (bs: []byte, err: runtime.Allocator_Error) {
 			c := (^Connection)(allocator_data)
 
-			// log.debugf("http[t=%v][c=%v]: mode=%v, size=%M", td.id, c.socket, mode, size, location=location)
-
-			if len(c.arenas) == 0 {
-				new_arena := server_thread_get_free_arena()
-				append(&c.arenas, new_arena)
+			get_arena :: #force_inline proc(c: ^Connection) -> ^Arena {
+				return (^^Arena)(uintptr(c) + offset_of_by_string(Connection, ARENAS_FIELD))^
 			}
 
-			arena := c.arenas[len(c.arenas)-1]
+			set_arena :: #force_inline proc(c: ^Connection, arena: ^Arena) {
+				(^^Arena)(uintptr(c) + offset_of_by_string(Connection, ARENAS_FIELD))^ = arena
+			}
+
+			new_arena :: proc(c: ^Connection, min_size := 0) -> ^Arena {
+				arena := server_thread_get_free_arena(min_size)
+				arena.prev = get_arena(c)
+				set_arena(c, arena)
+				return arena
+			}
+
+			arena := get_arena(c)
+			if arena == nil {
+				arena = new_arena(c)
+			}
 
 			switch mode {
 			case .Alloc:
 				bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
 				if err == .Out_Of_Memory {
-					arena = server_thread_get_free_arena(size)
-					append(&c.arenas, arena)
+					arena = new_arena(c, size)
 					bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
 				}
 				return
@@ -205,8 +246,7 @@ connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 			case .Alloc_Non_Zeroed:
 				bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, alignment, location)
 				if err == .Out_Of_Memory {
-					arena = server_thread_get_free_arena(size)
-					append(&c.arenas, arena)
+					arena = new_arena(c, size)
 					bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, alignment, location)
 				}
 				return
@@ -215,8 +255,7 @@ connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 				should_zero := mode == .Resize
 				bs, err = mem._default_resize_bytes_align(mem.byte_slice(old_memory, old_size), size, alignment, should_zero, mem.arena_allocator(arena), location)
 				if err == .Out_Of_Memory {
-					arena = server_thread_get_free_arena(size)
-					append(&c.arenas, arena)
+					arena = new_arena(c, size)
 					if should_zero {
 						bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
 					} else {
@@ -230,10 +269,23 @@ connection_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 				set := (^mem.Allocator_Mode_Set)(old_memory)
 				if set != nil {
 					set^ = {.Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed, .Query_Features}
+					when FREE_ALL {
+						set^ += {.Free_All}
+					}
 				}
 				return nil, nil
 
-			case .Free, .Free_All, .Query_Info:
+			case .Free_All:
+				when FREE_ALL {
+					#assert(ARENAS_FIELD == "temp_arenas")
+					temp_allocator_destroy(c)
+
+					return nil, nil
+				} else {
+					return nil, .Mode_Not_Implemented
+				}
+
+			case .Free, .Query_Info:
 				return nil, .Mode_Not_Implemented
 
 			case:
@@ -255,7 +307,7 @@ Context_Var :: struct {
 }
 
 context_add :: proc(ctx: ^Context, var: $T) -> ^T {
-	val := new_clone(var, connection_allocator(connection_of_context(ctx)))
+	val := new_clone(var, transaction_allocator(connection_of_context(ctx)))
 	append(&ctx.vars, Context_Var{
 		id  = T,
 		val = val,
@@ -395,7 +447,6 @@ _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 	thread.s = s
 	thread.id = id
-	thread.free_arenas.allocator = s.allocator
 	td = thread
 
 	if err := nbio.acquire_thread_event_loop(); err != nil {
@@ -513,7 +564,10 @@ connection_destroy :: proc(c: ^Connection) {
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
 	nbio.close(c.socket)
 
-	connection_allocator_destroy(c)
+	mem_use := transaction_allocator_destroy(c) + temp_allocator_destroy(c)
+	if mem_use > 0 {
+		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
+	}
 
 	idx, ok := xar.linear_search(&td.connections, c)
 	assert(ok)
@@ -528,14 +582,7 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 }
 
 _serve_connection :: proc(c: ^Connection) {
-	allocator := connection_allocator(c)
-
-	mem_use: int
-	for arena in pop_safe(&c.arenas) {
-		mem_use += arena.peak_used
-		append(&td.free_arenas, arena)
-	}
-
+	mem_use := transaction_allocator_destroy(c) + temp_allocator_destroy(c)
 	if mem_use > 0 {
 		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
 	}
@@ -545,7 +592,8 @@ _serve_connection :: proc(c: ^Connection) {
 	c.headers_quota = DEFAULT_HEADERS_QUOTA
 	c.body_quota    = DEFAULT_BODY_QUOTA
 
-	c.arenas.allocator       = td.s.allocator
+	allocator := transaction_allocator(c)
+
 	c.buf.allocator          = allocator
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
@@ -653,8 +701,8 @@ _serve_connection :: proc(c: ^Connection) {
 				c.req.line.method = .Get
 			}
 
-			context.temp_allocator = connection_allocator(c)
-			c.ctx.vars.allocator   = context.temp_allocator
+			context.temp_allocator = temp_allocator(c) 
+			c.ctx.vars.allocator   = transaction_allocator(c)
 			c.res.status = .OK
 			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx.req, &c.ctx.res)
 		}
@@ -770,6 +818,11 @@ Scan_Cb :: #type proc(c: ^Connection)
 
 NO_TIMEOUT :: nbio.NO_TIMEOUT
 
+// TODO: way to free parts of what we scanned, some checkpoint system?
+// TODO: the heading of the request (request line, headers, etc.) should never be freed.
+// TODO: but a user may want to read part of the body and "free" it when done. (websockets for example can scan a message, handle it, free it).
+// NOTE: could maybe be done with a way to switch the buffer we scan in, allowing switching it to `temp_allocator`.
+
 scan_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) {
 	timeout := timeout
 	if timeout < 0 {
@@ -786,7 +839,7 @@ scan_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) {
 	if len(to_recv) < MIN {
 		new_cap := max(MIN*2, 2*cap(c.buf))
 		log.debugf("http[t=%v][c=%v]: prev_unwritten=%v, new_unwritten=%v", td.id, c.socket, len(to_recv), new_cap)
-		new_buf, err := make([dynamic]byte, new_cap, connection_allocator(c))
+		new_buf, err := make([dynamic]byte, new_cap, transaction_allocator(c))
 		assert(err == nil)
 		left := c.buf[c.pos:]
 		copy(new_buf[:], left)

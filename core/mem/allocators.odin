@@ -145,7 +145,7 @@ panic_allocator_proc :: proc(
 Arena allocator data.
 */
 Arena :: struct {
-	data:       []byte,
+	data:       []byte `fmt:"-"`,
 	offset:     int,
 	peak_used:  int,
 	temp_count: int,
