@@ -10,6 +10,7 @@ import "core:log"
 import "core:strings"
 import "core:time"
 import "core:unicode/utf8"
+import "core:nbio"
 
 import http "core:http2"
 
@@ -154,17 +155,22 @@ Sends a close message to the client.
 The client is expected to acknowledge the closure to the server, after which the connection is closed.
 */
 send_close :: proc(c: ^http.Connection, status: Status, reason: string) {
-	closure := http.context_add(&c.ctx, Closure{
+	ws := http.context_get(&c.ctx, Connection)
+	if ws.closure != nil {
+		return
+	}
+
+	ws.closure = Closure{
 		type   = .Server,
 		status = status,
 		reason = reason,
-	})
+	}
+	closure := &ws.closure.(Closure)
 
 	log.debugf("websocket[t=%v][c=%v]: status=%v, reason=%q", http.td.id, c.socket, status, reason)
 
 	if status == .Too_Big {
-		s := http.context_get(&c.ctx, ^Server)^
-		log.infof("websocket[t=%v][c=%v]: msg=\"max message size exceeded\", max=%v", http.td.id, c.socket, s.max_message_size)
+		log.infof("websocket[t=%v][c=%v]: msg=\"max message size exceeded\", max=%v", http.td.id, c.socket, ws.s.max_message_size)
 	}
 
 	#assert(intrinsics.type_core_type(Status) == u16be)
@@ -273,29 +279,47 @@ _upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
 	return ok
 }
 
+Connection :: struct {
+	s:       ^Server,
+	closure: Maybe(Closure),
+	frames:  [dynamic]_Frame,
+}
+
 _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
-	http.context_add(&c.ctx, s)
+	ws := http.context_add(&c.ctx, Connection{
+		s = s,
+	})
+	ws.frames.allocator = http.transaction_allocator(c)
+
+	if s.on_close != nil {
+		http.response_defer(&c.res, proc(res: ^http.Response) {
+			c  := http.connection_of_response(res)
+			ws := http.context_get(&c.ctx, Connection)
+			ws.s.on_close(ws.s, c, ws.closure)
+		})
+	}
 
 	if s.on_open != nil {
 		s.on_open(s, c)
 	}
 
-	if s.on_close != nil {
-		http.response_defer(&c.res, proc(res: ^http.Response) {
-			c := http.connection_of_response(res)
-			s := http.context_get(&c.ctx, ^Server)^
-			closure := http.context_get(&c.ctx, Closure)
-			s.on_close(s, c, closure == nil ? nil : closure^)
+	handle_frame_with_ws(c, ws)
+
+	// TODO: this is quite hacky.
+	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
+		nbio.next_tick_poly2(c, ws, proc(_: ^nbio.Operation, c: ^http.Connection, ws: ^Connection) {
+			handle_frame_with_ws(c, ws)
 		})
 	}
 
-	handle_message(c)
+	handle_frame :: proc(c: ^http.Connection) {
+		handle_frame_with_ws(c, http.context_get(&c.ctx, Connection))
+	}
 
-	handle_message :: proc(c: ^http.Connection) {
+	handle_frame_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
 		header, ok := _scan_frame_header(c)
 		if !ok {
-			s := http.context_get(&c.ctx, ^Server)^
-			_scan_recv(s, c, handle_message)
+			_scan_recv(ws.s, c, handle_frame)
 			return
 		}
 
@@ -320,24 +344,24 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			return
 		}
 
-		frame := http.context_add(&c.ctx, _Frame{header = header})
-		handle_scan_payload_len_with_frame(c, frame)
+		append(&ws.frames, _Frame{header = header})
+		handle_scan_payload_len_with_ws(c, ws)
 	}
 
 	handle_scan_payload_len :: proc(c: ^http.Connection) {
-		handle_scan_payload_len_with_frame(c, http.context_get(&c.ctx, _Frame))
+		handle_scan_payload_len_with_ws(c, http.context_get(&c.ctx, Connection))
 	}
 
-	handle_scan_payload_len_with_frame :: proc(c: ^http.Connection, frame: ^_Frame) {
-		s := http.context_get(&c.ctx, ^Server)^
+	handle_scan_payload_len_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
+		frame := &ws.frames[len(ws.frames)-1]
 		if !_scan_payload_len(c, frame) {
-			_scan_recv(s, c, handle_scan_payload_len)
+			_scan_recv(ws.s, c, handle_scan_payload_len)
 			return
 		}
 
-		_, _, size := _find_fragmented_head(c, frame)
+		_, _, size := _find_fragmented_head(ws)
 
-		max_size := s.max_message_size - size
+		max_size := ws.s.max_message_size - size
 		if max_size <= 0       { max_size = max(int) }
 		if frame.header.masked { max_size = min(max_size, max(int)-size_of(_Mask)) }
 
@@ -346,20 +370,22 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			return
 		}
 
-		handle_scan_payload_with_frame(c, s, frame)
+		handle_scan_payload_with_ws(c, ws)
 	}
 
 	handle_scan_payload :: proc(c: ^http.Connection) {
-		handle_scan_payload_with_frame(c, http.context_get(&c.ctx, ^Server)^, http.context_get(&c.ctx, _Frame))
+		handle_scan_payload_with_ws(c, http.context_get(&c.ctx, Connection))
 	}
 
-	handle_scan_payload_with_frame :: proc(c: ^http.Connection, s: ^Server, frame: ^_Frame) {
+	handle_scan_payload_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
+		s := ws.s
+		frame := &ws.frames[len(ws.frames)-1]
 		if !_scan_payload(c, frame) {
 			_scan_recv(s, c, handle_scan_payload)
 			return
 		}
 
-		head, head_idx, size := _find_fragmented_head(c, frame)
+		head, head_idx, size := _find_fragmented_head(ws)
 		size += len(frame.payload_data)
 
 		log.debugf("websocket[t=%v][c=%v]: opcode=%v, fin=%v", http.td.id, c.socket, frame.header.opcode, frame.header.fin)
@@ -372,19 +398,24 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			}
 
 			if !frame.header.fin {
-				handle_message(c)
+				handle_next_frame(c, ws)
 				return
 			}
 
-			if frame.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(frame.payload_data)) {
+			if frame.header.opcode == .Text && !ws.s.no_utf8_validation && !utf8.valid_string(string(frame.payload_data)) {
 				send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
-				handle_message(c)
+				pop(&ws.frames)
+				handle_next_frame(c, ws)
 				return
 			}
 
 			assert(s.on_message != nil, "no message handler set")
 			s.on_message(s, c, Message_Type(frame.header.opcode), frame.payload_data)
-			handle_message(c)
+
+			free_all(http.temp_allocator(c))
+			pop(&ws.frames)
+
+			handle_next_frame(c, ws)
 			return
 
 		case .Continuation:
@@ -394,44 +425,52 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			}
 
 			if !frame.header.fin {
-				handle_message(c)
+				handle_next_frame(c, ws)
 				return
 			}
 
-			message, err := make([]byte, size, http.connection_allocator(c))
+			message, err := make([]byte, size, http.temp_allocator(c))
 			if err != nil {
 				send_close(c, .Too_Big, "out of memory")
-				handle_message(c)
+				resize(&ws.frames, 0)
+				handle_next_frame(c, ws)
 				return
 			}
 
 			n := 0
-			for var, _ in c.ctx.vars[head_idx:] {
-				(var.id == _Frame) or_continue
-				var_frame := (^_Frame)(var.val)
-				(var_frame == head || var_frame.header.opcode == .Continuation) or_continue
-				n += copy(message[n:], var_frame.payload_data)
+			for frame in ws.frames[head_idx:] {
+				#partial switch frame.header.opcode {
+				case .Continuation, .Text, .Binary:
+					n += copy(message[n:], frame.payload_data)
+				}
 			}
 			assert(n == size)
 
 			if head.header.opcode == .Text && !s.no_utf8_validation && !utf8.valid_string(string(message)) {
 				send_close(c, .Inconsistent_Data, "Invalid UTF-8 text")
-				handle_message(c)
+				resize(&ws.frames, 0)
+				handle_next_frame(c, ws)
 				return
 			}
 
 			assert(s.on_message != nil, "no message handler set")
 			s.on_message(s, c, Message_Type(head.header.opcode), message)
-			handle_message(c)
+
+			free_all(http.temp_allocator(c))
+			resize(&ws.frames, 0)
+
+			handle_next_frame(c, ws)
 			return
 
 		case .Ping:
 			_send(c, .Pong, frame.payload_data)
-			handle_message(c)
+			pop(&ws.frames)
+			handle_next_frame(c, ws)
 			return
 
 		case .Pong:
-			handle_message(c)
+			pop(&ws.frames)
+			handle_next_frame(c, ws)
 			return
 
 		case .Close:
@@ -449,23 +488,26 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 
 			if !s.no_utf8_validation && !utf8.valid_string(reason) {
 				send_close(c, .Inconsistent_Data, "close frame with invalid UTF-8 reason")
-				handle_message(c)
+				pop(&ws.frames)
+				handle_next_frame(c, ws)
 				return
 			}
 
-			closure := http.context_get(&c.ctx, Closure)
-			if closure == nil {
-				http.context_add(&c.ctx, Closure{
+			if ws.closure == nil {
+				ws.closure = Closure{
 					type   = .Client,
 					status = status,
 					reason = reason,
-				})
+				}
 				_send(c, .Close, frame.payload_data)
 			}
 
+			pop(&ws.frames)
 			http.set_header(&c.res, "Connection", "close")
 			http.respond(&c.res)
 			return
+		case:
+			unreachable()
 		}
 	}
 
@@ -483,12 +525,13 @@ _send_multi :: proc(c: ^http.Connection, opcode: _Opcode, data: [][]byte, fin :=
 			len_2_bytes: u16be,
 		},
 	}
+	// TODO: "leak"; sends will keep increasing mem until connection closed
 	f := new_clone(Outgoing_Frame_Header{
 		header = {
 			opcode = opcode,
 			fin    = fin,
 		},
-	}, http.connection_allocator(c))
+	}, http.transaction_allocator(c))
 
 	data_len := 0
 	for buf in data { data_len += len(buf) }
@@ -582,22 +625,22 @@ _scan_payload :: proc(c: ^http.Connection, frame: ^_Frame) -> bool {
 	}
 }
 
-_find_fragmented_head :: proc(c: ^http.Connection, exclude: ^_Frame) -> (head: ^_Frame, head_idx: int, size: int) {
-	#reverse for var, i in c.ctx.vars {
-		(var.id == _Frame) or_continue
-		var_frame := (^_Frame)(var.val)
-		if var_frame == exclude { continue }
-		if var_frame.header.opcode == .Continuation {
-			size += len(var_frame.payload_data)
-		}
-		if var_frame.header.opcode == .Binary || var_frame.header.opcode == .Text {
-			if var_frame.header.fin { break }
-			head = var_frame
-			head_idx = i
-			size += len(var_frame.payload_data)
-			return
+_find_fragmented_head :: proc(ws: ^Connection) -> (head: ^_Frame, head_idx: int, size: int) {
+	if len(ws.frames) > 1 {
+		#reverse for &frame, i in ws.frames[:len(ws.frames)-1] {
+			#partial switch frame.header.opcode {
+			case .Continuation:
+				size += len(frame.payload_data)
+			case .Text, .Binary:
+				assert(!frame.header.fin)
+				head = &frame
+				head_idx = i
+				size += len(frame.payload_data)
+				return
+			}
 		}
 	}
+
 	return
 }
 

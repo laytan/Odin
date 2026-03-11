@@ -14,13 +14,13 @@ import "core:strings"
 
 set_content_length_header :: proc(res: ^Response, length: int, loc := #caller_location) {
 	if length <= 0 { return }
-	b := strings.builder_make(0, connection_allocator(connection_of_response(res)))
+	b := strings.builder_make(0, transaction_allocator(connection_of_response(res)))
 	strings.write_int(&b, length)
 	set_header(res, "Content-Length", strings.to_string(b), loc)
 }
 
 set_content_range_header :: proc(res: ^Response, range: Maybe([2]int), size: int, loc := #caller_location) {
-	b := strings.builder_make(0, 32, connection_allocator(connection_of_response(res)))
+	b := strings.builder_make(0, 32, transaction_allocator(connection_of_response(res)))
 
 	strings.write_string(&b, "bytes ")
 	if r, has_range := range.?; has_range {
@@ -134,7 +134,7 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 	assert(size > 0)
 
 	c := connection_of_response(res)
-	allocator := connection_allocator(c)
+	allocator := transaction_allocator(c)
 
 	set_header(res, "Accept-Ranges", "bytes")
 
