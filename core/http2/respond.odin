@@ -6,7 +6,6 @@ import "base:intrinsics"
 import "core:nbio"
 import "core:os"
 import "core:log"
-import "core:fmt"
 import "core:time"
 import "core:strings"
 
@@ -140,6 +139,7 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 
 	{
 		last_modified_buf, err := make([]byte, DATE_LENGTH, allocator)
+		assert(err == nil) // TODO: err
 		date_write(last_modified_buf, last_modified)
 		set_header(res, "Last-Modified", string(last_modified_buf))
 	}

@@ -10,7 +10,6 @@ import "core:log"
 import "core:strings"
 import "core:time"
 import "core:unicode/utf8"
-import "core:nbio"
 
 import http "core:http2"
 
@@ -303,25 +302,15 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 		s.on_open(s, c)
 	}
 
-	handle_frame_with_ws(c, ws)
+	scan(s, c, size_of(_Frame_Header), on_frame_header)
 
-	// TODO: this is quite hacky.
-	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
-		nbio.next_tick_poly2(c, ws, proc(_: ^nbio.Operation, c: ^http.Connection, ws: ^Connection) {
-			handle_frame_with_ws(c, ws)
-		})
+	scan :: proc(s: ^Server, c: ^http.Connection, n: int, cb: http.Scan_Cb) {
+		http._scan_bytes(&c.scanner, n, s.idle_timeout, http.temp_allocator(c), cb)
 	}
 
-	handle_frame :: proc(c: ^http.Connection) {
-		handle_frame_with_ws(c, http.context_get(&c.ctx, Connection))
-	}
-
-	handle_frame_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
-		header, ok := _scan_frame_header(c)
-		if !ok {
-			_scan_recv(ws.s, c, handle_frame)
-			return
-		}
+	on_frame_header :: proc(c: ^http.Connection, data: []byte) {
+		assert(len(data) == size_of(_Frame_Header))
+		header := intrinsics.unaligned_load((^_Frame_Header)(raw_data(data)))
 
 		if header.rsv1 || header.rsv2 || header.rsv3 {
 			immediately_close(c, .Protocol_Error, "reserved bits set")
@@ -344,21 +333,40 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			return
 		}
 
+		ws := http.context_get(&c.ctx, Connection)
 		append(&ws.frames, _Frame{header = header})
-		handle_scan_payload_len_with_ws(c, ws)
-	}
-
-	handle_scan_payload_len :: proc(c: ^http.Connection) {
-		handle_scan_payload_len_with_ws(c, http.context_get(&c.ctx, Connection))
-	}
-
-	handle_scan_payload_len_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
 		frame := &ws.frames[len(ws.frames)-1]
-		if !_scan_payload_len(c, frame) {
-			_scan_recv(ws.s, c, handle_scan_payload_len)
-			return
+
+		switch header.hpayload_len {
+		case _LEN_2_BYTES:
+			scan(ws.s, c, size_of(u16be), on_payload_len)
+		case _LEN_8_BYTES:
+			scan(ws.s, c, size_of(u64be), on_payload_len)
+		case:
+			assert(header.hpayload_len <= 125)
+			frame.payload_len = u64(header.hpayload_len)
+			handle_payload_len(ws, c, frame)
+		}
+	}
+
+	on_payload_len :: proc(c: ^http.Connection, data: []byte) {
+		ws    := http.context_get(&c.ctx, Connection)
+		frame := &ws.frames[len(ws.frames)-1]
+
+		switch frame.header.hpayload_len {
+		case _LEN_2_BYTES:
+			assert(len(data) == size_of(u16be))
+			frame.payload_len = u64(endian.unchecked_get_u16be(data))
+		case _LEN_8_BYTES:
+			assert(len(data) == size_of(u64be))
+			frame.payload_len = u64(endian.unchecked_get_u64be(data))
+		case: unreachable()
 		}
 
+		handle_payload_len(ws, c, frame)
+	}
+
+	handle_payload_len :: proc(ws: ^Connection, c: ^http.Connection, frame: ^_Frame) {
 		_, _, size := _find_fragmented_head(ws)
 
 		max_size := ws.s.max_message_size - size
@@ -370,20 +378,30 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			return
 		}
 
-		handle_scan_payload_with_ws(c, ws)
-	}
-
-	handle_scan_payload :: proc(c: ^http.Connection) {
-		handle_scan_payload_with_ws(c, http.context_get(&c.ctx, Connection))
-	}
-
-	handle_scan_payload_with_ws :: proc(c: ^http.Connection, ws: ^Connection) {
-		s := ws.s
-		frame := &ws.frames[len(ws.frames)-1]
-		if !_scan_payload(c, frame) {
-			_scan_recv(s, c, handle_scan_payload)
-			return
+		scan_size := int(frame.payload_len)
+		if frame.header.masked {
+			scan_size += size_of(_Mask)
 		}
+
+		scan(ws.s, c, scan_size, on_payload)
+	}
+
+	on_payload :: proc(c: ^http.Connection, buf: []byte) {
+		ws    := http.context_get(&c.ctx, Connection)
+		frame := &ws.frames[len(ws.frames)-1]
+
+		if frame.header.masked {
+			_unmask(buf)
+			frame.payload_data = buf[4:]
+		} else {
+			frame.payload_data = buf
+		}
+
+		handle_frame(ws, c, frame)
+	}
+
+	handle_frame :: proc(ws: ^Connection, c: ^http.Connection, frame: ^_Frame) {
+		s := ws.s
 
 		head, head_idx, size := _find_fragmented_head(ws)
 		size += len(frame.payload_data)
@@ -511,6 +529,9 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 		}
 	}
 
+	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
+		scan(ws.s, c, size_of(_Frame_Header), on_frame_header)
+	}
 }
 
 _send :: proc(c: ^http.Connection, opcode: _Opcode, data: []byte, fin := true) {
@@ -559,72 +580,6 @@ _send_multi :: proc(c: ^http.Connection, opcode: _Opcode, data: [][]byte, fin :=
 	http.send(&c.res, bufs)
 }
 
-_scan_frame_header :: proc(c: ^http.Connection) -> (header: _Frame_Header, ok: bool) {
-	header_bytes := http.scan_n(c, size_of(_Frame_Header)) or_return
-	header = intrinsics.unaligned_load((^_Frame_Header)(raw_data(header_bytes)))
-	ok = true
-	return
-}
-
-_scan_payload_len :: proc(c: ^http.Connection, frame: ^_Frame) -> bool {
-	switch frame.header.hpayload_len {
-	case _LEN_2_BYTES:
-		len_bytes := http.scan_n(c, size_of(u16be)) or_return
-		frame.payload_len = u64(endian.unchecked_get_u16be(len_bytes))
-	case _LEN_8_BYTES:
-		len_bytes := http.scan_n(c, size_of(u64be)) or_return
-		frame.payload_len = u64(endian.unchecked_get_u64be(len_bytes))
-	case:
-		assert(frame.header.hpayload_len <= 125)
-		frame.payload_len = u64(frame.header.hpayload_len)
-	}
-	return true
-}
-
-_scan_payload :: proc(c: ^http.Connection, frame: ^_Frame) -> bool {
-	size := int(frame.payload_len)
-	if frame.header.masked {
-		size += size_of(_Mask)
-	}
-
-	buf := http.scan_n(c, size) or_return
-
-	if frame.header.masked {
-		unmask(buf)
-		frame.payload_data = buf[4:]
-	} else {
-		frame.payload_data = buf
-	}
-
-	return true
-
-	unmask :: proc(buf: []byte) #no_bounds_check {
-		buf  := buf
-		mask := (^[4]byte)(raw_data(buf))^
-		buf   = buf[4:]
-
-		SIZE :: 16
-
-		mask_vec: #simd [SIZE]byte = {
-			mask[0], mask[1], mask[2], mask[3],
-			mask[0], mask[1], mask[2], mask[3],
-			mask[0], mask[1], mask[2], mask[3],
-			mask[0], mask[1], mask[2], mask[3],
-		}
-
-		for len(buf) > SIZE {
-			chunk := intrinsics.unaligned_load((^#simd [SIZE]byte)(raw_data(buf)))
-			chunk  = intrinsics.simd_bit_xor(chunk, mask_vec)
-			intrinsics.mem_copy_non_overlapping(raw_data(buf), (^[SIZE]byte)(&chunk), SIZE)
-			buf = buf[SIZE:]
-		}
-
-		for &b, i in buf {
-			b ~= mask[i & 3]
-		}
-	}
-}
-
 _find_fragmented_head :: proc(ws: ^Connection) -> (head: ^_Frame, head_idx: int, size: int) {
 	if len(ws.frames) > 1 {
 		#reverse for &frame, i in ws.frames[:len(ws.frames)-1] {
@@ -644,7 +599,28 @@ _find_fragmented_head :: proc(ws: ^Connection) -> (head: ^_Frame, head_idx: int,
 	return
 }
 
-_scan_recv :: proc(s: ^Server, c: ^http.Connection, cb: http.Scan_Cb) {
-	c.body_quota = {}
-	http.scan_recv(c, s.idle_timeout <= 0 ? http.NO_TIMEOUT : s.idle_timeout, cb)
+_unmask :: proc(buf: []byte) #no_bounds_check {
+	buf  := buf
+	mask := (^[4]byte)(raw_data(buf))^
+	buf   = buf[4:]
+
+	SIZE :: 16
+
+	mask_vec: #simd [SIZE]byte = {
+		mask[0], mask[1], mask[2], mask[3],
+		mask[0], mask[1], mask[2], mask[3],
+		mask[0], mask[1], mask[2], mask[3],
+		mask[0], mask[1], mask[2], mask[3],
+	}
+
+	for len(buf) > SIZE {
+		chunk := intrinsics.unaligned_load((^#simd [SIZE]byte)(raw_data(buf)))
+		chunk  = intrinsics.simd_bit_xor(chunk, mask_vec)
+		intrinsics.mem_copy_non_overlapping(raw_data(buf), (^[SIZE]byte)(&chunk), SIZE)
+		buf = buf[SIZE:]
+	}
+
+	for &b, i in buf {
+		b ~= mask[i & 3]
+	}
 }

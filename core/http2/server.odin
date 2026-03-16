@@ -120,17 +120,17 @@ Arena :: struct {
 }
 
 Connection :: struct {
-	socket: nbio.TCP_Socket,
-	recv:   ^nbio.Operation,
+	socket:  nbio.TCP_Socket,
+	scanner: Scanner,
 
 	using temp: struct {
 		arenas:          ^Arena,
 		temp_arenas:     ^Arena,
-		pos:             int,
-		buf:             [dynamic]byte,
-		last_recv_start: time.Time,
-		last_recv_dur:   time.Duration,
-		last_recv_n:     int,
+		// pos:             int,
+		// buf:             [dynamic]byte,
+		// last_recv_start: time.Time,
+		// last_recv_dur:   time.Duration,
+		// last_recv_n:     int,
 		headers_quota:   Quota,
 		body_quota:      Quota,
 
@@ -539,18 +539,17 @@ connection_close :: proc(c: ^Connection) {
 	nbio.shutdown(c.socket, .Send)
 
 	@(static) junk: [1024]byte
-
 	c.headers_quota.max = CONN_CLOSE_DELAY
-	c.last_recv_start   = nbio.now()
+	c.scanner.last_recv_start = nbio.now()
 	nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
 		now := nbio.now()
-		c.headers_quota.max -= time.diff(c.last_recv_start, now)
+		c.headers_quota.max -= time.diff(c.scanner.last_recv_start, now)
 		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.headers_quota.max)
 		if op.recv.err == nil && op.recv.received > 0 {
 			if c.headers_quota.max > 0 {
-				c.last_recv_start = now
+				c.scanner.last_recv_start = now
 				nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
 				return
 			}
@@ -594,30 +593,22 @@ _serve_connection :: proc(c: ^Connection) {
 
 	allocator := transaction_allocator(c)
 
-	c.buf.allocator          = allocator
+	// c.buf.allocator          = allocator
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
 	c.vars.allocator         = allocator
 	c.res.buf.allocator      = allocator
 	c.res.deferred.allocator = allocator
 
-	scan_rline1(c)
+	scanner_reset(&c.scanner, c)
 
-	scan_rline1 :: proc(c: ^Connection) {
-		line, ok := scan_header_line_or_recv(c, scan_rline1)
-		if !ok { return }
+	scan_header_line(&c.scanner, on_rline1)
 
+	on_rline1 :: proc(c: ^Connection, line: []byte) {
 		if len(line) == 0 {
-			scan_rline2(c)
+			scan_header_line(&c.scanner, on_rline)
 			return
 		}
-
-		on_rline(c, line)
-	}
-
-	scan_rline2 :: proc(c: ^Connection) {
-		line, ok := scan_header_line_or_recv(c, scan_rline2)
-		if !ok { return }
 
 		on_rline(c, line)
 	}
@@ -643,30 +634,30 @@ _serve_connection :: proc(c: ^Connection) {
 		log.debugf("http[t=%v][c=%v]: method=%v, target=%q, version=%v.%v", td.id, c.socket, line.method, line.target, line.version.major, line.version.minor)
 		c.req.line = line
 
-		scan_headers(c)
+		scan_header_line(&c.scanner, on_header)
 	}
 
-	scan_headers :: proc(c: ^Connection) {
-		for line in scan_header_line_or_recv(c, scan_headers) {
-			if len(line) == 0 {
-				on_headers(c)
-				return
-			}
-
-			key, value, ok := header_parse(string(line))
-			if !ok {
-				invalid_request(c, .Bad_Request)
-				return
-			}
-
-			log.debugf("http[t=%v][c=%v]: key=%q, value=%q", td.id, c.socket, key, value)
-
-			if alloc_err := headers_add(&c.req.headers, key, value); alloc_err != nil {
-				log.errorf("http[t=%v][c=%v]: msg=\"headers_add allocation error\", err=%v", td.id, c.socket, alloc_err)
-				invalid_request(c, .Internal_Server_Error)
-				return
-			}
+	on_header :: proc(c: ^Connection, line: []byte) {
+		if len(line) == 0 {
+			on_headers(c)
+			return
 		}
+
+		key, value, ok := header_parse(string(line))
+		if !ok {
+			invalid_request(c, .Bad_Request)
+			return
+		}
+
+		log.debugf("http[t=%v][c=%v]: key=%q, value=%q", td.id, c.socket, key, value)
+
+		if alloc_err := headers_add(&c.req.headers, key, value); alloc_err != nil {
+			log.errorf("http[t=%v][c=%v]: msg=\"headers_add allocation error\", err=%v", td.id, c.socket, alloc_err)
+			invalid_request(c, .Internal_Server_Error)
+			return
+		}
+
+		scan_header_line(&c.scanner, on_header)
 	}
 
 	on_headers :: proc(c: ^Connection) {
@@ -704,6 +695,7 @@ _serve_connection :: proc(c: ^Connection) {
 			context.temp_allocator = temp_allocator(c) 
 			c.ctx.vars.allocator   = transaction_allocator(c)
 			c.res.status = .OK
+			assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
 			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx.req, &c.ctx.res)
 		}
 	}
@@ -814,152 +806,152 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 	return nil
 }
 
-Scan_Cb :: #type proc(c: ^Connection)
-
-NO_TIMEOUT :: nbio.NO_TIMEOUT
-
-// TODO: way to free parts of what we scanned, some checkpoint system?
-// TODO: the heading of the request (request line, headers, etc.) should never be freed.
-// TODO: but a user may want to read part of the body and "free" it when done. (websockets for example can scan a message, handle it, free it).
-// NOTE: could maybe be done with a way to switch the buffer we scan in, allowing switching it to `temp_allocator`.
-
-scan_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) {
-	timeout := timeout
-	if timeout < 0 {
-		timeout = nbio.NO_TIMEOUT
-	} else if timeout == 0 {
-		log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, c.socket, nbio.TCP_Recv_Error.Timeout)
-		invalid_request(c, .Request_Timeout)
-		return
-	}
-
-	MIN :: 512
-
-	to_recv := dynamic_unwritten(c.buf)
-	if len(to_recv) < MIN {
-		new_cap := max(MIN*2, 2*cap(c.buf))
-		log.debugf("http[t=%v][c=%v]: prev_unwritten=%v, new_unwritten=%v", td.id, c.socket, len(to_recv), new_cap)
-		new_buf, err := make([dynamic]byte, new_cap, transaction_allocator(c))
-		assert(err == nil)
-		left := c.buf[c.pos:]
-		copy(new_buf[:], left)
-		resize(&new_buf, len(left))
-		c.pos = 0
-		c.buf = new_buf
-		to_recv = dynamic_unwritten(c.buf)
-	}
-
-	log.debugf("http[t=%v][c=%v]: recv=%v, timeout=%b", td.id, c.socket, len(to_recv), timeout)
-
-	c.last_recv_start = nbio.now()
-	c.recv = nbio.recv_poly2(c.socket, {to_recv}, c, cb, scan_on_recv, timeout=timeout)
-
-	dynamic_unwritten :: proc(d: [dynamic]$E) -> []E  {
-		return (cast([^]E)raw_data(d))[len(d):cap(d)]
-	}
-
-	dynamic_add_len :: proc(d: ^[dynamic]$E, to_add: int) {
-		(transmute(^runtime.Raw_Dynamic_Array)d).len += to_add
-		assert(len(d) <= cap(d))
-	}
-
-	scan_on_recv :: proc(op: ^nbio.Operation, c: ^Connection, cb: Scan_Cb) {
-		c.recv = nil
-		if op.recv.err != nil {
-			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, c.socket, op.recv.err)
-			switch op.recv.err.(nbio.TCP_Recv_Error) {
-			case .Timeout:
-				invalid_request(c, .Request_Timeout)
-			case .Not_Connected, .Connection_Closed:
-				connection_destroy(c)
-			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
-				fallthrough
-			case:
-				invalid_request(c, .Internal_Server_Error)
-			}
-			return
-		}
-
-		if op.recv.received == 0 {
-			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, c.socket)
-			connection_destroy(c)
-			return
-		}
-
-		c.last_recv_dur = time.diff(c.last_recv_start, nbio.now())
-		c.last_recv_n   = op.recv.received
-
-		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, c.socket, c.last_recv_n, len(op.recv.bufs[0]), c.last_recv_dur)
-
-		dynamic_add_len(&c.buf, op.recv.received)
-
-		cb(c)
-	}
-}
-
-scan_line :: proc(c: ^Connection) -> (bs: []byte, ok: bool) {
-	subject := c.buf[c.pos:]
-	start := 0
-	for {
-		index := bytes.index_byte(subject[start:], '\r')
-		if index < 0 {
-			return
-		}
-
-		if len(subject) > index+1 && subject[index+1] == '\n' {
-			c.pos += index+2
-			bs = subject[:index]
-			ok = true
-			return
-		}
-
-		start = index+1
-	}
-}
-
-scan_line_or_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) -> (bs: []byte, ok: bool) {
-	bs, ok = scan_line(c)
-	if !ok {
-		scan_recv(c, timeout, cb)
-	}
-	return
-}
-
-scan_header_line_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
-	return scan_line_or_recv(c, get_timeout(c.last_recv_dur, &c.headers_quota, c.last_recv_n), cb)
-}
-
-scan_body_line_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
-	return scan_line_or_recv(c, get_timeout(c.last_recv_dur, &c.body_quota, c.last_recv_n), cb)
-}
-
-scan_n :: proc(c: ^Connection, n: int) -> (bs: []byte, ok: bool) {
-	// TODO: make buffer big enough right away but with a max so a client can't get us to allocate huge things without actually sending it over too.
-	subject := c.buf[c.pos:]
-	if len(subject) < n {
-		return
-	}
-
-	c.pos += n
-	ok = true
-	bs = subject[:n]
-	return 
-}
-
-scan_n_or_recv :: proc(c: ^Connection, n: int, cb: Scan_Cb) -> (bs: []byte, ok: bool) {
-	bs, ok = scan_n(c, n)
-	if !ok {
-		scan_recv(c, get_timeout(c.last_recv_dur, &c.body_quota, c.last_recv_n), cb)
-	}
-	return
-}
-
+// Scan_Cb :: #type proc(c: ^Connection)
 //
-// scan_header_n_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// NO_TIMEOUT :: nbio.NO_TIMEOUT
+//
+// // TODO: way to free parts of what we scanned, some checkpoint system?
+// // TODO: the heading of the request (request line, headers, etc.) should never be freed.
+// // TODO: but a user may want to read part of the body and "free" it when done. (websockets for example can scan a message, handle it, free it).
+// // NOTE: could maybe be done with a way to switch the buffer we scan in, allowing switching it to `temp_allocator`.
+//
+// scan_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) {
+// 	timeout := timeout
+// 	if timeout < 0 {
+// 		timeout = nbio.NO_TIMEOUT
+// 	} else if timeout == 0 {
+// 		log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, c.socket, nbio.TCP_Recv_Error.Timeout)
+// 		invalid_request(c, .Request_Timeout)
+// 		return
+// 	}
+//
+// 	MIN :: 512
+//
+// 	to_recv := dynamic_unwritten(c.buf)
+// 	if len(to_recv) < MIN {
+// 		new_cap := max(MIN*2, 2*cap(c.buf))
+// 		log.debugf("http[t=%v][c=%v]: prev_unwritten=%v, new_unwritten=%v", td.id, c.socket, len(to_recv), new_cap)
+// 		new_buf, err := make([dynamic]byte, new_cap, transaction_allocator(c))
+// 		assert(err == nil)
+// 		left := c.buf[c.pos:]
+// 		copy(new_buf[:], left)
+// 		resize(&new_buf, len(left))
+// 		c.pos = 0
+// 		c.buf = new_buf
+// 		to_recv = dynamic_unwritten(c.buf)
+// 	}
+//
+// 	log.debugf("http[t=%v][c=%v]: recv=%v, timeout=%b", td.id, c.socket, len(to_recv), timeout)
+//
+// 	c.last_recv_start = nbio.now()
+// 	c.recv = nbio.recv_poly2(c.socket, {to_recv}, c, cb, scan_on_recv, timeout=timeout)
+//
+// 	dynamic_unwritten :: proc(d: [dynamic]$E) -> []E  {
+// 		return (cast([^]E)raw_data(d))[len(d):cap(d)]
+// 	}
+//
+// 	dynamic_add_len :: proc(d: ^[dynamic]$E, to_add: int) {
+// 		(transmute(^runtime.Raw_Dynamic_Array)d).len += to_add
+// 		assert(len(d) <= cap(d))
+// 	}
+//
+// 	scan_on_recv :: proc(op: ^nbio.Operation, c: ^Connection, cb: Scan_Cb) {
+// 		c.recv = nil
+// 		if op.recv.err != nil {
+// 			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, c.socket, op.recv.err)
+// 			switch op.recv.err.(nbio.TCP_Recv_Error) {
+// 			case .Timeout:
+// 				invalid_request(c, .Request_Timeout)
+// 			case .Not_Connected, .Connection_Closed:
+// 				connection_destroy(c)
+// 			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
+// 				fallthrough
+// 			case:
+// 				invalid_request(c, .Internal_Server_Error)
+// 			}
+// 			return
+// 		}
+//
+// 		if op.recv.received == 0 {
+// 			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, c.socket)
+// 			connection_destroy(c)
+// 			return
+// 		}
+//
+// 		c.last_recv_dur = time.diff(c.last_recv_start, nbio.now())
+// 		c.last_recv_n   = op.recv.received
+//
+// 		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, c.socket, c.last_recv_n, len(op.recv.bufs[0]), c.last_recv_dur)
+//
+// 		dynamic_add_len(&c.buf, op.recv.received)
+//
+// 		cb(c)
+// 	}
 // }
 //
-// scan_body_n_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// scan_line :: proc(c: ^Connection) -> (bs: []byte, ok: bool) {
+// 	subject := c.buf[c.pos:]
+// 	start := 0
+// 	for {
+// 		index := bytes.index_byte(subject[start:], '\r')
+// 		if index < 0 {
+// 			return
+// 		}
+//
+// 		if len(subject) > index+1 && subject[index+1] == '\n' {
+// 			c.pos += index+2
+// 			bs = subject[:index]
+// 			ok = true
+// 			return
+// 		}
+//
+// 		start = index+1
+// 	}
 // }
+//
+// scan_line_or_recv :: proc(c: ^Connection, timeout: time.Duration, cb: Scan_Cb) -> (bs: []byte, ok: bool) {
+// 	bs, ok = scan_line(c)
+// 	if !ok {
+// 		scan_recv(c, timeout, cb)
+// 	}
+// 	return
+// }
+//
+// scan_header_line_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// 	return scan_line_or_recv(c, get_timeout(c.last_recv_dur, &c.headers_quota, c.last_recv_n), cb)
+// }
+//
+// scan_body_line_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// 	return scan_line_or_recv(c, get_timeout(c.last_recv_dur, &c.body_quota, c.last_recv_n), cb)
+// }
+//
+// scan_n :: proc(c: ^Connection, n: int) -> (bs: []byte, ok: bool) {
+// 	// TODO: make buffer big enough right away but with a max so a client can't get us to allocate huge things without actually sending it over too.
+// 	subject := c.buf[c.pos:]
+// 	if len(subject) < n {
+// 		return
+// 	}
+//
+// 	c.pos += n
+// 	ok = true
+// 	bs = subject[:n]
+// 	return 
+// }
+//
+// scan_n_or_recv :: proc(c: ^Connection, n: int, cb: Scan_Cb) -> (bs: []byte, ok: bool) {
+// 	bs, ok = scan_n(c, n)
+// 	if !ok {
+// 		scan_recv(c, get_timeout(c.last_recv_dur, &c.body_quota, c.last_recv_n), cb)
+// 	}
+// 	return
+// }
+//
+// //
+// // scan_header_n_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// // }
+// //
+// // scan_body_n_or_recv :: proc(c: ^Connection, cb: Scan_Cb) -> ([]byte, bool) {
+// // }
 
 // Parses the header and adds it to the headers if valid. The given string is copied.
 header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_check {
@@ -1189,4 +1181,221 @@ response_must_close :: proc(c: ^Connection) -> bool {
 date_update :: proc(_: ^nbio.Operation) {
 	nbio.timeout(time.Second, date_update)
 	date_write(td.date[:], nbio.now())
+}
+
+Scan_Splitter :: struct {
+	procedure: proc(user_data: rawptr, data: []byte) -> (int, int, int, bool),
+	user_data: rawptr,
+}
+
+Scan_Cb :: proc(c: ^Connection, data: []byte)
+
+Scan :: struct #all_or_none {
+	split:     Scan_Splitter,
+	allocator: runtime.Allocator,
+	timeout:   time.Duration,
+	callback:  Scan_Cb,
+}
+
+// TODO: max size.
+
+Scanner :: struct {
+	// container_off?
+	c:          ^Connection,
+
+	buf:        []byte,
+	read_head:  int,
+	write_head: int,
+	allocator:  runtime.Allocator,
+
+	scan:       Scan,
+
+	is_pumping: bool,
+
+	last_recv_start: time.Time,
+	last_recv_dur:   time.Duration,
+	last_recv_n:     int,
+}
+
+MULTIPLIER :: 512
+
+scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
+	s^  = {}
+	s.c = c
+}
+
+_scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: runtime.Allocator, cb: Scan_Cb) {
+	s.scan = {
+		split     = split_n(n),
+		allocator = allocator,
+		timeout   = timeout,
+		callback  = cb,
+	}
+	scanner_pump(s)
+}
+
+scan_bytes :: proc(s: ^Scanner, n: int, cb: Scan_Cb) {
+	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+}
+
+scan_temp_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, cb: Scan_Cb) {
+	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), temp_allocator(s.c), cb)
+}
+
+_scan_line :: proc(s: ^Scanner, timeout: time.Duration, allocator: runtime.Allocator, cb: Scan_Cb) {
+	s.scan = {
+		split     = split_line(),
+		allocator = transaction_allocator(s.c),
+		timeout   = timeout,
+		callback  = cb,
+	}
+	scanner_pump(s)
+}
+
+scan_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+}
+
+scan_temp_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), temp_allocator(s.c), cb)
+}
+
+scan_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+}
+
+scan_temp_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), temp_allocator(s.c), cb)
+}
+
+split_n :: proc(n: int) -> Scan_Splitter {
+	return {
+		procedure = proc(needed: rawptr, data: []byte) -> (offset, n, advance: int, ok: bool) {
+			needed := int(uintptr(needed))
+			if len(data) < needed {
+				return
+			}
+
+			return 0, needed, needed, true
+		},
+		user_data = rawptr(uintptr(n)),
+	}
+}
+
+split_line :: proc() -> Scan_Splitter {
+	return {
+		procedure = proc(_: rawptr, data: []byte) -> (offset, n, advance: int, ok: bool) {
+			start := 0
+			for {
+				index := bytes.index_byte(data[start:], '\r')
+				if index < 0 {
+					return
+				}
+				index += start
+
+				if len(data) > index+1 && data[index+1] == '\n' {
+					return 0, index, index+2, true
+				}
+
+				start = index+1
+			}
+		},
+	}
+}
+
+scanner_pump :: proc(s: ^Scanner) {
+	if s.is_pumping { return }
+
+	s.is_pumping = true
+	defer s.is_pumping = false
+
+	for s.scan.callback != nil {
+		offset, n, advance, ok := s.scan.split.procedure(s.scan.split.user_data, s.buf[s.read_head:s.write_head])
+		if ok {
+			assert(advance >= n && n >= offset)
+
+			data: []byte
+			// PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
+			if s.scan.allocator != s.allocator {
+				to_copy := s.buf[s.read_head+offset:s.write_head]
+
+				s.allocator = s.scan.allocator
+				err: runtime.Allocator_Error
+				s.buf, err = make([]byte, max(len(to_copy), MULTIPLIER), s.allocator)
+				assert(err == nil) // TODO: 
+				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
+
+				s.read_head  = advance-offset
+				s.write_head = copy(s.buf, to_copy)
+				assert(s.write_head == len(to_copy))
+
+				data = s.buf[:n]
+			} else {
+				data = s.buf[s.read_head+offset:][:n]
+				s.read_head += advance
+			}
+
+			cb := s.scan.callback
+			s.scan = {}
+			cb(s.c, data)
+		} else {
+			capacity := len(s.buf)-s.read_head
+			if capacity < MULTIPLIER || s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
+				prev_buf := s.buf
+				buf_left := s.buf[s.read_head:s.write_head]
+
+				s.allocator = s.scan.allocator
+				err: runtime.Allocator_Error
+				s.buf, err = make([]byte, max(MULTIPLIER, len(prev_buf) * 2), s.allocator)
+				assert(err == nil) // TODO: err
+				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
+
+				s.read_head  = 0
+				s.write_head = copy(s.buf[:], buf_left)
+				assert(s.write_head == len(buf_left))
+			}
+
+			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(s.buf)-s.write_head, s.scan.timeout)
+			s.last_recv_start = nbio.now()
+			nbio.recv_poly(
+				s.c.socket,
+				{s.buf[s.write_head:]},
+				s,
+				scanner_on_recv,
+				timeout=s.scan.timeout,
+			)
+			return
+		}
+	}
+
+	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
+		if op.recv.err != nil {
+			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, s.c.socket, op.recv.err)
+			switch op.recv.err.(nbio.TCP_Recv_Error) {
+			case .Timeout:
+				invalid_request(s.c, .Request_Timeout)
+			case .Not_Connected, .Connection_Closed:
+				connection_destroy(s.c)
+			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
+				fallthrough
+			case:
+				invalid_request(s.c, .Internal_Server_Error)
+			}
+			return
+		}
+
+		if op.recv.received == 0 {
+			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, s.c.socket)
+			connection_destroy(s.c)
+			return
+		}
+
+		s.last_recv_dur = time.diff(s.last_recv_start, nbio.now())
+		s.last_recv_n   = op.recv.received
+
+		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, s.last_recv_n, len(op.recv.bufs[0]), s.last_recv_dur)
+		s.write_head += op.recv.received
+
+		scanner_pump(s)
+	}
 }
