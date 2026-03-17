@@ -5,18 +5,20 @@ package http
 import "base:intrinsics"
 import "base:runtime"
 
-import "core:mem"
-import "core:strings"
-import "core:time"
 import "core:bytes"
-import "core:nbio"
-import "core:log"
-import "core:os"
-import "core:thread"
-import "core:sync"
 import "core:container/xar"
-import "core:mem/virtual"
 import "core:io"
+import "core:log"
+import "core:math"
+import "core:math/bits"
+import "core:mem"
+import "core:mem/virtual"
+import "core:nbio"
+import "core:os"
+import "core:strings"
+import "core:sync"
+import "core:thread"
+import "core:time"
 
 // PERF: we can pre-compute common header key hashes
 
@@ -110,8 +112,8 @@ Server_Thread :: struct {
 	curr_accept: ^nbio.Operation,
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
-	free_arenas: ^Arena,
-	date: [DATE_LENGTH]byte,
+	date:        [DATE_LENGTH]byte,
+	free_arenas: [BUCKETS]^Arena,
 }
 
 Arena :: struct {
@@ -138,20 +140,40 @@ Connection :: struct {
 	},
 }
 
-// One virtual allocator on the server.
-// Each server thread holds a list of free arenas
-// Each connection holds a list of used arenas
-
 ARENA_SIZE :: 4096
+SHIFT      :: 12   // First bucket starts at 4 KiB
+BUCKETS    :: 16   // Last bucket starts at 256 MiB
+
+// LAST_BUCKET_FROM_SIZE :: 1 << (SHIFT + BUCKETS)
+// #assert(LAST_BUCKET_FROM_SIZE == 256 * mem.Megabyte)
+
+bucket_for :: proc(min_size: int) -> int {
+	assert(min_size > 0)
+	aligned := uint(math.next_power_of_two(min_size))
+	return int(clamp(bits.log2(aligned) - SHIFT, 0, BUCKETS-1))
+}
 
 server_thread_get_free_arena :: proc(min_size: int = 0) -> ^Arena {
-	size := max(ARENA_SIZE, uint(max(0, min_size+size_of(Arena)+align_of(Arena))))
+	// TODO: take alignment and do a proper calculation
+	size := max(ARENA_SIZE, max(0, min_size+size_of(Arena)+align_of(Arena)))
+	bucket := bucket_for(size)
 
 	{
-		free_arena := td.free_arenas
-		if free_arena != nil {
-			if  uint(len(free_arena.data)) >= size {
-				td.free_arenas = free_arena.prev
+		if bucket == BUCKETS-1 {
+			unimplemented("scan last bucket for size")
+		} else {
+			for check in bucket..<BUCKETS {
+				free_arena := td.free_arenas[check]
+				if free_arena == nil {
+					continue
+				}
+
+				{
+					context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
+					log.debugf("http[t=%v]: size=%M, bucket=%v, check=%v, got=%M", td.id, size, bucket, check, len(free_arena.data))
+				}
+
+				td.free_arenas[check] = free_arena.prev
 				free_arena.offset = size_of(Arena)
 				free_arena.peak_used, free_arena.temp_count = 0, 0
 				free_arena.prev = nil
@@ -160,7 +182,12 @@ server_thread_get_free_arena :: proc(min_size: int = 0) -> ^Arena {
 		}
 	}
 
-	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, size, mem.DEFAULT_ALIGNMENT)
+	{
+		context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
+		log.debugf("http[t=%v]: size=%v, bucket=%v", td.id, size, bucket)
+	}
+
+	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), mem.DEFAULT_ALIGNMENT)
 	assert(err == nil) // TODO: Handle
 
 	arena := (^Arena)(raw_data(data))
@@ -175,8 +202,16 @@ transaction_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
 	for arena != nil {
 		prev_arena := arena.prev
 		mem_used += arena.peak_used
-		arena.prev = td.free_arenas
-		td.free_arenas = arena
+
+		bucket := bucket_for(len(arena.data))
+		arena.prev = td.free_arenas[bucket]
+		td.free_arenas[bucket] = arena
+
+		{
+			context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
+			log.debugf("http[t=%v, c=%v]: size=%M, bucket=%v", td.id, c.socket, len(arena.data), bucket)
+		}
+
 		arena = prev_arena
 	}
 	c.arenas = nil
@@ -188,8 +223,16 @@ temp_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
 	for arena != nil {
 		prev_arena := arena.prev
 		mem_used += arena.peak_used
-		arena.prev = td.free_arenas
-		td.free_arenas = arena
+
+		bucket := bucket_for(len(arena.data))
+		arena.prev = td.free_arenas[bucket]
+		td.free_arenas[bucket] = arena
+
+		{
+			context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
+			log.debugf("http[t=%v, c=%v]: size=%M, bucket=%v", td.id, c.socket, len(arena.data), bucket)
+		}
+
 		arena = prev_arena
 	}
 	c.temp_arenas = nil
