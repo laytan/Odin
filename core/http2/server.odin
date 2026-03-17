@@ -278,8 +278,9 @@ connection_allocator :: proc(c: ^Connection, $ARENAS_FIELD: string, $FREE_ALL: b
 			case .Free_All:
 				when FREE_ALL {
 					#assert(ARENAS_FIELD == "temp_arenas")
-					temp_allocator_destroy(c)
-
+					if !scanner_free_all(&c.scanner, temp_allocator(c)) {
+						temp_allocator_destroy(c)
+					}
 					return nil, nil
 				} else {
 					return nil, .Mode_Not_Implemented
@@ -563,7 +564,8 @@ connection_destroy :: proc(c: ^Connection) {
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
 	nbio.close(c.socket)
 
-	mem_use := transaction_allocator_destroy(c) + temp_allocator_destroy(c)
+	free_all(temp_allocator(c))
+	mem_use := transaction_allocator_destroy(c)
 	if mem_use > 0 {
 		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
 	}
@@ -581,7 +583,9 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 }
 
 _serve_connection :: proc(c: ^Connection) {
-	mem_use := transaction_allocator_destroy(c) + temp_allocator_destroy(c)
+	free_all(temp_allocator(c))
+
+	mem_use := transaction_allocator_destroy(c)
 	if mem_use > 0 {
 		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
 	}
@@ -1224,6 +1228,39 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 	s.c = c
 }
 
+// TODO: hacky
+scanner_free_all :: proc(s: ^Scanner, allocator: runtime.Allocator) -> (handled: bool) {
+	if allocator != s.allocator {
+		return false
+	}
+
+	curr_temp_allocator := temp_allocator(s.c)
+	if allocator != curr_temp_allocator {
+		return false
+	}
+
+	to_copy := s.buf[s.read_head:s.write_head]
+	to_alloc := max(MULTIPLIER, len(to_copy))
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", td.id, s.c.socket, len(to_copy), to_alloc)
+
+	if len(to_copy) == 0 {
+		s.buf = {}
+		s.read_head, s.write_head = 0, 0
+		return false
+	}
+
+	new_arena := server_thread_get_free_arena(to_alloc)
+	err: runtime.Allocator_Error
+	s.buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	assert(err == nil)
+	s.read_head  = 0
+	s.write_head = copy(s.buf, to_copy)
+
+	temp_allocator_destroy(s.c)
+	s.c.temp_arenas = new_arena
+	return true
+}
+
 _scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: runtime.Allocator, cb: Scan_Cb) {
 	s.scan = {
 		split     = split_n(n),
@@ -1339,7 +1376,7 @@ scanner_pump :: proc(s: ^Scanner) {
 			s.scan = {}
 			cb(s.c, data)
 		} else {
-			capacity := len(s.buf)-s.read_head
+			capacity := len(s.buf)-s.write_head
 			if capacity < MULTIPLIER || s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
 				prev_buf := s.buf
 				buf_left := s.buf[s.read_head:s.write_head]
@@ -1355,7 +1392,7 @@ scanner_pump :: proc(s: ^Scanner) {
 				assert(s.write_head == len(buf_left))
 			}
 
-			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(s.buf)-s.write_head, s.scan.timeout)
+			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(s.buf)-s.read_head, s.scan.timeout)
 			s.last_recv_start = nbio.now()
 			nbio.recv_poly(
 				s.c.socket,
