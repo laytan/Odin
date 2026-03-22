@@ -430,6 +430,9 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			assert(s.on_message != nil, "no message handler set")
 			s.on_message(s, c, Message_Type(frame.header.opcode), frame.payload_data)
 
+			// TODO: if handler needs the message for longer, we force it to be copied now.
+			// Prob not ideal, maybe we could give each message an arena? Or ...
+
 			free_all(http.temp_allocator(c))
 			pop(&ws.frames)
 

@@ -189,10 +189,71 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset, nbytes: int) {
 	c := connection_of_response(res)
 	log.debugf("http[t=%v][c=%v]: offset=%v, nbytes=%v", td.id, c.socket, offset, nbytes)
 
-	send_heading(res)
+	switch res.state {
+	case .Error:
+		return
+	case .Handling:
+		send_response_heading(res)
+	case .Sending:
+	case .Sent:
+		panic("response has been sent already")
+	case:
+		unreachable()
+	}
+
 	if nbytes > 0 && wants_body(&c.req) {
+		// TODO: quota/timeout
 		nbio.sendfile_poly(c.socket, file, c, on_send, offset=offset, nbytes=nbytes)
 	}
+}
+
+send :: proc(res: ^Response, bufs: [][]byte) {
+	c := connection_of_response(res)
+
+	switch res.state {
+	case .Error:
+		return
+	case .Handling:
+		write_response_heading(res)
+		res.state = .Sending
+		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
+		new_bufs[0] = res.buf[:]
+		copy(new_bufs[1:], bufs)
+		// TODO: quota/timeout
+		nbio.send_poly(c.socket, new_bufs, c, on_send)
+	case .Sending:
+		// TODO: quota/timeout
+		nbio.send_poly(c.socket, bufs, c, on_send)
+	case .Sent:
+		panic("response has been sent already")
+	case:
+		unreachable()
+	}
+}
+
+respond :: proc(res: ^Response) {
+	switch res.state {
+	case .Error:
+		return
+	case .Handling:
+		send_response_heading(res)
+	case .Sending:
+	case .Sent:
+		panic("response has been sent already")
+	case:
+		unreachable()
+	}
+
+	res.state = .Sent
+}
+
+send_response_heading :: proc(res: ^Response) {
+	assert(res.state == .Handling)
+
+	write_response_heading(res)
+
+	res.state = .Sending
+	send(res, {res.buf[:]})
 }
 
 respond_handle :: proc(res: ^Response, file: nbio.Handle) {
