@@ -203,6 +203,7 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset, nbytes: int) {
 
 	if nbytes > 0 && wants_body(&c.req) {
 		// TODO: quota/timeout
+		res.sends += 1
 		nbio.sendfile_poly(c.socket, file, c, on_send, offset=offset, nbytes=nbytes)
 	}
 }
@@ -220,9 +221,11 @@ send :: proc(res: ^Response, bufs: [][]byte) {
 		new_bufs[0] = res.buf[:]
 		copy(new_bufs[1:], bufs)
 		// TODO: quota/timeout
+		res.sends += 1
 		nbio.send_poly(c.socket, new_bufs, c, on_send)
 	case .Sending:
 		// TODO: quota/timeout
+		res.sends += 1
 		nbio.send_poly(c.socket, bufs, c, on_send)
 	case .Sent:
 		panic("response has been sent already")

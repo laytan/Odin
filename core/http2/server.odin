@@ -3,6 +3,7 @@
 package http
 
 import "base:intrinsics"
+import "base:sanitizer"
 import "base:runtime"
 
 import "core:bytes"
@@ -247,6 +248,8 @@ server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNME
 				arena.offset = size_of(Arena)
 				arena.peak_used, arena.temp_count = 0, 0
 				arena.prev = nil
+
+				sanitizer.address_unpoison(arena.data[size_of(Arena):])
 				return arena
 			}
 
@@ -264,6 +267,8 @@ server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNME
 				prev.offset = size_of(Arena)
 				prev.peak_used, prev.temp_count = 0, 0
 				prev.prev = nil
+
+				sanitizer.address_unpoison(prev.data[size_of(Arena):])
 				return prev
 			}
 		}
@@ -283,6 +288,8 @@ server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNME
 			free_arena.offset = size_of(Arena)
 			free_arena.peak_used, free_arena.temp_count = 0, 0
 			free_arena.prev = nil
+
+			sanitizer.address_unpoison(free_arena.data[size_of(Arena):])
 			return free_arena
 		}
 	}
@@ -310,6 +317,8 @@ transaction_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
 
 		bucket := bucket_to_put(len(arena.data))
 		arena.prev = td.free_arenas[bucket]
+
+		sanitizer.address_poison(arena.data[size_of(Arena):])
 		td.free_arenas[bucket] = arena
 
 		{
@@ -331,6 +340,8 @@ temp_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
 
 		bucket := bucket_to_put(len(arena.data))
 		arena.prev = td.free_arenas[bucket]
+
+		sanitizer.address_poison(arena.data[size_of(Arena):])
 		td.free_arenas[bucket] = arena
 
 		{
@@ -1106,6 +1117,15 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
 		if op.send.err != nil {
 			err = op.send.err.(nbio.TCP_Send_Error)
 		}
+
+		// Make sure the buffers given to the send are still not poisoned.
+		// Hard to catch without it because there is no direct use after the `send` call.
+		when .Address in ODIN_SANITIZER_FLAGS {
+			for buf in op.send.bufs {
+				assert(sanitizer.address_region_is_poisoned(buf) == nil)
+			}
+		}
+
 	case .Send_File:
 		sent = op.sendfile.sent
 		err  = op.sendfile.err
@@ -1124,6 +1144,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
 	}
 
 	c.res.sends -= 1
+	assert(c.res.sends >= 0)
 	if (c.res.state != .Sent && c.res.state != .Error) || c.res.sends > 0 {
 		return
 	}
