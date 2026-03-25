@@ -1,3 +1,4 @@
+#+vet explicit-allocators
 package http
 
 Handler_Proc :: proc(handler: ^Handler, req: ^Request, res: ^Response)

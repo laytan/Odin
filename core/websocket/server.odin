@@ -84,6 +84,7 @@ Closure :: struct #all_or_none {
 	type:   Closure_Type,
 	status: Status,
 	reason: string,
+	arena:  ^http.Arena,
 }
 
 Closure_Type :: enum {
@@ -94,6 +95,12 @@ Closure_Type :: enum {
 Message_Type :: enum {
 	Text = 1,
 	Binary = 2,
+}
+
+Message :: struct {
+	type:  Message_Type,
+	data:  []byte,
+	arena: ^http.Arena,
 }
 
 Server :: struct {
@@ -108,7 +115,7 @@ Server :: struct {
 
 	// Called after the WebSocket handshake has been done and messages can start to be sent.
 	on_open:    proc(s: ^Server, c: ^http.Connection),
-	on_message: proc(s: ^Server, c: ^http.Connection, type: Message_Type, message: []byte),
+	on_message: proc(s: ^Server, c: ^http.Connection, message: Message),
 	// Called when the connection is either gracefully or abruptly closed.
 	// Guaranteed to be called in any situation for every connection.
 	// `closure` is `nil` if the close was not done through the WebSocket protocol (abrupt close for example).
@@ -163,6 +170,7 @@ send_close :: proc(c: ^http.Connection, status: Status, reason: string) {
 		type   = .Server,
 		status = status,
 		reason = reason,
+		arena  = nil,
 	}
 	closure := &ws.closure.(Closure)
 
@@ -282,11 +290,12 @@ Connection :: struct {
 	s:       ^Server,
 	closure: Maybe(Closure),
 	frames:  [dynamic]_Frame,
+	arena:   ^http.Arena,
 }
 
 _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 	ws := http.context_add(&c.ctx, Connection{
-		s = s,
+		s     = s,
 	})
 	ws.frames.allocator = http.transaction_allocator(c)
 
@@ -302,10 +311,13 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 		s.on_open(s, c)
 	}
 
-	scan(s, c, size_of(_Frame_Header), on_frame_header)
+	scan(s, c, ws, size_of(_Frame_Header), on_frame_header)
 
-	scan :: proc(s: ^Server, c: ^http.Connection, n: int, cb: http.Scan_Cb) {
-		http._scan_bytes(&c.scanner, n, s.idle_timeout, http.temp_allocator(c), cb)
+	scan :: proc(s: ^Server, c: ^http.Connection, ws: ^Connection, n: int, cb: http.Scan_Cb) {
+		if ws.arena == nil {
+			ws.arena = http.bootstrap_arena(c)
+		}
+		http._scan_bytes(&c.scanner, n, s.idle_timeout, ws.arena, cb)
 	}
 
 	on_frame_header :: proc(c: ^http.Connection, data: []byte) {
@@ -339,9 +351,9 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 
 		switch header.hpayload_len {
 		case _LEN_2_BYTES:
-			scan(ws.s, c, size_of(u16be), on_payload_len)
+			scan(ws.s, c, ws, size_of(u16be), on_payload_len)
 		case _LEN_8_BYTES:
-			scan(ws.s, c, size_of(u64be), on_payload_len)
+			scan(ws.s, c, ws, size_of(u64be), on_payload_len)
 		case:
 			assert(header.hpayload_len <= 125)
 			frame.payload_len = u64(header.hpayload_len)
@@ -383,7 +395,7 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			scan_size += size_of(_Mask)
 		}
 
-		scan(ws.s, c, scan_size, on_payload)
+		scan(ws.s, c, ws, scan_size, on_payload)
 	}
 
 	on_payload :: proc(c: ^http.Connection, buf: []byte) {
@@ -428,12 +440,14 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			}
 
 			assert(s.on_message != nil, "no message handler set")
-			s.on_message(s, c, Message_Type(frame.header.opcode), frame.payload_data)
+			message := Message{
+				type  = Message_Type(frame.header.opcode),
+				data  = frame.payload_data,
+				arena = ws.arena,
+			}
+			s.on_message(s, c, message)
+			ws.arena = nil
 
-			// TODO: if handler needs the message for longer, we force it to be copied now.
-			// Prob not ideal, maybe we could give each message an arena? Or ...
-
-			free_all(http.temp_allocator(c))
 			pop(&ws.frames)
 
 			handle_next_frame(c, ws)
@@ -450,7 +464,7 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 				return
 			}
 
-			message, err := make([]byte, size, http.temp_allocator(c))
+			message, err := make([]byte, size, http.arena_allocator(ws.arena))
 			if err != nil {
 				send_close(c, .Too_Big, "out of memory")
 				resize(&ws.frames, 0)
@@ -475,21 +489,28 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			}
 
 			assert(s.on_message != nil, "no message handler set")
-			s.on_message(s, c, Message_Type(head.header.opcode), message)
+			msg := Message{
+				type  = Message_Type(head.header.opcode),
+				data  = message,
+				arena = ws.arena,
+			}
+			s.on_message(s, c, msg)
+			ws.arena = nil
 
-			free_all(http.temp_allocator(c))
 			resize(&ws.frames, 0)
 
 			handle_next_frame(c, ws)
 			return
 
 		case .Ping:
+			// TODO: free arena in callback.
 			_send(c, .Pong, frame.payload_data)
 			pop(&ws.frames)
 			handle_next_frame(c, ws)
 			return
 
 		case .Pong:
+			// TODO: free arena in callback.
 			pop(&ws.frames)
 			handle_next_frame(c, ws)
 			return
@@ -519,7 +540,9 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 					type   = .Client,
 					status = status,
 					reason = reason,
+					arena  = ws.arena,
 				}
+				ws.arena = nil
 				_send(c, .Close, frame.payload_data)
 			}
 
@@ -533,7 +556,7 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 	}
 
 	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
-		scan(ws.s, c, size_of(_Frame_Header), on_frame_header)
+		scan(ws.s, c, ws, size_of(_Frame_Header), on_frame_header)
 	}
 }
 

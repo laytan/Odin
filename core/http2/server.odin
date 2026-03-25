@@ -3,15 +3,13 @@
 package http
 
 import "base:intrinsics"
-import "base:sanitizer"
 import "base:runtime"
+import "base:sanitizer"
 
 import "core:bytes"
 import "core:container/xar"
 import "core:io"
 import "core:log"
-import "core:math"
-import "core:math/bits"
 import "core:mem"
 import "core:mem/virtual"
 import "core:nbio"
@@ -106,46 +104,6 @@ _listen :: proc(s: ^Server) -> Listen_Error {
 	return nil
 }
 
-// Allocation_Stats :: struct {
-// 	threads: []Thread_Allocation_Stats,
-// 	total: int `fmt:"M"`,
-// }
-//
-// Thread_Allocation_Stats :: struct {
-// 	buckets: [BUCKETS]Bucket_Allocation_Stats,
-// 	total: int `fmt:"M"`,
-// }
-//
-// Bucket_Allocation_Stats :: struct {
-// 	min:   int `fmt:"M"`,
-// 	max:   int `fmt:"M"`,
-// 	total: int `fmt:"M"`,
-// 	count: int,
-// }
-//
-// server_allocation_stats :: proc(s: ^Server) -> Allocation_Stats {
-// 	threads := make([]Thread_Allocation_Stats, len(s.threads), context.allocator)
-// 	total: int
-// 	for &thread, i in threads {
-// 		for &bucket, j in thread.buckets {
-// 			for tail := s.threads[i].free_arenas[j]; tail != nil; tail = tail.prev {
-// 				if bucket.min == 0 {
-// 					bucket.min = len(tail.data)
-// 				} else {
-// 					bucket.min = min(bucket.min, len(tail.data))
-// 				}
-// 				bucket.max = max(bucket.max, len(tail.data))
-// 				bucket.count += 1
-// 				bucket.total += len(tail.data)
-// 			}
-// 			thread.total += bucket.total
-// 		}
-// 		total += thread.total
-// 	}
-//
-// 	return {threads, total}
-// }
-
 Server_Thread :: struct {
 	s:           ^Server,
 	thread:      thread.Thread,
@@ -154,43 +112,7 @@ Server_Thread :: struct {
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
 	date:        [DATE_LENGTH]byte,
-	free_arenas: [BUCKETS]^Arena,
-}
-
-Arena :: struct {
-	using base: mem.Arena,
-	last: rawptr,
-	prev: ^Arena,
-}
-
-arena_resize_in_place :: proc(a: ^Arena, old_data: []byte, size, alignment: int, should_zero: bool) -> ([]byte, mem.Allocator_Error) {
-	old_memory := raw_data(old_data)
-	if old_memory == nil || old_memory != a.last {
-		return nil, .Invalid_Pointer
-	}
-
-	if size <= 0 {
-		return nil, .Invalid_Argument
-	}
-
-	if !mem.is_aligned(old_memory, alignment) {
-		return nil, .Invalid_Pointer
-	}
-
-	diff := size - len(old_data)
-	if a.offset + diff > len(a.data) {
-		return nil, .Out_Of_Memory
-	}
-
-	if should_zero && diff > 0 {
-		mem.zero_slice(a.data[a.offset:][:diff])
-	}
-
-	a.offset += diff
-
-	raw := transmute(runtime.Raw_Slice)old_data
-	raw.len += diff
-	return transmute([]byte)raw, nil
+	free_arenas: [BUCKETS]^_Arena_Block,
 }
 
 Connection :: struct {
@@ -198,13 +120,8 @@ Connection :: struct {
 	scanner: Scanner,
 
 	using temp: struct {
-		arenas:          ^Arena,
-		temp_arenas:     ^Arena,
-		// pos:             int,
-		// buf:             [dynamic]byte,
-		// last_recv_start: time.Time,
-		// last_recv_dur:   time.Duration,
-		// last_recv_n:     int,
+		transaction_arena: Arena,
+		temp_arena:        Arena,
 		headers_quota:   Quota,
 		body_quota:      Quota,
 
@@ -212,265 +129,20 @@ Connection :: struct {
 	},
 }
 
-ARENA_SIZE :: 4096
-SHIFT      :: 12   // First bucket starts at 4 KiB
-BUCKETS    :: 17   // Last bucket starts at 256 MiB
-
-LAST_BUCKET_FROM_SIZE :: 1 << (SHIFT + BUCKETS-1)
-#assert(LAST_BUCKET_FROM_SIZE == 256 * mem.Megabyte)
-
-bucket_for :: proc(min_size: int) -> int {
-	assert(min_size > 0)
-	aligned := uint(math.next_power_of_two(min_size))
-	return int(clamp(bits.log2(aligned) - SHIFT, 0, BUCKETS-1))
+transaction_allocator_destroy :: proc(c: ^Connection) {
+	arena_destroy(&c.transaction_arena)
 }
 
-bucket_to_put :: proc(size: uint) -> int {
-	assert(size > 0)
-	return int(clamp(bits.log2(size) - SHIFT, 0, BUCKETS-1))
-}
-
-server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> ^Arena {
-	size   := size
-	size    = max(ARENA_SIZE, mem.align_forward_int(size_of(Arena), align) + size)
-	bucket := bucket_for(size)
-
-	if bucket == BUCKETS-1 {
-		arena := td.free_arenas[bucket]
-		if arena != nil {
-			if len(arena.data) < size {
-				{
-					context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-					log.debugf("http[t=%v]: size=%M, bucket=%v, got=%M", td.id, size, bucket, len(arena.data))
-				}
-
-				td.free_arenas[bucket] = nil
-				arena.offset = size_of(Arena)
-				arena.peak_used, arena.temp_count = 0, 0
-				arena.prev = nil
-
-				sanitizer.address_unpoison(arena.data[size_of(Arena):])
-				return arena
-			}
-
-			for prev := arena.prev; prev != nil; arena, prev = prev, prev.prev {
-				if len(prev.data) < size {
-					continue
-				}
-
-				{
-					context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-					log.debugf("http[t=%v]: size=%M, bucket=%v, got=%M", td.id, size, bucket, len(prev.data))
-				}
-
-				arena.prev = prev.prev
-				prev.offset = size_of(Arena)
-				prev.peak_used, prev.temp_count = 0, 0
-				prev.prev = nil
-
-				sanitizer.address_unpoison(prev.data[size_of(Arena):])
-				return prev
-			}
-		}
-	} else {
-		for check in bucket..<BUCKETS {
-			free_arena := td.free_arenas[check]
-			if free_arena == nil {
-				continue
-			}
-
-			{
-				context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-				log.debugf("http[t=%v]: size=%M, bucket=%v, check=%v, got=%M", td.id, size, bucket, check, len(free_arena.data))
-			}
-
-			td.free_arenas[check] = free_arena.prev
-			free_arena.offset = size_of(Arena)
-			free_arena.peak_used, free_arena.temp_count = 0, 0
-			free_arena.prev = nil
-
-			sanitizer.address_unpoison(free_arena.data[size_of(Arena):])
-			return free_arena
-		}
-	}
-
-	{
-		context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-		log.debugf("http[t=%v]: size=%M, bucket=%v", td.id, size, bucket)
-	}
-
-	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), uint(align))
-	assert(err == nil) // TODO: Handle
-
-	arena := (^Arena)(raw_data(data))
-	arena.data   = data
-	arena.offset = size_of(Arena)
-
-	return arena
-}
-
-transaction_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
-	arena := c.arenas
-	for arena != nil {
-		prev_arena := arena.prev
-		mem_used += arena.peak_used
-
-		bucket := bucket_to_put(len(arena.data))
-		arena.prev = td.free_arenas[bucket]
-
-		sanitizer.address_poison(arena.data[size_of(Arena):])
-		td.free_arenas[bucket] = arena
-
-		{
-			context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-			log.debugf("http[t=%v, c=%v]: size=%M, bucket=%v", td.id, c.socket, len(arena.data), bucket)
-		}
-
-		arena = prev_arena
-	}
-	c.arenas = nil
-	return
-}
-
-temp_allocator_destroy :: proc(c: ^Connection) -> (mem_used: int) {
-	arena := c.temp_arenas
-	for arena != nil {
-		prev_arena := arena.prev
-		mem_used += arena.peak_used
-
-		bucket := bucket_to_put(len(arena.data))
-		arena.prev = td.free_arenas[bucket]
-
-		sanitizer.address_poison(arena.data[size_of(Arena):])
-		td.free_arenas[bucket] = arena
-
-		{
-			context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-			log.debugf("http[t=%v, c=%v]: size=%M, bucket=%v", td.id, c.socket, len(arena.data), bucket)
-		}
-
-		arena = prev_arena
-	}
-	c.temp_arenas = nil
-	return
+temp_allocator_destroy :: proc(c: ^Connection) {
+	arena_destroy(&c.temp_arena)
 }
 
 transaction_allocator :: proc(c: ^Connection) -> runtime.Allocator {
-	return connection_allocator(c, "arenas", false)
+	return _arena_allocator(&c.transaction_arena, false)
 }
 
 temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
-	return connection_allocator(c, "temp_arenas", true)
-}
-
-@(private="file")
-connection_allocator :: proc(c: ^Connection, $ARENAS_FIELD: string, $FREE_ALL: bool) -> runtime.Allocator {
-	return {
-		data = c,
-		procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode,
-                             size, alignment: int,
-                             old_memory: rawptr, old_size: int,
-                             location: runtime.Source_Code_Location) -> (bs: []byte, err: runtime.Allocator_Error) {
-			c := (^Connection)(allocator_data)
-
-			get_arena :: #force_inline proc(c: ^Connection) -> ^Arena {
-				return (^^Arena)(uintptr(c) + offset_of_by_string(Connection, ARENAS_FIELD))^
-			}
-
-			set_arena :: #force_inline proc(c: ^Connection, arena: ^Arena) {
-				(^^Arena)(uintptr(c) + offset_of_by_string(Connection, ARENAS_FIELD))^ = arena
-			}
-
-			new_arena :: proc(c: ^Connection, size, align: int) -> ^Arena {
-				arena := server_thread_get_free_arena(size, align)
-				arena.prev = get_arena(c)
-				set_arena(c, arena)
-				return arena
-			}
-
-			arena := get_arena(c)
-			if arena == nil {
-				arena = new_arena(c, size, alignment == 0 ? mem.DEFAULT_ALIGNMENT : alignment)
-			}
-
-			switch mode {
-			case .Alloc:
-				bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
-				if err == .Out_Of_Memory {
-					arena = new_arena(c, size, alignment)
-					bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
-				}
-				arena.last = raw_data(bs)
-				return
-
-			case .Alloc_Non_Zeroed:
-				bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, alignment, location)
-				if err == .Out_Of_Memory {
-					arena = new_arena(c, size, alignment)
-					bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, alignment, location)
-				}
-				arena.last = raw_data(bs)
-				return
-
-			case .Resize, .Resize_Non_Zeroed:
-				should_zero := mode == .Resize
-				bs, err = arena_resize_in_place(arena, mem.byte_slice(old_memory, old_size), size, alignment, should_zero)
-				if err != nil {
-					bs, err = mem._default_resize_bytes_align(mem.byte_slice(old_memory, old_size), size, alignment, should_zero, mem.arena_allocator(arena), location)
-					if err == .Out_Of_Memory {
-						arena = new_arena(c, size, alignment)
-						if should_zero {
-							bs, err = mem.arena_alloc_bytes(arena, size, alignment, location)
-						} else {
-							bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, alignment, location)
-						}
-						if err == nil {
-							intrinsics.mem_copy_non_overlapping(raw_data(bs), old_memory, old_size)
-						}
-					}
-				}
-				arena.last = raw_data(bs)
-				return
-
-			case .Query_Features:
-				set := (^mem.Allocator_Mode_Set)(old_memory)
-				if set != nil {
-					set^ = {.Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed, .Query_Features}
-					when FREE_ALL {
-						set^ += {.Free_All}
-					}
-				}
-				return nil, nil
-
-			case .Free_All:
-				when FREE_ALL {
-					#assert(ARENAS_FIELD == "temp_arenas")
-					if !scanner_free_all(&c.scanner, temp_allocator(c)) {
-						temp_allocator_destroy(c)
-					}
-					arena.last = nil
-					return nil, nil
-				} else {
-					return nil, .Mode_Not_Implemented
-				}
-
-			case .Query_Info:
-				return nil, .Mode_Not_Implemented
-
-			case .Free:
-				if old_memory != arena.last {
-					return nil, .Mode_Not_Implemented
-				}
-
-				arena.last    = nil
-				arena.offset -= old_size
-				return nil, nil
-
-			case:
-				return nil, nil
-			}
-		},
-	}
+	return arena_allocator(&c.temp_arena)
 }
 
 Context :: struct {
@@ -748,10 +420,10 @@ connection_destroy :: proc(c: ^Connection) {
 	}
 
 	free_all(temp_allocator(c))
-	mem_use := transaction_allocator_destroy(c)
-	if mem_use > 0 {
-		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
-	}
+	transaction_allocator_destroy(c)
+	// if mem_use > 0 {
+	// 	log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
+	// }
 
 	idx, ok := xar.linear_search(&td.connections, c)
 	assert(ok)
@@ -767,13 +439,12 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 
 _serve_connection :: proc(c: ^Connection) {
 	free_all(temp_allocator(c))
-
-	mem_use := transaction_allocator_destroy(c)
-	if mem_use > 0 {
-		log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
-	}
+	free_all(transaction_allocator(c))
 
 	mem.zero_item(&c.temp)
+
+	c.temp_arena = get_arena(c)
+	c.transaction_arena = get_arena(c)
 
 	c.headers_quota = DEFAULT_HEADERS_QUOTA
 	c.body_quota    = DEFAULT_BODY_QUOTA
@@ -1120,10 +791,8 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
 
 		// Make sure the buffers given to the send are still not poisoned.
 		// Hard to catch without it because there is no direct use after the `send` call.
-		when .Address in ODIN_SANITIZER_FLAGS {
-			for buf in op.send.bufs {
-				assert(sanitizer.address_region_is_poisoned(buf) == nil)
-			}
+		for buf in op.send.bufs {
+			assert(sanitizer.address_region_is_poisoned(buf) == nil)
 		}
 
 	case .Send_File:
@@ -1208,7 +877,7 @@ Scan_Cb :: proc(c: ^Connection, data: []byte)
 
 Scan :: struct #all_or_none {
 	split:     Scan_Splitter,
-	allocator: runtime.Allocator,
+	allocator: ^Arena,
 	timeout:   time.Duration,
 	callback:  Scan_Cb,
 }
@@ -1222,7 +891,7 @@ Scanner :: struct {
 	buf:        []byte,
 	read_head:  int,
 	write_head: int,
-	allocator:  runtime.Allocator,
+	allocator:  ^Arena,
 
 	scan:       Scan,
 
@@ -1240,14 +909,8 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 	s.c = c
 }
 
-// TODO: hacky
-scanner_free_all :: proc(s: ^Scanner, allocator: runtime.Allocator) -> (handled: bool) {
-	if allocator != s.allocator {
-		return false
-	}
-
-	curr_temp_allocator := temp_allocator(s.c)
-	if allocator != curr_temp_allocator {
+_scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
+	if a != s.allocator {
 		return false
 	}
 
@@ -1261,19 +924,19 @@ scanner_free_all :: proc(s: ^Scanner, allocator: runtime.Allocator) -> (handled:
 		return false
 	}
 
-	new_arena := server_thread_get_free_arena(to_alloc)
+	new_arena := _server_thread_get_free_arena(to_alloc)
 	err: runtime.Allocator_Error
 	s.buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
 	assert(err == nil)
 	s.read_head  = 0
 	s.write_head = copy(s.buf, to_copy)
 
-	temp_allocator_destroy(s.c)
-	s.c.temp_arenas = new_arena
+	arena_free_all(a)
+	a.tail = new_arena
 	return true
 }
 
-_scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: runtime.Allocator, cb: Scan_Cb) {
+_scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: ^Arena, cb: Scan_Cb) {
 	s.scan = {
 		split     = split_n(n),
 		allocator = allocator,
@@ -1284,17 +947,17 @@ _scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: runt
 }
 
 scan_bytes :: proc(s: ^Scanner, n: int, cb: Scan_Cb) {
-	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.transaction_arena, cb)
 }
 
 scan_temp_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, cb: Scan_Cb) {
-	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), temp_allocator(s.c), cb)
+	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.temp_arena, cb)
 }
 
-_scan_line :: proc(s: ^Scanner, timeout: time.Duration, allocator: runtime.Allocator, cb: Scan_Cb) {
+_scan_line :: proc(s: ^Scanner, timeout: time.Duration, allocator: ^Arena, cb: Scan_Cb) {
 	s.scan = {
 		split     = split_line(),
-		allocator = transaction_allocator(s.c),
+		allocator = &s.c.transaction_arena,
 		timeout   = timeout,
 		callback  = cb,
 	}
@@ -1302,19 +965,19 @@ _scan_line :: proc(s: ^Scanner, timeout: time.Duration, allocator: runtime.Alloc
 }
 
 scan_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), &s.c.transaction_arena, cb)
 }
 
 scan_temp_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), temp_allocator(s.c), cb)
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), &s.c.temp_arena, cb)
 }
 
 scan_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), transaction_allocator(s.c), cb)
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.transaction_arena, cb)
 }
 
 scan_temp_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), temp_allocator(s.c), cb)
+	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.temp_arena, cb)
 }
 
 split_n :: proc(n: int) -> Scan_Splitter {
@@ -1370,7 +1033,7 @@ scanner_pump :: proc(s: ^Scanner) {
 
 				s.allocator = s.scan.allocator
 				err: runtime.Allocator_Error
-				s.buf, err = make([]byte, max(len(to_copy), MULTIPLIER), s.allocator)
+				s.buf, err = make([]byte, max(len(to_copy), MULTIPLIER), arena_allocator(s.allocator))
 				assert(err == nil) // TODO: 
 				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
 
@@ -1396,24 +1059,12 @@ scanner_pump :: proc(s: ^Scanner) {
 
 				s.allocator = s.scan.allocator
 
-				// TODO: messy, arbitrary allocator may not be the best idea
-				arena: ^Arena
-				if s.allocator == temp_allocator(s.c) {
-					arena = s.c.temp_arenas
-				} else if s.allocator == transaction_allocator(s.c) {
-					arena = s.c.arenas
-				}
-
-				err: runtime.Allocator_Error
-				if arena != nil {
-					s.buf, err = arena_resize_in_place(arena, s.buf, new_size, 1, false)
-					if err == nil {
-						log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
-					}
-				}
-
-				if arena == nil || err != nil {
-					s.buf, err = make([]byte, new_size, s.allocator)
+				err: mem.Allocator_Error
+				s.buf, err = _arena_block_resize_in_place(s.allocator.tail, s.buf, new_size, 1, false)
+				if err == nil {
+					log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
+				} else {
+					s.buf, err = make([]byte, new_size, arena_allocator(s.allocator))
 					assert(err == nil) // TODO: err
 					log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
 
