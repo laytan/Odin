@@ -370,8 +370,8 @@ date_parse :: proc(value: string) -> (t: time.Time, ok: bool) #no_bounds_check {
 	return
 }
 
-context_of_response :: proc(res: ^Response) -> ^Context {
-	return container_of(res, Context, "res")
+context_of_response :: proc(res: ^Response) -> ^Ctx {
+	return container_of(res, Ctx, "res")
 }
 
 connection_of_response :: proc(res: ^Response) -> ^Connection {
@@ -382,7 +382,7 @@ connection_of_request :: proc(req: ^Request) -> ^Connection {
 	return container_of(req, Connection, "req")
 }
 
-connection_of_context :: proc(ctx: ^Context) -> ^Connection {
+connection_of_context :: proc(ctx: ^Ctx) -> ^Connection {
 	return container_of(ctx, Connection, "ctx")
 }
 
