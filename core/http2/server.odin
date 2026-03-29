@@ -125,7 +125,7 @@ Connection :: struct {
 		headers_quota:   Quota,
 		body_quota:      Quota,
 
-		using ctx: Context,
+		using ctx: Ctx,
 	},
 }
 
@@ -145,7 +145,7 @@ temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 	return arena_allocator(&c.temp_arena)
 }
 
-Context :: struct {
+Ctx :: struct {
 	req:  Request,
 	res:  Response,
 	vars: [dynamic]Context_Var,
@@ -156,7 +156,7 @@ Context_Var :: struct {
 	val: rawptr,
 }
 
-context_add :: proc(ctx: ^Context, var: $T) -> ^T {
+context_add :: proc(ctx: ^Ctx, var: $T) -> ^T {
 	val := new_clone(var, transaction_allocator(connection_of_context(ctx)))
 	append(&ctx.vars, Context_Var{
 		id  = T,
@@ -165,7 +165,7 @@ context_add :: proc(ctx: ^Context, var: $T) -> ^T {
 	return val
 }
 
-context_get :: proc(ctx: ^Context, $T: typeid) -> ^T {
+context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 	#reverse for var in ctx.vars {
 		if var.id == T {
 			return (^T)(var.val)
@@ -554,7 +554,7 @@ _serve_connection :: proc(c: ^Connection) {
 			c.ctx.vars.allocator   = transaction_allocator(c)
 			c.res.status = .OK
 			assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
-			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx.req, &c.ctx.res)
+			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
 		}
 	}
 
