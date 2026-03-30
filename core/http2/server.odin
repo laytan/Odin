@@ -67,6 +67,13 @@ Server_Error :: intrinsics.type_merge(
 	},
 )
 
+make_server :: proc(opts: Server_Options, allocator := context.allocator) -> Server {
+	return {
+		allocator = allocator,
+		opts      = opts,
+	}
+}
+
 _acquire_event_loop :: proc(s: ^Server) -> General_Error {
 	if err := nbio.acquire_thread_event_loop(); err != nil {
 		#partial switch err {
@@ -117,6 +124,7 @@ Server_Thread :: struct {
 
 Connection :: struct {
 	socket:  nbio.TCP_Socket,
+	remote:  nbio.Endpoint,
 	scanner: Scanner,
 
 	using temp: struct {
@@ -186,9 +194,10 @@ Response :: struct {
 	headers: Headers,
 
 	buf: [dynamic]byte,
-	deferred: [dynamic]proc(res: ^Response),
+	deferred: [dynamic]proc(ctx: ^Ctx),
 
 	sends: int,
+	sent:  int, // TODO: use
 	state: enum {
 		Handling,
 		Sending,  // send or send_file is called at least once (and heading is sent).
@@ -197,8 +206,8 @@ Response :: struct {
 	},
 }
 
-response_defer :: proc(res: ^Response, deffered: proc(^Response)) {
-	append(&res.deferred, deffered)
+response_defer :: proc(ctx: ^Ctx, deffered: proc(^Ctx)) {
+	append(&ctx.res.deferred, deffered)
 }
 
 // TODO: quote option on server. Transaction could hold only the 2 mutating durations to save space.
@@ -362,6 +371,7 @@ _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
 
 	c, err := xar.push(&thread.connections, Connection{
 		socket = op.accept.client,
+		remote = op.accept.client_endpoint,
 	})
 	if err != nil {
 		log.error(err)
@@ -416,7 +426,7 @@ connection_destroy :: proc(c: ^Connection) {
 
 	#reverse for deferred in c.res.deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-		deferred(&c.res)
+		deferred(&c.ctx)
 	}
 
 	free_all(temp_allocator(c))
@@ -644,6 +654,8 @@ _destroy :: proc(s: ^Server) {
 	}
 }
 
+_DEFAULT_BLOCK_SIZE :: runtime.Gigabyte
+
 listen_and_serve :: proc(s: ^Server) -> Server_Error {
 	if s.allocator.procedure == nil {
 		s.allocator = context.allocator
@@ -658,7 +670,7 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 	}
 	if err := _setup_threads(s); err != nil { return .Allocation_Failed }
 	// TODO: better
-	if err := virtual.arena_init_growing(&s.temp_allocator_backing); err != nil { return .Allocation_Failed }
+	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil { return .Allocation_Failed }
 	_serve(s)
 	_destroy(s)
 	return nil
@@ -681,12 +693,7 @@ header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_
 	return
 }
 
-// TODO: response_write_heading - writes the heading into the buffer
-// TODO: response_send_heading - sends the heading buffer
-// TODO: if user wants to respond with in-mem bytes, execute send with 2 buffers (heading, user's buffer)
-// TODO: sendfile - sends heading and then sendfile
 // TODO: chunked writer - can this work with the tracking of sends, wait for all sends
-// TODO: track sends - if user sends heading and sends file, wait for both
 // PERF: we could read the next request after "consume body" is done already, while response is still being sent
 // TODO: do not send any body when it's a redirected head to get - no-op send calls
 
@@ -779,7 +786,11 @@ write_response_heading :: proc(res: ^Response) {
 	}
 }
 
-on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
+Send_Error :: nbio.Send_File_Error
+
+Send_Callback :: proc(c: ^Connection, err: Send_Error)
+
+on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	sent: int
 	err: nbio.Send_File_Error
 	#partial switch op.type {
@@ -813,6 +824,10 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
 	}
 
 	c.res.sends -= 1
+	c.res.sent  += sent
+
+	if on_sent != nil { on_sent(c, err) }
+
 	assert(c.res.sends >= 0)
 	if (c.res.state != .Sent && c.res.state != .Error) || c.res.sends > 0 {
 		return
@@ -831,7 +846,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection) {
 
 	#reverse for deferred in c.res.deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-		deferred(&c.res)
+		deferred(&c.ctx)
 	}
 	clear(&c.res.deferred)
 
@@ -1117,4 +1132,10 @@ scanner_pump :: proc(s: ^Scanner) {
 
 		scanner_pump(s)
 	}
+}
+
+now :: nbio.now
+
+since :: proc(t: time.Time) -> time.Duration {
+	return time.diff(t, now())
 }

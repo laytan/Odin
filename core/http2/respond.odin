@@ -185,7 +185,9 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 // send_ procs are primitives which can be called multiple times
 // respond_ procs finalize the response, called once per response
 
-send_file :: proc(res: ^Response, file: nbio.Handle, offset, nbytes: int) {
+SEND_ENTIRE_FILE :: nbio.SEND_ENTIRE_FILE
+
+send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: int = SEND_ENTIRE_FILE, on_sent: Send_Callback = nil) {
 	c := connection_of_response(res)
 	log.debugf("http[t=%v][c=%v]: offset=%v, nbytes=%v", td.id, c.socket, offset, nbytes)
 
@@ -204,11 +206,11 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset, nbytes: int) {
 	if nbytes > 0 && wants_body(&c.req) {
 		// TODO: quota/timeout
 		res.sends += 1
-		nbio.sendfile_poly(c.socket, file, c, on_send, offset=offset, nbytes=nbytes)
+		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes)
 	}
 }
 
-send :: proc(res: ^Response, bufs: [][]byte) {
+send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	c := connection_of_response(res)
 
 	switch res.state {
@@ -222,11 +224,11 @@ send :: proc(res: ^Response, bufs: [][]byte) {
 		copy(new_bufs[1:], bufs)
 		// TODO: quota/timeout
 		res.sends += 1
-		nbio.send_poly(c.socket, new_bufs, c, on_send)
+		nbio.send_poly2(c.socket, new_bufs, c, on_sent, on_send)
 	case .Sending:
 		// TODO: quota/timeout
 		res.sends += 1
-		nbio.send_poly(c.socket, bufs, c, on_send)
+		nbio.send_poly2(c.socket, bufs, c, on_sent, on_send)
 	case .Sent:
 		panic("response has been sent already")
 	case:
@@ -304,10 +306,13 @@ respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 			return
 		}
 
+		// TODO: Should respond_file_path take ctx?
+		ctx := context_of_response(res)
+
 		Respond_File_Path_Handle :: distinct nbio.Handle
-		context_add(context_of_response(res), Respond_File_Path_Handle(op.open.handle))
-		response_defer(res, proc(res: ^Response) {
-			handle := context_get(context_of_response(res), Respond_File_Path_Handle)
+		context_add(ctx, Respond_File_Path_Handle(op.open.handle))
+		response_defer(ctx, proc(ctx: ^Ctx) {
+			handle := context_get(ctx, Respond_File_Path_Handle)
 			nbio.close(nbio.Handle(handle^))
 		})
 
