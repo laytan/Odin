@@ -780,7 +780,7 @@ default_logger_proc :: proc(data: rawptr, level: Logger_Level, text: string, opt
 // Returns the default logger used by `context.logger`
 @(require_results)
 default_logger :: proc() -> Logger {
-	return Logger{default_logger_proc, nil, Logger_Level.Debug, nil}
+	return Logger{default_logger_proc, nil, Logger_Level.Fatal, nil}
 }
 
 

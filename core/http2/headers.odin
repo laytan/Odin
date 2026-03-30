@@ -404,6 +404,7 @@ _headers_eq :: proc(a, b: string) -> bool #no_bounds_check {
 @(private="file")
 SECRET: [16]byte
 
+// TODO: no init
 @(private="file", init)
 init_secret :: proc "contextless" () {
 	runtime.rand_bytes(SECRET[:])
@@ -423,6 +424,7 @@ ASCII_LOWER_U8 :: #force_inline proc "contextless" (x: u8) -> u8 {
 @(private="file")
 TOKEN_SET: strings.Ascii_Set
 
+// TODO: no init
 @(init, private)
 init_token_set :: proc "contextless" () {
 	ok: bool
