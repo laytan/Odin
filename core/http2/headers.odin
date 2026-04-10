@@ -24,7 +24,7 @@ Headers :: struct {
 	threshold: int,
 }
 
-headers_make :: proc(allocator := context.allocator) -> Headers {
+_headers_make :: proc(allocator := context.allocator) -> Headers {
 	return {
 		allocator = allocator,
 	}
@@ -56,14 +56,10 @@ headers_iter :: proc(m: ^Headers, state: ^int) -> (string, string, bool) {
 headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
 	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 
-	if m.len >= m.threshold {
-		_headers_grow(m) or_return
-	}
-
-	_headers_set_internal(m, Header_Spot{
+	_headers_set_with_hash(m, Header_Spot{
 		key   = key,
 		value = value,
-		hash  = _headers_hash_key(m^, key),
+		hash  = _headers_hash_key(key),
 	})
 
 	return nil
@@ -72,14 +68,10 @@ headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) ->
 headers_add :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
 	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 
-	if m.len >= m.threshold {
-		_headers_grow(m) or_return
-	}
-
-	_headers_add_internal(m, Header_Spot{
+	_headers_add_with_hash(m, Header_Spot{
 		key   = key,
 		value = value,
-		hash  = _headers_hash_key(m^, key),
+		hash  = _headers_hash_key(key),
 	})
 
 	return nil
@@ -91,9 +83,9 @@ Returns the first instance of this header key.
 If you expect multiple of the same headers, use the `headers_get_all_iterator` procedures.
 */
 headers_get :: proc(m: Headers, key: string) -> (value: string, ok: bool) #optional_ok {
-	entry := #force_inline headers_entry(m, key)
-	if entry == nil { return }
-	return entry.value, true
+	spot := #force_inline _headers_spot(m, key)
+	if spot == nil { return }
+	return spot.value, true
 }
 
 Headers_Get_All_Iterator :: struct {
@@ -105,7 +97,7 @@ Headers_Get_All_Iterator :: struct {
 }
 
 headers_get_all_iterator :: proc(h: ^Headers, key: string) -> Headers_Get_All_Iterator {
-	hash := _headers_hash_key(h^, key)
+	hash := _headers_hash_key(key)
 	mask := u64(len(h.spots) - 1)
 	return {
 		h    = h,
@@ -116,7 +108,7 @@ headers_get_all_iterator :: proc(h: ^Headers, key: string) -> Headers_Get_All_It
 	}
 }
 
-headers_get_all_iter :: proc(iter: ^Headers_Get_All_Iterator) -> (value: string, ok: bool) {
+headers_get_all_iter :: proc(iter: ^Headers_Get_All_Iterator) -> (value: string, ok: bool) #no_bounds_check {
 	if iter.h.len == 0 { return }
 
 	for {
@@ -131,38 +123,41 @@ headers_get_all_iter :: proc(iter: ^Headers_Get_All_Iterator) -> (value: string,
 	}
 }
 
-headers_has :: proc(m: Headers, key: string) -> bool #no_bounds_check {
+headers_has :: proc(m: Headers, key: string) -> bool {
 	_, has := #force_inline headers_get(m, key)
 	return has
 }
 
-// TODO: this is not like map_entry where it adds if missing
-headers_entry :: proc(m: Headers, key: string) -> ^Header_Spot #no_bounds_check {
-	if m.len == 0 { return nil }
+headers_entry :: proc(m: ^Headers, key: string) -> (key_ptr, val_ptr: ^string, just_inserted: bool, err: mem.Allocator_Error) {
+	if m.len >= m.threshold {
+		_headers_grow(m) or_return
+	}
 
-	hashed := _headers_hash_key(m, key)
+	hashed := _headers_hash_key(key)
 	mask   := u64(len(m.spots) - 1)
 	idx    := hashed & mask
-
 	for {
-		entry := &m.spots[idx]
-		if entry.hash == 0 { return nil }
+		candidate := &m.spots[idx]
 
-		if entry.hash == hashed && _headers_eq(key, entry.key) {
-			return entry
+		if candidate.hash == 0 || (candidate.hash == hashed && _headers_eq(candidate.key, key)) {
+			if candidate.hash == 0 {
+				m.len += 1
+				just_inserted  = true
+				candidate.key  = key
+				candidate.hash = hashed
+			}
+
+			key_ptr = &candidate.key
+			val_ptr = &candidate.value
+			return
 		}
 
 		idx = (idx + 1) & mask
 	}
 }
 
-headers_delete :: proc(m: Headers, key: string) -> (deleted_key, deleted_value: string) #no_bounds_check {
-	entry := headers_entry(m, key)
-	if entry == nil { return }
-	entry.hash = 0
-	deleted_key   = entry.key
-	deleted_value = entry.value
-	return
+headers_delete :: proc(m: Headers, key: string) -> (deleted_key, deleted_value: string) {
+	return #force_inline _headers_delete_with_hash(m, key, _headers_hash_key(key))
 }
 
 headers_valid_key :: proc(key: string) -> bool {
@@ -211,7 +206,11 @@ _headers_set_writable :: proc(h: ^Headers) {
 	if h.threshold < 0 { h.threshold = -h.threshold }
 }
 
-_headers_set_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check {
+_headers_set_with_hash :: proc(m: ^Headers, entry: Header_Spot) -> mem.Allocator_Error #no_bounds_check {
+	if m.len >= m.threshold {
+		_headers_grow(m) or_return
+	}
+
 	mask := u64(len(m.spots) - 1)
 	idx  := entry.hash & mask
 	for {
@@ -223,14 +222,18 @@ _headers_set_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check 
 			}
 
 			candidate^ = entry 
-			return
+			return nil
 		}
 
 		idx = (idx + 1) & mask
 	}
 }
 
-_headers_add_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check {
+_headers_add_with_hash :: proc(m: ^Headers, entry: Header_Spot) -> mem.Allocator_Error #no_bounds_check {
+	if m.len >= m.threshold {
+		_headers_grow(m) or_return
+	}
+
 	mask := u64(len(m.spots) - 1)
 	idx  := entry.hash & mask
 	for {
@@ -239,7 +242,50 @@ _headers_add_internal :: proc(m: ^Headers, entry: Header_Spot) #no_bounds_check 
 		if candidate.hash == 0 {
 			m.len += 1
 			candidate^ = entry 
-			return
+			return nil
+		}
+
+		idx = (idx + 1) & mask
+	}
+}
+
+_headers_get_with_hash :: proc(m: Headers, key: string, hashed: u64) -> (value: string, ok: bool) #optional_ok {
+	spot := _headers_spot_with_hash(m, key, hashed)
+	if spot == nil { return }
+	return spot.value, true
+}
+
+_headers_has_with_hash :: proc(m: Headers, key: string, hashed: u64) -> bool {
+	_, has := #force_inline _headers_get_with_hash(m, key, hashed)
+	return has
+}
+
+_headers_delete_with_hash :: proc(m: Headers, key: string, hashed: u64) -> (deleted_key, deleted_value: string) #no_bounds_check {
+	spot := _headers_spot_with_hash(m, key, hashed)
+	if spot == nil { return }
+	spot.hash = 0
+	deleted_key   = spot.key
+	deleted_value = spot.value
+	return
+}
+
+_headers_spot :: proc(m: Headers, key: string) -> ^Header_Spot {
+	hashed := _headers_hash_key(key)
+	return #force_inline _headers_spot_with_hash(m, key, hashed)
+}
+
+_headers_spot_with_hash :: proc(m: Headers, key: string, hashed: u64) -> ^Header_Spot #no_bounds_check {
+	if m.len == 0 { return nil }
+
+	mask := u64(len(m.spots) - 1)
+	idx  := hashed & mask
+
+	for {
+		entry := &m.spots[idx]
+		if entry.hash == 0 { return nil }
+
+		if entry.hash == hashed && _headers_eq(key, entry.key) {
+			return entry
 		}
 
 		idx = (idx + 1) & mask
@@ -255,7 +301,7 @@ _headers_grow :: proc(m: ^Headers) -> mem.Allocator_Error {
 
 	for spot in m.spots {
 		if spot.hash != 0 {
-			_headers_add_internal(&nm, spot)
+			_headers_add_with_hash(&nm, spot)
 		}
 	}
 
@@ -265,7 +311,7 @@ _headers_grow :: proc(m: ^Headers) -> mem.Allocator_Error {
 	return nil
 }
 
-_headers_hash_key :: #force_no_inline proc(hdrs: Headers, header: string) -> (res: u64) #no_bounds_check {
+_headers_hash_key :: proc(header: string) -> (res: u64) #no_bounds_check {
 	// siphash modified to ascii lowercase and never return 0.
 
 	CROUNDS :: 2
