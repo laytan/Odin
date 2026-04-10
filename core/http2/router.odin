@@ -1,16 +1,14 @@
-#+feature using-stmt
+#+vet explicit-allocators
 #+build !js
 package http
 
 import "base:runtime"
 import "base:intrinsics"
 
-// TODO: log instead of fmt
+import "core:net"
 import "core:fmt"
 import "core:io"
 import "core:strings"
-
-// TODO: log correctly
 
 Router :: struct {
 	routes: [Method]_Route_Trie,
@@ -31,17 +29,24 @@ router :: proc(router: ^Router) -> Handler {
 	h: Handler
 	h.user_data = router
 
-	h.handle = proc(h: ^Handler, using ctx: ^Ctx) {
+	h.handle = proc(h: ^Handler, ctx: ^Ctx) {
 		router := (^Router)(h.user_data)
-		rline := req.line
-
-		// TODO: URL decoded
-		target := rline.target
+		rline := ctx.req.line
 
 		match := context_get(ctx, _Route_Match)
 		if match == nil {
 			match = context_add(ctx, _Route_Match{})
+
+			target, target_ok := net.percent_decode(rline.target, transaction_allocator(ctx))
+			if !target_ok {
+				ctx.res.status = .Not_Found
+				respond(&ctx.res)
+				return
+			}
+			match.target = target
 		}
+
+		target := match.target
 		if match.suffix != "" {
 			target = match.suffix
 		}
@@ -68,7 +73,7 @@ router_destroy :: proc(r: Router) {
 	_route_trie_destroy(r.all)
 }
 
-router_write :: proc(w: io.Writer, r: Router) {
+write_routes :: proc(w: io.Writer, r: Router) {
 	for routes, method in r.routes {
 		fmt.wprintln(w, method_string(method))
 		for st in routes.segments {
@@ -252,6 +257,7 @@ route_all :: proc {
 }
 
 _Route_Match :: struct {
+	target: string,
 	route:  Route,
 	vars:   [dynamic]Route_Param,
 	suffix: string,

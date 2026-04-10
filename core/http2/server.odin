@@ -145,8 +145,17 @@ temp_allocator_destroy :: proc(c: ^Connection) {
 	arena_destroy(&c.temp_arena)
 }
 
-transaction_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+transaction_allocator_from_connection :: proc(c: ^Connection) -> runtime.Allocator {
 	return _arena_allocator(&c.transaction_arena, false)
+}
+
+transaction_allocator_from_ctx :: proc(ctx: ^Ctx) -> runtime.Allocator {
+	return transaction_allocator_from_connection(connection_of_context(ctx))
+}
+
+transaction_allocator :: proc {
+	transaction_allocator_from_connection,
+	transaction_allocator_from_ctx,
 }
 
 temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
@@ -660,7 +669,9 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 	if s.allocator.procedure == nil {
 		s.allocator = context.allocator
 	}
+
 	_acquire_event_loop(s) or_return
+
 	if listen_err := _listen(s); listen_err != nil {
 		switch err in listen_err {
 		case nbio.Listen_Error:        return err
@@ -668,9 +679,15 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 		case nbio.Bind_Error:          return err
 		}
 	}
-	if err := _setup_threads(s); err != nil { return .Allocation_Failed }
-	// TODO: better
-	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil { return .Allocation_Failed }
+
+	if err := _setup_threads(s); err != nil {
+		return .Allocation_Failed
+	}
+
+	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil {
+		return .Allocation_Failed
+	}
+
 	_serve(s)
 	_destroy(s)
 	return nil
