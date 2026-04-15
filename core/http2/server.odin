@@ -115,7 +115,7 @@ Server_Thread :: struct {
 	s:           ^Server,
 	thread:      thread.Thread,
 	event_loop:  ^nbio.Event_Loop,
-	curr_accept: ^nbio.Operation,
+	curr_accept: ^nbio.Operation, // PERF: check if having multiple increases performance.
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
 	date:        [DATE_LENGTH]byte,
@@ -165,6 +165,7 @@ temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 Ctx :: struct {
 	req:  Request,
 	res:  Response,
+	// TODO: prive
 	vars: [dynamic]Context_Var,
 }
 
@@ -174,7 +175,7 @@ Context_Var :: struct {
 }
 
 context_add :: proc(ctx: ^Ctx, var: $T) -> ^T {
-	val := new_clone(var, transaction_allocator(connection_of_context(ctx)))
+	val := new_clone(var, transaction_allocator(ctx))
 	append(&ctx.vars, Context_Var{
 		id  = T,
 		val = val,
@@ -202,11 +203,15 @@ Response :: struct {
 	status:  Status,
 	headers: Headers,
 
+	// TODO: prive
 	buf: [dynamic]byte,
+	// TODO: prive
 	deferred: [dynamic]proc(ctx: ^Ctx),
 
+	// TODO: prive
 	sends: int,
-	sent:  int, // TODO: use
+	sent:  int,
+	// TODO: prive
 	state: enum {
 		Handling,
 		Sending,  // send or send_file is called at least once (and heading is sent).
@@ -219,81 +224,11 @@ response_defer :: proc(ctx: ^Ctx, deffered: proc(^Ctx)) {
 	append(&ctx.res.deferred, deffered)
 }
 
-// TODO: quote option on server. Transaction could hold only the 2 mutating durations to save space.
+// TODO: quota option on server. Transaction could hold only the 2 mutating durations to save space.
 
 // TODO: max length
 
-Quota :: struct {
-	// The minimum time after which a client may be disconnected.
-	min:      time.Duration,
-	// The absolute maximum time the client may take.
-	max:      time.Duration,
-	// The minimum flow rate (bytes per second) a client must hold.
-	min_rate: int,
-	// Every `min_rate` bytes received adds this amount of time to the allowed timeout (up to `max`).
-	rate_add: time.Duration,
-}
-
-// Default quota for headers, this is intentionally permissive.
-//
-// Allow at least 20 seconds to receive the headers. If the client sends data, increase the timeout
-// by 1 second for every 500 bytes received. But do not allow more than 40 seconds in total.
-DEFAULT_HEADERS_QUOTA :: Quota{
-	min      = 20 * time.Second,
-	max      = 40 * time.Second,
-	min_rate = 500,
-	rate_add = time.Second,
-}
-
-// Default quota for bodies, this is intentionally permissive.
-//
-// Allow at least 20 seconds to receive the body. If the client sends data, increase the timeout
-// by 1 second for every 500 bytes received. With no total limit (client may send 500b/s indefinitely).
-DEFAULT_BODY_QUOTA :: Quota{
-	min      = 20 * time.Second,
-	max      = 0,
-	min_rate = 500,
-	rate_add = time.Second,
-}
-
-/*
-Returns the timeout for the next recv call.
-If that `recv` errors on a timeout, abort the connection.
-If this returns 0, abort the connection.
-If this returns -1, no quota/timeout is configured.
-*/
-get_timeout :: proc(last_recv_dur: time.Duration, q: ^Quota, received: int) -> time.Duration {
-	last_recv_dur := last_recv_dur
-	last_recv_dur  = max(0, last_recv_dur)
-
-	if q.min_rate > 0 && last_recv_dur > 0 {
-		rate := f64(received) / time.duration_seconds(last_recv_dur)
-		if rate < f64(q.min_rate) {
-			return 0
-		}
-	}
-
-	if q.max > 0 {
-		q.max -= last_recv_dur
-		if q.max <= 0 {
-			return 0
-		}
-	}
-
-	if q.min > 0 {
-		q.min -= last_recv_dur
-		if q.min_rate > 0 && q.rate_add > 0 {
-			q.min += time.Duration((f64(received) / f64(q.min_rate)) * f64(q.rate_add))
-		}
-		if q.max > 0 && q.min > q.max {
-			q.min = q.max
-		}
-
-		return q.min
-	}
-
-	return q.max > 0 ? q.max : -1
-}
+// TODO: send quota too
 
 @(thread_local)
 td: ^Server_Thread
@@ -768,8 +703,6 @@ write_response_heading :: proc(res: ^Response) {
 		append(&res.buf, "Connection: close\r\n")
 	}
 
-	// TODO: think about if we need to do this here (skipping invalid headers).
-	// TODO: where does it make sense to validate/sanitize?
 	for i := 0; header, value in headers_iter(&res.headers, &i) {
 		headers_valid_key(header) or_continue
 		append(&res.buf, header)
