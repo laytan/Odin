@@ -46,7 +46,7 @@ Server_Options :: struct {
 }
 
 DEFAULT_BACKLOG  :: 1000
-DEFAULT_ADDRESS  :: nbio.IP4_Any
+DEFAULT_ADDRESS  :: nbio.IP4_Loopback
 DEFAULT_PORT     :: 8080
 
 General_Error :: enum i32 {
