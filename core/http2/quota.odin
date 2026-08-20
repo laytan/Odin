@@ -72,8 +72,7 @@ Progression :: struct {
 }
 
 progression_reset :: proc(p: ^Progression, q: Quota) {
-	p.transferred = 0
-	p.total = 0
+	p^ = {}
 	progression_init(p, q)
 }
 
@@ -84,7 +83,22 @@ progression_init :: proc(p: ^Progression, q: Quota) {
 	p.timeout = q.min > 0 ? q.min : (q.max > 0 ? q.max : -1)
 }
 
-// TODO: unit test
+progression_next_timeout :: proc(p: Progression) -> time.Duration {
+	return p.timeout
+}
+
+progression_max_transfer :: proc(p: Progression, available: int) -> int {
+	if p.max < 0 {
+		return available
+	}
+
+	return min(available, p.max)
+}
+
+progression_is_exhausted :: proc(p: Progression) -> bool {
+	return p.max == 0 || p.timeout == 0
+}
+
 progression_update :: proc(p: ^Progression, q: Quota, transferred: int, dur: time.Duration) {
 	assert(transferred > 0)
 	assert(dur >= 0)

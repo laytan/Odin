@@ -113,7 +113,7 @@ _listen :: proc(s: ^Server) -> Listen_Error {
 
 Server_Thread :: struct {
 	s:           ^Server,
-	thread:      thread.Thread,
+	thread:      ^thread.Thread,
 	event_loop:  ^nbio.Event_Loop,
 	curr_accept: ^nbio.Operation, // PERF: check if having multiple increases performance.
 	id:          int,
@@ -126,12 +126,15 @@ Connection :: struct {
 	socket:  nbio.TCP_Socket,
 	remote:  nbio.Endpoint,
 	scanner: Scanner,
+	curr_recv: ^nbio.Operation,
 
 	using temp: struct {
 		transaction_arena: Arena,
 		temp_arena:        Arena,
-		headers_quota:   Quota,
-		body_quota:      Quota,
+		headers_quota:      Quota,
+		headers_progression: Progression,
+		body_quota:         Quota,
+		body_progression:   Progression,
 
 		using ctx: Ctx,
 	},
@@ -242,7 +245,7 @@ _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 	}
 
 	for &server_thread, i in s.threads[1:] {
-		thread.create_and_start_with_poly_data3(s, &server_thread, i+2, _server_thread, context)
+		server_thread.thread = thread.create_and_start_with_poly_data3(s, &server_thread, i+2, _server_thread, context)
 	}
 
 	main_thread := &s.threads[0]
@@ -298,8 +301,26 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 }
 
 _server_thread_shutdown :: proc(thread: ^Server_Thread) {
-	log.warn("TODO: shutdown")
+	nbio.remove(thread.curr_accept)
+	thread.curr_accept = nil
+
+	iter := xar.freelist_iterator(&thread.connections)
+	for c, _ in xar.freelist_iterate_by_ptr(&iter) {
+		nbio.remove(c.curr_recv)
+		c.curr_recv = nil
+		connection_destroy(c)
+	}
+
 	nbio.release_thread_event_loop()
+}
+
+server_shutdown :: proc(s: ^Server) {
+	sync.atomic_store(&s.shutting_down, true)
+	for thread in s.threads {
+		if thread.event_loop != nil {
+			nbio.wake_up(thread.event_loop)
+		}
+	}
 }
 
 _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
@@ -346,16 +367,17 @@ connection_close :: proc(c: ^Connection) {
 	@(static) junk: [1024]byte
 	c.headers_quota.max = CONN_CLOSE_DELAY
 	c.scanner.last_recv_start = nbio.now()
-	nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
+	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
+		c.curr_recv = nil
 		now := nbio.now()
 		c.headers_quota.max -= time.diff(c.scanner.last_recv_start, now)
 		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.headers_quota.max)
 		if op.recv.err == nil && op.recv.received > 0 {
 			if c.headers_quota.max > 0 {
 				c.scanner.last_recv_start = now
-				nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
+				c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
 				return
 			}
 		}
@@ -402,6 +424,8 @@ _serve_connection :: proc(c: ^Connection) {
 
 	c.headers_quota = DEFAULT_HEADERS_QUOTA
 	c.body_quota    = DEFAULT_BODY_QUOTA
+	progression_reset(&c.headers_progression, c.headers_quota)
+	progression_reset(&c.body_progression, c.body_quota)
 
 	allocator := transaction_allocator(c)
 
@@ -591,16 +615,20 @@ _destroy :: proc(s: ^Server) {
 	}
 
 	if s.threads != nil {
+		for &t in s.threads[1:] {
+			thread.destroy(t.thread)
+		}
 		for &t in s.threads {
-			thread.destroy(&t.thread)
+			xar.freelist_destroy(&t.connections)
 		}
 		delete(s.threads, s.allocator)
 	}
+	virtual.arena_destroy(&s.temp_allocator_backing)
 }
 
 _DEFAULT_BLOCK_SIZE :: runtime.Gigabyte
 
-listen_and_serve :: proc(s: ^Server) -> Server_Error {
+_setup :: proc(s: ^Server) -> Server_Error {
 	if s.allocator.procedure == nil {
 		s.allocator = context.allocator
 	}
@@ -623,6 +651,11 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 		return .Allocation_Failed
 	}
 
+	return nil
+}
+
+listen_and_serve :: proc(s: ^Server) -> Server_Error {
+	_setup(s) or_return
 	_serve(s)
 	_destroy(s)
 	return nil
@@ -841,13 +874,14 @@ Scan_Splitter :: struct {
 Scan_Cb :: proc(c: ^Connection, data: []byte)
 
 Scan :: struct #all_or_none {
-	split:     Scan_Splitter,
-	allocator: ^Arena,
-	timeout:   time.Duration,
-	callback:  Scan_Cb,
+	split:          Scan_Splitter,
+	allocator:      ^Arena,
+	timeout:        time.Duration,
+	quota:          ^Quota,
+	progression:    ^Progression,
+	limit_status:   Status,
+	callback:       Scan_Cb,
 }
-
-// TODO: max size.
 
 Scanner :: struct {
 	// container_off?
@@ -902,47 +936,92 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 }
 
 _scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: ^Arena, cb: Scan_Cb) {
+	_scan_bytes_with_quota(s, n, timeout, allocator, nil, nil, .Internal_Server_Error, cb)
+}
+
+_scan_bytes_with_quota :: proc(
+	s: ^Scanner,
+	n: int,
+	timeout: time.Duration,
+	allocator: ^Arena,
+	quota: ^Quota,
+	progression: ^Progression,
+	limit_status: Status,
+	cb: Scan_Cb,
+) {
 	s.scan = {
-		split     = split_n(n),
-		allocator = allocator,
-		timeout   = timeout,
-		callback  = cb,
+		split        = split_n(n),
+		allocator    = allocator,
+		timeout      = timeout,
+		quota        = quota,
+		progression  = progression,
+		limit_status = limit_status,
+		callback     = cb,
 	}
 	scanner_pump(s)
 }
 
 scan_bytes :: proc(s: ^Scanner, n: int, cb: Scan_Cb) {
-	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.transaction_arena, cb)
+	_scan_bytes_with_quota(
+		s,
+		n,
+		nbio.NO_TIMEOUT,
+		&s.c.transaction_arena,
+		&s.c.body_quota,
+		&s.c.body_progression,
+		.Payload_Too_Large,
+		cb,
+	)
 }
 
 scan_temp_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, cb: Scan_Cb) {
-	_scan_bytes(s, n, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.temp_arena, cb)
+	_scan_bytes_with_quota(
+		s,
+		n,
+		timeout,
+		&s.c.temp_arena,
+		&s.c.body_quota,
+		&s.c.body_progression,
+		.Payload_Too_Large,
+		cb,
+	)
 }
 
-_scan_line :: proc(s: ^Scanner, timeout: time.Duration, allocator: ^Arena, cb: Scan_Cb) {
+_scan_line :: proc(
+	s: ^Scanner,
+	timeout: time.Duration,
+	allocator: ^Arena,
+	quota: ^Quota,
+	progression: ^Progression,
+	limit_status: Status,
+	cb: Scan_Cb,
+) {
 	s.scan = {
-		split     = split_line(),
-		allocator = &s.c.transaction_arena,
-		timeout   = timeout,
-		callback  = cb,
+		split        = split_line(),
+		allocator    = allocator,
+		timeout      = timeout,
+		quota        = quota,
+		progression  = progression,
+		limit_status = limit_status,
+		callback     = cb,
 	}
 	scanner_pump(s)
 }
 
 scan_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), &s.c.transaction_arena, cb)
+	_scan_line(s, nbio.NO_TIMEOUT, &s.c.transaction_arena, &s.c.headers_quota, &s.c.headers_progression, .Request_Header_Fields_Too_Large, cb)
 }
 
 scan_temp_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.headers_quota, s.last_recv_n), &s.c.temp_arena, cb)
+	_scan_line(s, nbio.NO_TIMEOUT, &s.c.temp_arena, &s.c.headers_quota, &s.c.headers_progression, .Request_Header_Fields_Too_Large, cb)
 }
 
 scan_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.transaction_arena, cb)
+	_scan_line(s, nbio.NO_TIMEOUT, &s.c.transaction_arena, &s.c.body_quota, &s.c.body_progression, .Payload_Too_Large, cb)
 }
 
 scan_temp_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, get_timeout(s.last_recv_dur, &s.c.body_quota, s.last_recv_n), &s.c.temp_arena, cb)
+	_scan_line(s, nbio.NO_TIMEOUT, &s.c.temp_arena, &s.c.body_quota, &s.c.body_progression, .Payload_Too_Large, cb)
 }
 
 split_n :: proc(n: int) -> Scan_Splitter {
@@ -1016,11 +1095,29 @@ scanner_pump :: proc(s: ^Scanner) {
 			s.scan = {}
 			cb(s.c, data)
 		} else {
+			if s.scan.progression != nil {
+				if s.scan.progression.max == 0 {
+					limit_status := s.scan.limit_status
+					s.scan = {}
+					invalid_request(s.c, limit_status)
+					return
+				}
+
+				if s.scan.progression.timeout == 0 {
+					s.scan = {}
+					invalid_request(s.c, .Request_Timeout)
+					return
+				}
+			}
+
 			capacity := len(s.buf)-s.write_head
 			if capacity < MULTIPLIER || s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
 				prev_buf := s.buf
 				buf_left := s.buf[s.read_head:s.write_head]
 				new_size := max(MULTIPLIER, len(prev_buf) * 2)
+				if s.scan.progression != nil && s.scan.progression.max >= 0 {
+					new_size = min(new_size, len(buf_left)+s.scan.progression.max)
+				}
 
 				s.allocator = s.scan.allocator
 
@@ -1039,20 +1136,26 @@ scanner_pump :: proc(s: ^Scanner) {
 				}
 			}
 
-			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(s.buf)-s.read_head, s.scan.timeout)
+			recv_buf := s.buf[s.write_head:]
+			if s.scan.progression != nil {
+				recv_buf = recv_buf[:progression_max_transfer(s.scan.progression^, len(recv_buf))]
+			}
+
+			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(recv_buf), scanner_timeout(s.scan))
 			s.last_recv_start = nbio.now()
-			nbio.recv_poly(
+			s.c.curr_recv = nbio.recv_poly(
 				s.c.socket,
-				{s.buf[s.write_head:]},
+				{recv_buf},
 				s,
 				scanner_on_recv,
-				timeout=s.scan.timeout,
+				timeout=scanner_timeout(s.scan),
 			)
 			return
 		}
 	}
 
 	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
+		s.c.curr_recv = nil
 		if op.recv.err != nil {
 			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, s.c.socket, op.recv.err)
 			switch op.recv.err.(nbio.TCP_Recv_Error) {
@@ -1076,12 +1179,36 @@ scanner_pump :: proc(s: ^Scanner) {
 
 		s.last_recv_dur = time.diff(s.last_recv_start, nbio.now())
 		s.last_recv_n   = op.recv.received
+		if s.scan.progression != nil {
+			dur := s.last_recv_dur
+			if dur < 0 {
+				dur = 0
+			}
+			progression_update(s.scan.progression, s.scan.quota^, s.last_recv_n, dur)
+		}
 
 		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, s.last_recv_n, len(op.recv.bufs[0]), s.last_recv_dur)
 		s.write_head += op.recv.received
 
 		scanner_pump(s)
 	}
+}
+
+scanner_timeout :: proc(scan: Scan) -> time.Duration {
+	timeout := scan.timeout
+	if scan.progression == nil {
+		return timeout
+	}
+
+	quota_timeout := progression_next_timeout(scan.progression^)
+	if timeout < 0 {
+		return quota_timeout
+	}
+	if quota_timeout < 0 {
+		return timeout
+	}
+
+	return min(timeout, quota_timeout)
 }
 
 now :: nbio.now
