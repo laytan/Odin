@@ -341,7 +341,7 @@ body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
 	})
 
 	enc_header, ok := get_header(req, "Transfer-Encoding")
-	if ok && strings.has_suffix(enc_header, "chunked") {
+	if ok && _headers_eq(enc_header, "chunked") {
 		_body_chunked(req)
 	} else {
 		_body_length(req)
@@ -383,6 +383,11 @@ _body_chunked :: proc(req: ^Request) {
 	scan_line(&c.scanner, on_size)
 
 	on_size :: proc(c: ^Connection, data: []byte) {
+		if !_valid_field_bytes(data) {
+			invalid_request(c, .Bad_Request)
+			return
+		}
+
 		size_line := string(data)
 
 		// If there is a semicolon, discard everything after it,
@@ -438,15 +443,7 @@ _body_chunked :: proc(req: ^Request) {
 			_headers_set_writable(&c.req.headers)
 
 			headers_delete(&c.req.headers, "Trailer")
-			_, val_ptr, just_inserted, err := headers_entry(&c.req.headers, "Transfer-Encoding")
-			assert(!just_inserted)
-			assert(err == nil)
-			// TODO: is the space required?
-			if strings.has_suffix(val_ptr^, ", chunked") {
-				val_ptr^ = strings.trim_suffix(val_ptr^, ", chunked")
-			} else if val_ptr^ == "chunked" {
-				headers_delete(&c.req.headers, "Transfer-Encoding")
-			}
+			headers_delete(&c.req.headers, "Transfer-Encoding")
 
 			_headers_set_readonly(&c.req.headers)
 

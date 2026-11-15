@@ -150,3 +150,101 @@ test_headers_valid_key :: proc(t: ^testing.T) {
 	testing.expect(t, !http.headers_valid_key("Bad:Header"))
 	testing.expect(t, !http.headers_valid_key("Bad\r\nHeader"))
 }
+
+@(test)
+test_requestline_and_header_parse_validation :: proc(t: ^testing.T) {
+	// Valid request lines.
+	{
+		rl, err := http.requestline_parse("GET /path?a=1 HTTP/1.1")
+		testing.expect_value(t, err, http.Requestline_Error.None)
+		testing.expect_value(t, rl.method, http.Method.Get)
+		testing.expect_value(t, rl.target, "/path?a=1")
+		testing.expect_value(t, rl.version, http.Version{1, 1})
+	}
+	{
+		rl, err := http.requestline_parse("POST / HTTP/1.0")
+		testing.expect_value(t, err, http.Requestline_Error.None)
+		testing.expect_value(t, rl.method, http.Method.Post)
+		testing.expect_value(t, rl.target, "/")
+		testing.expect_value(t, rl.version, http.Version{1, 0})
+	}
+
+	// Reject malformed request-targets (empty, whitespace, bare CR/LF, NUL, CTL, DEL).
+	bad_targets := []string{
+		"GET  HTTP/1.1",
+		"GET /a\rb HTTP/1.1",
+		"GET /a\nb HTTP/1.1",
+		"GET /a\x00b HTTP/1.1",
+		"GET /a\tb HTTP/1.1",
+		"GET /a\x07b HTTP/1.1",
+		"GET /a\x7fb HTTP/1.1",
+	}
+	for raw in bad_targets {
+		_, err := http.requestline_parse(raw)
+		testing.expectf(t, err == .Invalid_Target, "expected .Invalid_Target for %q, got %v", raw, err)
+	}
+
+	// Reject non-digit or malformed HTTP versions.
+	bad_versions := []string{
+		"GET / HTTP/1.\r",
+		"GET / HTTP/a.1",
+		"GET / HTTP/1.a",
+		"GET / HTTP/1.",
+		"GET / HTTP/1.12",
+		"GET / HTTX/1.1",
+		"GET / HTTP/1.1\n",
+	}
+	for raw in bad_versions {
+		_, err := http.requestline_parse(raw)
+		testing.expectf(t, err == .Invalid_Version_Format, "expected .Invalid_Version_Format for %q, got %v", raw, err)
+	}
+
+	// Valid headers: OWS (' ' and '\t') trimmed at edges, internal HTAB and obs-text permitted.
+	{
+		k, v, ok := http.header_parse("Host: example.com")
+		testing.expect(t, ok)
+		testing.expect_value(t, k, "Host")
+		testing.expect_value(t, v, "example.com")
+	}
+	{
+		k, v, ok := http.header_parse("X-Tab: \ta\tb \t")
+		testing.expect(t, ok)
+		testing.expect_value(t, k, "X-Tab")
+		testing.expect_value(t, v, "a\tb")
+	}
+	{
+		k, v, ok := http.header_parse("X-Empty: \t ")
+		testing.expect(t, ok)
+		testing.expect_value(t, k, "X-Empty")
+		testing.expect_value(t, v, "")
+	}
+	{
+		k, v, ok := http.header_parse("X-Obs: caf\xc3\xa9")
+		testing.expect(t, ok)
+		testing.expect_value(t, k, "X-Obs")
+		testing.expect_value(t, v, "caf\xc3\xa9")
+	}
+
+	// Invalid header names & values (non-token key, spaces around colon, CTLs, NUL, bare CR/LF).
+	bad_headers := []string{
+		": val",
+		" Host: localhost",
+		"Host : localhost",
+		"Bad Key: val",
+		"Bad\rKey: val",
+		"Bad\x00Key: val",
+		"X-Test: a\rb",
+		"X-Test: a\nb",
+		"X-Test: \ra",
+		"X-Test: a\n",
+		"X-Test: a\x00b",
+		"X-Test: a\x07b",
+		"X-Test: a\vb",
+		"X-Test: a\fb",
+		"X-Test: a\x7fb",
+	}
+	for raw in bad_headers {
+		_, _, ok := http.header_parse(raw)
+		testing.expectf(t, !ok, "expected header_parse(%q) to fail", raw)
+	}
+}

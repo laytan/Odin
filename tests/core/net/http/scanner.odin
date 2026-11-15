@@ -594,3 +594,179 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect(t, c.res.state == .Error)
 	}
 }
+
+@(test)
+test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
+	s := http.make_server({})
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	Header_Pair :: struct {
+		k, v: string,
+	}
+	Validate_Case :: struct {
+		desc:    string,
+		version: http.Version,
+		headers: []Header_Pair,
+		ok:      bool,
+	}
+
+	cases := []Validate_Case{
+		{
+			desc    = "valid HTTP/1.1 with Content-Length",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", "42"}},
+			ok      = true,
+		},
+		{
+			desc    = "valid HTTP/1.1 with single case-insensitive chunked TE",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "CHUNKED"}},
+			ok      = true,
+		},
+		{
+			desc    = "reject missing Host",
+			version = {1, 1},
+			headers = {{"Content-Length", "0"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject duplicate Host",
+			version = {1, 1},
+			headers = {{"Host", "a"}, {"Host", "b"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject both Transfer-Encoding and Content-Length",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Content-Length", "5"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject Content-Length before Transfer-Encoding",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", "0"}, {"Transfer-Encoding", "chunked"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject duplicate Transfer-Encoding headers (TE.TE smuggling)",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Transfer-Encoding", "chunked"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject stacked gzip, chunked Transfer-Encoding",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}, {"Transfer-Encoding", "chunked"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject combined single-line gzip, chunked Transfer-Encoding",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip, chunked"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject non-chunked Transfer-Encoding",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject Transfer-Encoding on HTTP/1.0",
+			version = {1, 0},
+			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject duplicate Content-Length headers (even identical)",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", "5"}, {"Content-Length", "5"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject invalid Content-Length values",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", ""}},
+			ok      = false,
+		},
+		{
+			desc    = "reject negative Content-Length",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", "-5"}},
+			ok      = false,
+		},
+		{
+			desc    = "reject non-numeric Content-Length",
+			version = {1, 1},
+			headers = {{"Host", "localhost"}, {"Content-Length", "5a"}},
+			ok      = false,
+		},
+	}
+
+	for tc in cases {
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c.req.headers.allocator = tx_alloc
+		c.req.line.version = tc.version
+		for pair in tc.headers {
+			testing.expect_value(t, http.headers_add(&c.req.headers, pair.k, pair.v), nil)
+		}
+
+		got := http.validate_headers(&c)
+		testing.expectf(t, got == tc.ok, "%s: expected validate_headers=%v, got %v", tc.desc, tc.ok, got)
+	}
+
+	// Verify chunk-size line with CTL byte is rejected with 400 Bad Request.
+	{
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c.vars.allocator = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.res.headers.allocator = tx_alloc
+		c.res.buf.allocator = tx_alloc
+		c.scanner.c = &c
+		c.scanner.allocator = &c.transaction_arena
+		c.res.state = .Handling
+		c.res.progress.max = 0
+		c.res.sends = 1
+
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "CHUNKED"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		payload := "5;ext=\x07\r\nhello\r\n0\r\n\r\n"
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		c.scanner.buf = buf
+		c.scanner.write_head = copy(buf, payload)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
+		testing.expect(t, c.res.state == .Error)
+	}
+}

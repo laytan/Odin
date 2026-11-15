@@ -608,35 +608,48 @@ on_headers :: proc(c: ^Connection) {
 }
 
 validate_headers :: proc(c: ^Connection) -> bool {
-	// RFC 7230 3.3.3: If a Transfer-Encoding header field
-	// is present in a request and the chunked transfer coding is not
-	// the final encoding, the message body length cannot be determined
-	// reliably; the server MUST respond with the 400 (Bad Request)
-	// status code and then close the connection.
-	if enc_header, ok := headers_get(c.req.headers, "transfer-encoding"); ok {
-		if !strings.has_suffix(enc_header, "chunked") {
-			log.warnf("http[t=%v][c=%v]: msg=\"Transfer-Encoding does not end with chunked\"", td.id, c.socket)
-			return false
-		}
+	// RFC 9112 6.1 / 6.3: Inspect all Transfer-Encoding headers; accept only a single "chunked" coding on HTTP/1.1.
+	te_n := 0
+	{
+		iter := headers_get_all_iterator(&c.req.headers, "transfer-encoding")
+		for enc_header in headers_get_all_iter(&iter) {
+			te_n += 1
+			if te_n > 1 {
+				log.warnf("http[t=%v][c=%v]: msg=\"expected at most one Transfer-Encoding header\"", td.id, c.socket)
+				return false
+			}
 
-		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
-		// Content-Length header field, the Transfer-Encoding overrides the
-		// Content-Length.  Such a message might indicate an attempt to
-		// perform request smuggling (Section 9.5) or response splitting
-		// (Section 9.4) and ought to be handled as an error.
-		headers_delete(&c.req.headers, "content-length")
-	} else {
-		// RFC 7230 3.3.3: If a message is received without Transfer-Encoding and with
-		// either multiple Content-Length header fields having differing
-		// field-values or a single Content-Length header field having an
-		// invalid value, then the message framing is invalid and the
-		// recipient MUST treat it as an unrecoverable error.
+			if !_headers_eq(enc_header, "chunked") {
+				log.warnf("http[t=%v][c=%v]: msg=\"unsupported Transfer-Encoding header\", value=%q", td.id, c.socket, enc_header)
+				return false
+			}
+		}
+	}
+
+	if te_n > 0 && c.req.line.version != {1, 1} {
+		log.warnf("http[t=%v][c=%v]: msg=\"Transfer-Encoding requires HTTP/1.1\"", td.id, c.socket)
+		return false
+	}
+
+	// RFC 9112 6.3: Reject requests containing both Transfer-Encoding and Content-Length,
+	// multiple Content-Length headers, or an invalid Content-Length value.
+	{
 		content_length_n := 0
 		iter := headers_get_all_iterator(&c.req.headers, "content-length")
-		for _ in headers_get_all_iter(&iter) {
+		for cl_val in headers_get_all_iter(&iter) {
+			if te_n > 0 {
+				log.warnf("http[t=%v][c=%v]: msg=\"Transfer-Encoding and Content-Length both present\"", td.id, c.socket)
+				return false
+			}
+
 			content_length_n += 1
 			if content_length_n > 1 {
 				log.warnf("http[t=%v][c=%v]: msg=\"expected at most one Content-Length header\"", td.id, c.socket)
+				return false
+			}
+
+			if _, ok := parse_int(cl_val); !ok {
+				log.warnf("http[t=%v][c=%v]: msg=\"invalid Content-Length header\", value=%q", td.id, c.socket, cl_val)
 				return false
 			}
 		}
@@ -736,20 +749,27 @@ listen_and_serve :: proc(s: ^Server) -> Server_Error {
 	return nil
 }
 
-// Parses the header and adds it to the headers if valid. The given string is copied.
-header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_check {
-	// Preceding spaces should not be allowed.
-	(len(line) > 0 && line[0] != ' ') or_return
+// Validates HTTP field-value / chunk-line bytes, rejecting CTLs (< 0x20 except HTAB) and DEL (0x7F).
+_valid_field_bytes :: proc(data: []byte) -> bool {
+	for b in data {
+		if (b < 0x20 && b != '\t') || b == 0x7f {
+			return false
+		}
+	}
+	return true
+}
 
+// Parses a header line into a validated token key and trimmed field value.
+header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_check {
 	colon := strings.index_byte(line, ':')
 	(colon > 0) or_return
 
-	// There must not be a space before the colon.
-	(line[colon - 1] != ' ') or_return
+	key = line[:colon]
+	headers_valid_key(key) or_return
 
-	key   = line[:colon]
-	value = strings.trim_space(line[colon + 1:])
-	ok    = true
+	value = strings.trim(line[colon + 1:], " \t")
+	_valid_field_bytes(transmute([]byte)value) or_return
+	ok = true
 	return
 }
 

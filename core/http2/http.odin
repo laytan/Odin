@@ -19,10 +19,12 @@ version_parse :: proc(s: string) -> (version: Version, ok: bool) {
 	switch len(s) {
 	case 8:
 		(s[6] == '.') or_return
+		(s[7] >= '0' && s[7] <= '9') or_return
 		version.minor = u8(int(s[7]) - '0')
 		fallthrough
 	case 6:
 		(s[:5] == "HTTP/") or_return
+		(s[5] >= '0' && s[5] <= '9') or_return
 		version.major = u8(int(s[5]) - '0')
 	case:
 		return
@@ -65,6 +67,7 @@ Requestline_Error :: enum {
 	None,
 	Method_Not_Implemented,
 	Not_Enough_Fields,
+	Invalid_Target,
 	Invalid_Version_Format,
 }
 
@@ -92,6 +95,10 @@ requestline_parse :: proc(s: string) -> (line: Requestline, err: Requestline_Err
 	if next_space == -1 { return line, .Not_Enough_Fields }
 
 	line.target = s[:next_space]
+	if len(line.target) == 0 { return line, .Invalid_Target }
+	for b in transmute([]byte)line.target {
+		if b <= 0x20 || b >= 0x7f { return line, .Invalid_Target }
+	}
 	s = s[len(line.target)+1:]
 
 	line.version, ok = version_parse(s)
@@ -545,6 +552,8 @@ query_get_uint :: proc(url: string, key: string, base := 0) -> (result: uint, ok
 
 @(private)
 parse_int :: proc(str: string) -> (val: int, ok: bool) {
+	if len(str) == 0 { return }
+
 	overflow: bool
 	for b in transmute([]byte)str {
 		switch b {
@@ -564,6 +573,8 @@ parse_int :: proc(str: string) -> (val: int, ok: bool) {
 
 @(private)
 parse_int16 :: proc(str: string) -> (val: int, ok: bool) {
+	if len(str) == 0 { return }
+
 	overflow: bool
 	for b in transmute([]byte)str {
 		digit: int
