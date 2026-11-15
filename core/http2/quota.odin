@@ -53,6 +53,15 @@ DEFAULT_SEND_QUOTA :: Quota{
 	rate_add = time.Second,
 }
 
+// Explicit unlimited quota opt-out for Server_Options fields (since zero Quota selects defaults).
+UNLIMITED_QUOTA :: Quota{
+	max_size = -1,
+	min      = -1,
+	max      = -1,
+	min_rate = -1,
+	rate_add = -1,
+}
+
 Progression :: struct {
 	// Total transferred.
 	transferred: int,

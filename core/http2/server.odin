@@ -70,11 +70,27 @@ Server_Error :: intrinsics.type_merge(
 	},
 )
 
+// Applies default request, body, and response quotas for zero-valued Server_Options fields.
+@(private="file")
+_server_options_apply_defaults :: proc(opts: ^Server_Options) {
+	if opts.request_quota == {} {
+		opts.request_quota = DEFAULT_HEADERS_QUOTA
+	}
+	if opts.body_quota == {} {
+		opts.body_quota = DEFAULT_BODY_QUOTA
+	}
+	if opts.response_quota == {} {
+		opts.response_quota = DEFAULT_SEND_QUOTA
+	}
+}
+
 make_server :: proc(opts: Server_Options, allocator := context.allocator) -> Server {
-	return {
+	s := Server{
 		allocator = allocator,
 		opts      = opts,
 	}
+	_server_options_apply_defaults(&s.opts)
+	return s
 }
 
 _acquire_event_loop :: proc(s: ^Server) -> General_Error {
@@ -648,6 +664,7 @@ _setup :: proc(s: ^Server) -> Server_Error {
 	if s.allocator.procedure == nil {
 		s.allocator = context.allocator
 	}
+	_server_options_apply_defaults(&s.opts)
 
 	_acquire_event_loop(s) or_return
 

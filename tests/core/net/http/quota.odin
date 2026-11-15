@@ -95,3 +95,32 @@ progression_update :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+@(test)
+test_server_options_default_and_unlimited_quotas :: proc(t: ^testing.T) {
+	default_server := http.make_server({})
+	testing.expect_value(t, default_server.opts.request_quota, http.DEFAULT_HEADERS_QUOTA)
+	testing.expect_value(t, default_server.opts.body_quota, http.DEFAULT_BODY_QUOTA)
+	testing.expect_value(t, default_server.opts.response_quota, http.DEFAULT_SEND_QUOTA)
+
+	custom_quota := http.Quota{max_size = 1234, min = 5 * time.Second}
+	unlimited_server := http.make_server({
+		request_quota  = custom_quota,
+		body_quota     = http.UNLIMITED_QUOTA,
+		response_quota = http.UNLIMITED_QUOTA,
+	})
+	testing.expect_value(t, unlimited_server.opts.request_quota, custom_quota)
+	testing.expect_value(t, unlimited_server.opts.body_quota, http.UNLIMITED_QUOTA)
+	testing.expect_value(t, unlimited_server.opts.response_quota, http.UNLIMITED_QUOTA)
+
+	p: http.Progression
+	http.progression_init(&p, http.UNLIMITED_QUOTA)
+	testing.expect_value(t, p.max, -1)
+	testing.expect_value(t, p.timeout, time.Duration(-1))
+	testing.expect(t, !http.progression_is_exhausted(p))
+
+	http.progression_update(&p, http.UNLIMITED_QUOTA, 1_000_000, 10 * time.Minute)
+	testing.expect_value(t, p.max, -1)
+	testing.expect_value(t, p.timeout, time.Duration(-1))
+	testing.expect(t, !http.progression_is_exhausted(p))
+}
