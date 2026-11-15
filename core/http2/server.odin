@@ -119,6 +119,7 @@ Server_Thread :: struct {
 	thread:      ^thread.Thread,
 	event_loop:  ^nbio.Event_Loop,
 	curr_accept: ^nbio.Operation, // PERF: check if having multiple increases performance.
+	curr_date:   ^nbio.Operation,
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
 	date:        [DATE_LENGTH]byte,
@@ -307,6 +308,9 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 	nbio.remove(thread.curr_accept)
 	thread.curr_accept = nil
 
+	nbio.remove(thread.curr_date)
+	thread.curr_date = nil
+
 	iter := xar.freelist_iterator(&thread.connections)
 	for c, _ in xar.freelist_iterate_by_ptr(&iter) {
 		nbio.remove(c.curr_recv)
@@ -327,6 +331,7 @@ server_shutdown :: proc(s: ^Server) {
 }
 
 _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
+	thread.curr_accept = nil
 	if op.accept.err != nil {
 		log.errorf("http[t=%v]: accept_err=", thread.id, op.accept.err)
 		// TODO: handle, try again later.
@@ -365,20 +370,23 @@ CONN_CLOSE_DELAY :: time.Millisecond * 500
 // Ultimately destroying the connection.
 connection_close :: proc(c: ^Connection) {
 	log.debugf("http[t=%v][c=%v]: msg=\"shutdown\"", td.id, c.socket)
+	nbio.remove(c.curr_recv)
+	c.curr_recv = nil
 	nbio.shutdown(c.socket, .Send)
 
 	@(static) junk: [1024]byte
 	c.req.progress.timeout = CONN_CLOSE_DELAY
 	c.scanner.last_recv_start = now()
-	nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
+	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
+		c.curr_recv = nil
 		c.req.progress.timeout -= since(c.scanner.last_recv_start)
 		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.req.progress.timeout)
 		if op.recv.err == nil && op.recv.received > 0 {
 			if c.req.progress.timeout > 0 {
 				c.scanner.last_recv_start = now()
-				nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
+				c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
 				return
 			}
 		}
@@ -389,6 +397,8 @@ connection_close :: proc(c: ^Connection) {
 
 connection_destroy :: proc(c: ^Connection) {
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
+	nbio.remove(c.curr_recv)
+	c.curr_recv = nil
 	nbio.close(c.socket)
 
 	#reverse for deferred in c.res.deferred {
@@ -874,7 +884,7 @@ response_must_close :: proc(c: ^Connection) -> bool {
 
 @(private)
 date_update :: proc(_: ^nbio.Operation) {
-	nbio.timeout(time.Second, date_update)
+	td.curr_date = nbio.timeout(time.Second, date_update)
 	date_write(td.date[:], nbio.now())
 }
 

@@ -274,7 +274,7 @@ scanner_pump :: proc(s: ^Scanner) {
 			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(dst), timeout)
 
 			s.last_recv_start = now()
-			nbio.recv_poly(
+			s.c.curr_recv = nbio.recv_poly(
 				s.c.socket,
 				{dst},
 				s,
@@ -286,6 +286,7 @@ scanner_pump :: proc(s: ^Scanner) {
 	}
 
 	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
+		s.c.curr_recv = nil
 		if op.recv.err != nil {
 			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, s.c.socket, op.recv.err)
 			switch op.recv.err.(nbio.TCP_Recv_Error) {
