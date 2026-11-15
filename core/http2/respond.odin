@@ -249,39 +249,39 @@ send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
 		new_bufs[0] = res.buf[:]
 		copy(new_bufs[1:], bufs)
-		do_send(res, new_bufs, on_sent)
+		_do_send(res, new_bufs, on_sent)
 	case .Sending:
-		do_send(res, bufs, on_sent)
+		_do_send(res, bufs, on_sent)
 	case .Sent:
 		panic("response has been sent already")
 	case:
 		unreachable()
 	}
+}
 
-	do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
-		bufs := bufs
-		c := connection_of_response(res)
+_do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
+	bufs := bufs
+	c := connection_of_response(res)
 
-		max := c.res.progress.max
-		timeout := c.res.progress.timeout
-		if max == 0 || timeout == 0 {
-			res.state = .Error
-			_check_send_done(c)
-			return
-		}
-
-		if max > 0 {
-			bufs = constraint_bufs(bufs, max)
-		}
-
-		if timeout < 0 {
-			timeout = nbio.NO_TIMEOUT
-		}
-
-		res.sends += 1
-		res.last_send = now()
-		nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
+	max := c.res.progress.max
+	timeout := c.res.progress.timeout
+	if max == 0 || timeout == 0 {
+		res.state = .Error
+		_check_send_done(c)
+		return
 	}
+
+	if max > 0 {
+		bufs = constraint_bufs(bufs, max)
+	}
+
+	if timeout < 0 {
+		timeout = nbio.NO_TIMEOUT
+	}
+
+	res.sends += 1
+	res.last_send = now()
+	nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
 
 	constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
 		total: int
@@ -301,6 +301,22 @@ send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 		}
 
 		return constrained
+	}
+}
+
+// Sends an informational `HTTP/1.1 100 Continue` response without finalizing the response state,
+// allowing the handler to subsequently read the request body and send the final response.
+send_continue :: proc(res: ^Response, on_sent: Send_Callback = nil) {
+	switch res.state {
+	case .Error:
+		return
+	case .None, .Handling:
+		CONTINUE_RESPONSE :: "HTTP/1.1 100 Continue\r\n\r\n"
+		_do_send(res, {transmute([]byte)string(CONTINUE_RESPONSE)}, on_sent)
+	case .Sending, .Sent:
+		panic("response has been sent already")
+	case:
+		unreachable()
 	}
 }
 

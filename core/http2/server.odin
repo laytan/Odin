@@ -508,12 +508,15 @@ _serve_connection :: proc(c: ^Connection) {
 		progression_reset(&c.req.progress, td.s.opts.body_quota)
 		_headers_set_readonly(&c.req.headers)
 
-		// // Automatically respond with a continue status when the client has the Expect: 100-continue header.
+		// Automatically respond with a continue status when the client has the Expect: 100-continue header.
 		if expect, ok := headers_get(c.req.headers, "expect");
-			ok && expect == "100-continue" && !td.s.opts.no_auto_expect_continue {
-			c.res.status = .Continue
-			respond(&c.res)
-			return
+			ok && _headers_eq(expect, "100-continue") && !td.s.opts.no_auto_expect_continue {
+			if c.req.line.version == {1, 1} {
+				send_continue(&c.res)
+				if c.res.state == .Error {
+					return
+				}
+			}
 		}
 
 		// An options request with the "*" is a no-op/ping request to
