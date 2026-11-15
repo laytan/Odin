@@ -503,48 +503,40 @@ _body_length :: proc(req: ^Request) {
 	}
 }
 
-// TODO: set this up once at init/start, globally
-@(thread_local)
-allowed_trailers: Headers
-
-init_allowed_trailers :: proc() {
-	if allowed_trailers.len > 0 {
-		return
-	}
-
-	allowed_trailers = _headers_make(runtime.heap_allocator())
+@(private="file", rodata)
+FORBIDDEN_TRAILERS := [?]string{
 	// Message framing:
-	headers_set(&allowed_trailers, "transfer-encoding", "")
-	headers_set(&allowed_trailers, "content-length", "")
+	"transfer-encoding",
+	"content-length",
 	// Routing:
-	headers_set(&allowed_trailers, "host", "")
+	"host",
 	// Request modifiers:
-	headers_set(&allowed_trailers, "if-match", "")
-	headers_set(&allowed_trailers, "if-none-match", "")
-	headers_set(&allowed_trailers, "if-modified-since", "")
-	headers_set(&allowed_trailers, "if-unmodified-since", "")
-	headers_set(&allowed_trailers, "if-range", "")
+	"if-match",
+	"if-none-match",
+	"if-modified-since",
+	"if-unmodified-since",
+	"if-range",
 	// Authentication:
-	headers_set(&allowed_trailers, "www-authenticate", "")
-	headers_set(&allowed_trailers, "authorization", "")
-	headers_set(&allowed_trailers, "proxy-authenticate", "")
-	headers_set(&allowed_trailers, "proxy-authorization", "")
-	headers_set(&allowed_trailers, "cookie", "")
-	headers_set(&allowed_trailers, "set-cookie", "")
+	"www-authenticate",
+	"authorization",
+	"proxy-authenticate",
+	"proxy-authorization",
+	"cookie",
+	"set-cookie",
 	// Control data:
-	headers_set(&allowed_trailers, "age", "")
-	headers_set(&allowed_trailers, "cache-control", "")
-	headers_set(&allowed_trailers, "expires", "")
-	headers_set(&allowed_trailers, "date", "")
-	headers_set(&allowed_trailers, "location", "")
-	headers_set(&allowed_trailers, "retry-after", "")
-	headers_set(&allowed_trailers, "vary", "")
-	headers_set(&allowed_trailers, "warning", "")
+	"age",
+	"cache-control",
+	"expires",
+	"date",
+	"location",
+	"retry-after",
+	"vary",
+	"warning",
 	// How to process:
-	headers_set(&allowed_trailers, "content-encoding", "")
-	headers_set(&allowed_trailers, "content-type", "")
-	headers_set(&allowed_trailers, "trailer", "")
-	headers_set(&allowed_trailers, "content-range", "")
+	"content-encoding",
+	"content-type",
+	"trailer",
+	"content-range",
 }
 
 // Returns if this is a valid trailer header.
@@ -558,6 +550,10 @@ init_allowed_trailers :: proc() {
 // 7.1 of [RFC7231]), or determining how to process the payload (e.g.,
 // Content-Encoding, Content-Type, Content-Range, and Trailer).
 header_allowed_trailer :: proc(key: string) -> bool {
-	init_allowed_trailers()
-	return headers_has(allowed_trailers, key)
+	for forbidden in FORBIDDEN_TRAILERS {
+		if _headers_eq(key, forbidden) {
+			return false
+		}
+	}
+	return true
 }
