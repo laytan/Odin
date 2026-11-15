@@ -252,3 +252,62 @@ test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
 	testing.expect(t, !http.headers_has(c.req.headers, "Trailer"), "expected Trailer header to be removed after trailers are processed")
 	testing.expect(t, !http.headers_has(c.req.headers, "Transfer-Encoding"), "expected Transfer-Encoding chunked header to be removed")
 }
+
+@(test)
+test_scan_temp_line_uses_temp_arena :: proc(t: ^testing.T) {
+	Temp_Line_Expectation :: struct {
+		t:        ^testing.T,
+		expected: string,
+		called:   bool,
+	}
+
+	s: http.Server
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	c := http.Connection{
+		transaction_arena = http.get_arena(nil),
+		temp_arena        = http.get_arena(nil),
+	}
+	c.transaction_arena.c = &c
+	c.temp_arena.c = &c
+	defer http.temp_allocator_destroy(&c)
+	defer http.transaction_allocator_destroy(&c)
+
+	tx_alloc := http.transaction_allocator(&c)
+	c.vars.allocator = tx_alloc
+	c.scanner.c = &c
+	c.scanner.allocator = &c.transaction_arena
+
+	payload := "hello temp\r\n"
+	buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+	testing.expect_value(t, buf_err, nil)
+	c.scanner.buf = buf
+	c.scanner.write_head = copy(buf, payload)
+
+	testing.expect(t, c.temp_arena.tail == nil, "expected temp_arena to start empty")
+
+	exp := http.context_add(&c.ctx, Temp_Line_Expectation{
+		t        = t,
+		expected = "hello temp",
+	})
+
+	http.scan_temp_line(&c.scanner, proc(c: ^http.Connection, data: []byte) {
+		exp := http.context_get(&c.ctx, Temp_Line_Expectation)
+		exp.called = true
+		testing.expect_value(exp.t, string(data), exp.expected)
+		testing.expect_value(exp.t, c.scanner.allocator, &c.temp_arena)
+		testing.expect(exp.t, c.temp_arena.tail != nil, "expected scan_temp_line to allocate scanner buffer in temp_arena")
+	})
+
+	testing.expect(t, exp.called, "expected scan_temp_line callback to run")
+	testing.expect_value(t, c.scanner.allocator, &c.temp_arena)
+	testing.expect(t, c.temp_arena.tail != nil, "expected temp_arena to hold reallocated scanner buffer")
+}

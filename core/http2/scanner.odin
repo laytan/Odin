@@ -134,7 +134,7 @@ scan_temp_at_most :: proc(s: ^Scanner, n: int, cb: Scan_Cb) {
 _scan_line :: proc(s: ^Scanner, allocator: ^Arena, cb: Scan_Cb) {
 	s.scan = {
 		split     = split_line(),
-		allocator = &s.c.transaction_arena,
+		allocator = allocator,
 		callback  = cb,
 	}
 	scanner_pump(s)
