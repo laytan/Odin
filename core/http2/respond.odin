@@ -240,17 +240,28 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 }
 
 send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
+	c := connection_of_response(res)
 	switch res.state {
 	case .Error:
 		return
 	case .None, .Handling:
 		write_response_heading(res)
 		res.state = .Sending
+		if !wants_body(&c.req) || len(bufs) == 0 {
+			_do_send(res, {res.buf[:]}, on_sent)
+			return
+		}
 		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
 		new_bufs[0] = res.buf[:]
 		copy(new_bufs[1:], bufs)
 		_do_send(res, new_bufs, on_sent)
 	case .Sending:
+		if !wants_body(&c.req) || len(bufs) == 0 {
+			if on_sent != nil {
+				on_sent(c, nil)
+			}
+			return
+		}
 		_do_send(res, bufs, on_sent)
 	case .Sent:
 		panic("response has been sent already")
@@ -326,6 +337,9 @@ respond :: proc(res: ^Response) {
 		return
 	case .None, .Handling:
 		send_response_heading(res)
+		if res.state == .Error {
+			return
+		}
 	case .Sending:
 	case .Sent:
 		panic("response has been sent already")
@@ -334,6 +348,7 @@ respond :: proc(res: ^Response) {
 	}
 
 	res.state = .Sent
+	_check_send_done(connection_of_response(res))
 }
 
 respond_bytes :: proc(res: ^Response, bytes: []byte) {
@@ -342,9 +357,14 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 		return
 	case .None, .Handling:
 		set_content_length_header(res, len(bytes))
-		write_response_heading(res)
-		res.state = .Sending
-		send(res, {res.buf[:], bytes})
+		if len(bytes) > 0 {
+			send(res, {bytes})
+		} else {
+			send_response_heading(res)
+		}
+		if res.state == .Error {
+			return
+		}
 	case .Sent, .Sending:
 		panic("response has been sent already")
 	case:
@@ -358,7 +378,7 @@ send_response_heading :: proc(res: ^Response) {
 	write_response_heading(res)
 
 	res.state = .Sending
-	send(res, {res.buf[:]})
+	_do_send(res, {res.buf[:]}, nil)
 }
 
 respond_handle :: proc(res: ^Response, file: nbio.Handle) {

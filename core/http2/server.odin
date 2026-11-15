@@ -687,7 +687,6 @@ header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_
 
 // TODO: chunked writer - can this work with the tracking of sends, wait for all sends
 // PERF: we could read the next request after "consume body" is done already, while response is still being sent
-// TODO: do not send any body when it's a redirected head to get - no-op send calls
 
 // TODO
 send_heading :: send_response_heading
