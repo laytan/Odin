@@ -313,9 +313,8 @@ scanner_pump :: proc(s: ^Scanner) {
 			return
 		}
 
-		curr_quota := s.c.res.state == .None ? td.s.opts.request_quota : td.s.opts.body_quota
 		dur := since(s.last_recv_start)
-		progression_update(&s.c.req.progress, curr_quota, op.recv.received, dur)
+		progression_update(&s.c.req.progress, s.c.req.quota != nil ? s.c.req.quota^ : {}, op.recv.received, dur)
 
 		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, op.recv.received, len(op.recv.bufs[0]), dur)
 		s.write_head += op.recv.received

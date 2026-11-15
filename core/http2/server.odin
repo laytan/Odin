@@ -215,6 +215,7 @@ context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 }
 
 Request :: struct {
+	quota:              ^Quota,
 	progress:           Progression,
 	line:               Requestline,
 	is_redirected_head: bool,
@@ -222,6 +223,7 @@ Request :: struct {
 }
 
 Response :: struct {
+	quota:    ^Quota,
 	progress: Progression,
 	status:   Status,
 	headers:  Headers,
@@ -243,6 +245,20 @@ Response :: struct {
 		Sent,     // respond was called.
 		Error,
 	},
+}
+
+// Overrides the quota applied to receiving the remaining request headers/body.
+// The given pointer must live as long as the transaction.
+request_set_quota :: proc(req: ^Request, quota: ^Quota) {
+	req.quota = quota
+	progression_set_quota(&req.progress, quota^)
+}
+
+// Overrides the quota applied to sending the response.
+// The given pointer must live as long as the transaction.
+response_set_quota :: proc(res: ^Response, quota: ^Quota) {
+	res.quota = quota
+	progression_set_quota(&res.progress, quota^)
 }
 
 response_defer :: proc(ctx: ^Ctx, deffered: proc(^Ctx)) {
@@ -457,11 +473,13 @@ _serve_connection :: proc(c: ^Connection) {
 
 	allocator := transaction_allocator(c)
 
-	progression_init(&c.req.progress, td.s.opts.request_quota)
+	c.req.quota = &td.s.opts.request_quota
+	progression_init(&c.req.progress, c.req.quota^)
 	if c.scanner.write_head > 0 {
-		progression_update(&c.req.progress, td.s.opts.request_quota, c.scanner.write_head, 0)
+		progression_update(&c.req.progress, c.req.quota^, c.scanner.write_head, 0)
 	}
-	progression_init(&c.res.progress, td.s.opts.response_quota)
+	c.res.quota = &td.s.opts.response_quota
+	progression_init(&c.res.progress, c.res.quota^)
 
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
@@ -552,7 +570,8 @@ on_headers :: proc(c: ^Connection) {
 	}
 
 	c.res.state = .Handling
-	progression_reset(&c.req.progress, td.s.opts.body_quota)
+	c.req.quota = &td.s.opts.body_quota
+	progression_reset(&c.req.progress, c.req.quota^)
 	_headers_set_readonly(&c.req.headers)
 
 	// Automatically respond with a continue status when the client has the Expect: 100-continue header.
@@ -851,7 +870,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 		unimplemented("on_send type")
 	}
 
-	progression_update(&c.res.progress, td.s.opts.response_quota, sent, since(c.res.last_send))
+	progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res.last_send))
 
 	if err != nil {
 		log.warnf("http[t=%v][c=%v]: msg=\"send error\", err=%v", td.id, c.socket, err)

@@ -72,7 +72,6 @@ Progression :: struct {
 	// > 0: use as the maximum amount of bytes to allow transferring in the next IO operation.
 	// = 0: do not do new IO, limit was exceeded.
 	// < 0: no limit is configured.
-	// TODO: allow setting for a specific request.
 	max: int,
 	// > 0: use as timeout for next IO operation.
 	// = 0: do not do new IO, timeout was exceeded.
@@ -88,8 +87,34 @@ progression_reset :: proc(p: ^Progression, q: Quota) {
 progression_init :: proc(p: ^Progression, q: Quota) {
 	assert(p.transferred == 0)
 	assert(p.total == 0)
-	p.max     = q.max_size > 0 ? q.max_size : -1
-	p.timeout = q.min > 0 ? q.min : (q.max > 0 ? q.max : -1)
+	progression_set_quota(p, q)
+}
+
+// Recomputes remaining max and timeout from q while accounting for bytes and duration already transferred.
+progression_set_quota :: proc(p: ^Progression, q: Quota) {
+	p.max = q.max_size > 0 ? max(0, q.max_size - p.transferred) : -1
+
+	if q.min <= 0 && q.max <= 0 {
+		p.timeout = -1
+		return
+	}
+
+	timeout: time.Duration
+	if q.min > 0 {
+		timeout = q.min - p.total
+		if q.min_rate > 0 && q.rate_add > 0 && p.transferred > 0 {
+			timeout += time.Duration((f64(p.transferred) / f64(q.min_rate)) * f64(q.rate_add))
+		}
+	} else {
+		timeout = q.max - p.total
+	}
+
+	if q.max > 0 {
+		allowed := max(0, q.max - p.total)
+		timeout = min(timeout, allowed)
+	}
+
+	p.timeout = max(0, timeout)
 }
 
 progression_next_timeout :: proc(p: Progression) -> time.Duration {
