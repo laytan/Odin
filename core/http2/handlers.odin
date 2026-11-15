@@ -122,7 +122,6 @@ body_parser :: proc(next: ^Handler) -> Handler {
 			on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
 				ctx := context_of_request(r)
 				s := context_get(ctx, Body_Parser_State)
-				fmt.println(s.h, s, len(body), is_partial)
 				assert(s != nil)
 
 				if len(body) > 0 {
@@ -221,27 +220,36 @@ body_parser_stream :: proc(s: ^Body_Parser_Stream) -> io.Stream {
 			}
 
 			read_at :: proc(s: ^Body_Parser_Stream, buf: []byte, off: i64) -> (i64, io.Error) {
+				if len(buf) == 0 {
+					return 0, nil
+				}
+				if off < 0 {
+					return 0, .Invalid_Offset
+				}
+
 				curr: i64
-				start_idx, start_part: int
+				start_idx: int
+				start_part := -1
 				for part, i in s.state.parts {
-					if curr + i64(len(part)) >= off {
+					if curr + i64(len(part)) > off {
 						start_part = i
 						start_idx  = int(off - curr)
-						curr       = off
 						break
 					}
 
 					curr += i64(len(part))
 				}
 
-				if curr != off {
+				if start_part == -1 {
+					if off == curr {
+						return 0, .EOF
+					}
 					return 0, .Invalid_Offset
 				}
 
-				n: int
-				n += copy(buf[n:], s.state.parts[start_part][start_idx:])
+				n := copy(buf, s.state.parts[start_part][start_idx:])
 				if n < len(buf) {
-					for part in s.state.parts[start_part:] {
+					for part in s.state.parts[start_part+1:] {
 						n += copy(buf[n:], part)
 						if n == len(buf) { break }
 					}

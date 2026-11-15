@@ -1,5 +1,6 @@
 package test_core_net_http
 
+import "core:io"
 import "core:mem"
 import "core:mem/virtual"
 import "core:testing"
@@ -310,4 +311,156 @@ test_scan_temp_line_uses_temp_arena :: proc(t: ^testing.T) {
 	testing.expect(t, exp.called, "expected scan_temp_line callback to run")
 	testing.expect_value(t, c.scanner.allocator, &c.temp_arena)
 	testing.expect(t, c.temp_arena.tail != nil, "expected temp_arena to hold reallocated scanner buffer")
+}
+
+@(test)
+test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
+	Stream_Expectation :: struct {
+		t:      ^testing.T,
+		called: bool,
+	}
+
+	s: http.Server
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	c := http.Connection{
+		transaction_arena = http.get_arena(nil),
+		temp_arena        = http.get_arena(nil),
+	}
+	c.transaction_arena.c = &c
+	c.temp_arena.c = &c
+	defer http.temp_allocator_destroy(&c)
+	defer http.transaction_allocator_destroy(&c)
+
+	tx_alloc := http.transaction_allocator(&c)
+	c.vars.allocator = tx_alloc
+	c.req.headers.allocator = tx_alloc
+	c.scanner.c = &c
+	c.scanner.allocator = &c.transaction_arena
+	http.progression_init(&c.req.progress, {})
+
+	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+	http._headers_set_readonly(&c.req.headers)
+
+	payload := "5\r\nhello\r\n2\r\n, \r\n6\r\nworld!\r\n0\r\n\r\n"
+	buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+	testing.expect_value(t, buf_err, nil)
+	c.scanner.buf = buf
+	c.scanner.write_head = copy(buf, payload)
+
+	exp := http.context_add(&c.ctx, Stream_Expectation{
+		t = t,
+	})
+
+	next := http.handler(proc(ctx: ^http.Ctx) {
+		exp := http.context_get(ctx, Stream_Expectation)
+		exp.called = true
+		t := exp.t
+
+		// Verify body_parser_iterator across all 3 parts.
+		expected_parts := [?]string{"hello", ", ", "world!"}
+		it := http.body_parser_iterator(ctx)
+		part_count := 0
+		for part, idx in http.body_parser_iter(&it) {
+			testing.expect(t, idx < len(expected_parts), "unexpected extra body part")
+			testing.expect_value(t, string(part), expected_parts[idx])
+			part_count += 1
+		}
+		testing.expect_value(t, part_count, len(expected_parts))
+
+		bps: http.Body_Parser_Stream
+		http.body_parser_stream_init(&bps, ctx)
+		stream := http.body_parser_stream(&bps)
+
+		// Verify total size.
+		sz, sz_err := io.size(stream)
+		testing.expect_value(t, sz_err, nil)
+		testing.expect_value(t, sz, i64(13))
+
+		// Verify single full read does not duplicate first part, followed by .EOF.
+		full: [32]byte
+		n, r_err := io.read(stream, full[:])
+		testing.expect_value(t, r_err, nil)
+		testing.expect_value(t, string(full[:n]), "hello, world!")
+
+		eof_n, eof_err := io.read(stream, full[:])
+		testing.expect_value(t, eof_err, io.Error.EOF)
+		testing.expect_value(t, eof_n, 0)
+
+		// Seek back to start and read in 4-byte chunks across part boundaries.
+		pos, seek_err := io.seek(stream, 0, .Start)
+		testing.expect_value(t, seek_err, nil)
+		testing.expect_value(t, pos, i64(0))
+
+		chunked: [32]byte
+		total := 0
+		for {
+			cn, cerr := io.read(stream, chunked[total:min(len(chunked), total+4)])
+			if cerr == .EOF {
+				break
+			}
+			testing.expect_value(t, cerr, nil)
+			testing.expect(t, cn > 0, "expected positive byte count before EOF")
+			total += cn
+		}
+		testing.expect_value(t, string(chunked[:total]), "hello, world!")
+
+		// Verify io.read_at on an exact part boundary (off = 5 starts at ", ").
+		at_buf: [8]byte
+		at_n, at_err := io.read_at(stream, at_buf[:], 5)
+		testing.expect_value(t, at_err, nil)
+		testing.expect_value(t, string(at_buf[:at_n]), ", world!")
+
+		// Verify io.read_at at EOF and out-of-range offsets.
+		at_eof_n, at_eof_err := io.read_at(stream, at_buf[:], 13)
+		testing.expect_value(t, at_eof_err, io.Error.EOF)
+		testing.expect_value(t, at_eof_n, 0)
+
+		bad_neg_n, bad_neg_err := io.read_at(stream, at_buf[:], -1)
+		testing.expect_value(t, bad_neg_err, io.Error.Invalid_Offset)
+		testing.expect_value(t, bad_neg_n, 0)
+
+		bad_oob_n, bad_oob_err := io.read_at(stream, at_buf[:], 14)
+		testing.expect_value(t, bad_oob_err, io.Error.Invalid_Offset)
+		testing.expect_value(t, bad_oob_n, 0)
+	})
+
+	parser := http.body_parser(&next)
+	parser.handle(&parser, &c.ctx)
+	testing.expect(t, exp.called, "expected body_parser to invoke next handler")
+
+	// Verify empty body stream behavior (off=0 -> .EOF, off>0 -> .Invalid_Offset).
+	empty_c := http.Connection{
+		transaction_arena = http.get_arena(nil),
+		temp_arena        = http.get_arena(nil),
+	}
+	empty_c.transaction_arena.c = &empty_c
+	empty_c.temp_arena.c = &empty_c
+	defer http.temp_allocator_destroy(&empty_c)
+	defer http.transaction_allocator_destroy(&empty_c)
+
+	empty_c.vars.allocator = http.transaction_allocator(&empty_c)
+	http.context_add(&empty_c.ctx, http.Body_Parser_State{})
+
+	empty_bps: http.Body_Parser_Stream
+	http.body_parser_stream_init(&empty_bps, &empty_c.ctx)
+	empty_stream := http.body_parser_stream(&empty_bps)
+
+	empty_buf: [8]byte
+	empty_n, empty_err := io.read(empty_stream, empty_buf[:])
+	testing.expect_value(t, empty_err, io.Error.EOF)
+	testing.expect_value(t, empty_n, 0)
+
+	empty_oob_n, empty_oob_err := io.read_at(empty_stream, empty_buf[:], 1)
+	testing.expect_value(t, empty_oob_err, io.Error.Invalid_Offset)
+	testing.expect_value(t, empty_oob_n, 0)
 }
