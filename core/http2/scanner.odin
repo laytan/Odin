@@ -432,7 +432,7 @@ _body_chunked :: proc(req: ^Request) {
 		if len(data) == 0 {
 			_headers_set_writable(&c.req.headers)
 
-			headers_delete(c.req.headers, "Trailer")
+			headers_delete(&c.req.headers, "Trailer")
 			_, val_ptr, just_inserted, err := headers_entry(&c.req.headers, "Transfer-Encoding")
 			assert(!just_inserted)
 			assert(err == nil)
@@ -440,7 +440,7 @@ _body_chunked :: proc(req: ^Request) {
 			if strings.has_suffix(val_ptr^, ", chunked") {
 				val_ptr^ = strings.trim_suffix(val_ptr^, ", chunked")
 			} else if val_ptr^ == "chunked" {
-				headers_delete(c.req.headers, "Transfer-Encoding")
+				headers_delete(&c.req.headers, "Transfer-Encoding")
 			}
 
 			_headers_set_readonly(&c.req.headers)

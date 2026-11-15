@@ -555,7 +555,7 @@ validate_headers :: proc(c: ^Connection) -> bool {
 		// Content-Length.  Such a message might indicate an attempt to
 		// perform request smuggling (Section 9.5) or response splitting
 		// (Section 9.4) and ought to be handled as an error.
-		headers_delete(c.req.headers, "content-length")
+		headers_delete(&c.req.headers, "content-length")
 	} else {
 		// RFC 7230 3.3.3: If a message is received without Transfer-Encoding and with
 		// either multiple Content-Length header fields having differing

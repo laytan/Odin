@@ -156,7 +156,8 @@ headers_entry :: proc(m: ^Headers, key: string) -> (key_ptr, val_ptr: ^string, j
 	}
 }
 
-headers_delete :: proc(m: Headers, key: string) -> (deleted_key, deleted_value: string) {
+headers_delete :: proc(m: ^Headers, key: string, loc := #caller_location) -> (deleted_key, deleted_value: string) {
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to delete a header on the server request or client response?", loc)
 	return #force_inline _headers_delete_with_hash(m, key, _headers_hash_key(key))
 }
 
@@ -260,13 +261,50 @@ _headers_has_with_hash :: proc(m: Headers, key: string, hashed: u64) -> bool {
 	return has
 }
 
-_headers_delete_with_hash :: proc(m: Headers, key: string, hashed: u64) -> (deleted_key, deleted_value: string) #no_bounds_check {
-	spot := _headers_spot_with_hash(m, key, hashed)
-	if spot == nil { return }
-	spot.hash = 0
-	deleted_key   = spot.key
-	deleted_value = spot.value
-	return
+_headers_delete_with_hash :: proc(m: ^Headers, key: string, hashed: u64) -> (deleted_key, deleted_value: string) #no_bounds_check {
+	if m.len == 0 { return }
+
+	mask  := u64(len(m.spots) - 1)
+	idx   := hashed & mask
+	found := false
+
+	for {
+		entry := &m.spots[idx]
+		if entry.hash == 0 { return }
+
+		if entry.hash == hashed && _headers_eq(key, entry.key) {
+			if !found {
+				deleted_key   = entry.key
+				deleted_value = entry.value
+				found         = true
+			}
+
+			m.len -= 1
+
+			// Backward-shift subsequent entries in the probe cluster.
+			i := idx
+			j := i
+			for {
+				j = (j + 1) & mask
+				next := m.spots[j]
+				if next.hash == 0 {
+					m.spots[i] = {}
+					break
+				}
+
+				k := next.hash & mask
+				if ((j - k) & mask) >= ((j - i) & mask) {
+					m.spots[i] = next
+					i = j
+				}
+			}
+
+			// Re-check `idx` since backward-shift may have moved another matching entry into `idx`.
+			continue
+		}
+
+		idx = (idx + 1) & mask
+	}
 }
 
 _headers_spot :: proc(m: Headers, key: string) -> ^Header_Spot {
