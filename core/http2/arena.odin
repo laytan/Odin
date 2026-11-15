@@ -179,6 +179,7 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 
 	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), uint(align))
 	assert(err == nil) // TODO: Handle
+	sanitizer.address_unpoison(data)
 
 	arena := (^_Arena_Block)(raw_data(data))
 	arena.data   = data
@@ -193,6 +194,15 @@ _server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
 	bucket := _bucket_to_put(len(arena.data))
 	arena.prev = td.free_arenas[bucket]
 	td.free_arenas[bucket] = arena
+}
+
+_server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
+	for &head in t.free_arenas {
+		for block := head; block != nil; block = block.prev {
+			sanitizer.address_unpoison(block.data[size_of(_Arena_Block):])
+		}
+		head = nil
+	}
 }
 
 _push_arena_block :: proc(a: ^Arena, size, align: int) -> ^_Arena_Block {

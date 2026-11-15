@@ -9,7 +9,6 @@ import "base:sanitizer"
 import "core:container/xar"
 import "core:io"
 import "core:log"
-import "core:mem"
 import "core:mem/virtual"
 import "core:nbio"
 import "core:os"
@@ -127,21 +126,13 @@ Server_Thread :: struct {
 }
 
 Connection :: struct {
-	socket:  nbio.TCP_Socket,
-	remote:  nbio.Endpoint,
-	scanner: Scanner,
-	curr_recv: ^nbio.Operation,
-
-	using temp: struct {
-		transaction_arena: Arena,
-		temp_arena:        Arena,
-		headers_quota:      Quota,
-		headers_progression: Progression,
-		body_quota:         Quota,
-		body_progression:   Progression,
-
-		using ctx: Ctx,
-	},
+	socket:            nbio.TCP_Socket,
+	remote:            nbio.Endpoint,
+	scanner:           Scanner,
+	curr_recv:         ^nbio.Operation,
+	transaction_arena: Arena,
+	temp_arena:        Arena,
+	using ctx:         Ctx,
 }
 
 transaction_allocator_destroy :: proc(c: ^Connection) {
@@ -405,7 +396,7 @@ connection_destroy :: proc(c: ^Connection) {
 		deferred(&c.ctx)
 	}
 
-	free_all(temp_allocator(c))
+	temp_allocator_destroy(c)
 	transaction_allocator_destroy(c)
 	// if mem_use > 0 {
 	// 	log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
@@ -424,19 +415,20 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 }
 
 _serve_connection :: proc(c: ^Connection) {
-	free_all(temp_allocator(c))
-	free_all(transaction_allocator(c))
+	c.temp_arena.c        = c
+	c.transaction_arena.c = c
 
-	mem.zero_item(&c.temp)
+	scanner_reset(&c.scanner, c)
+	temp_allocator_destroy(c)
 
-	c.temp_arena = get_arena(c)
-	c.transaction_arena = get_arena(c)
+	c.ctx = {}
 
 	allocator := transaction_allocator(c)
 
-	// c.buf.allocator          = allocator
-
 	progression_init(&c.req.progress, td.s.opts.request_quota)
+	if c.scanner.write_head > 0 {
+		progression_update(&c.req.progress, td.s.opts.request_quota, c.scanner.write_head, 0)
+	}
 	progression_init(&c.res.progress, td.s.opts.response_quota)
 
 	c.req.headers.allocator  = allocator
@@ -444,8 +436,6 @@ _serve_connection :: proc(c: ^Connection) {
 	c.vars.allocator         = allocator
 	c.res.buf.allocator      = allocator
 	c.res.deferred.allocator = allocator
-
-	scanner_reset(&c.scanner, c)
 
 	scan_line(&c.scanner, on_rline1)
 
@@ -631,6 +621,7 @@ _destroy :: proc(s: ^Server) {
 		}
 		for &t in s.threads {
 			xar.freelist_destroy(&t.connections)
+			_server_thread_free_arenas_destroy(&t)
 		}
 		delete(s.threads, s.allocator)
 	}

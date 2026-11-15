@@ -19,6 +19,7 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	prev_td := http.td
 	http.td = &thread
 	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
 
 	a1 := http.get_arena(nil)
 	bs1, alloc_err1 := http.arena_alloc(&a1, 5000, mem.DEFAULT_ALIGNMENT)
@@ -56,6 +57,7 @@ test_arena_resize_and_free :: proc(t: ^testing.T) {
 	prev_td := http.td
 	http.td = &thread
 	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
 
 	a := http.get_arena(nil)
 	defer http.arena_destroy(&a)
@@ -101,6 +103,7 @@ when size_of(uintptr) == 8 {
 		prev_td := http.td
 		http.td = &thread
 		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
 
 		last_bucket := len(thread.free_arenas) - 1
 

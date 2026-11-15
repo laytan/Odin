@@ -40,8 +40,33 @@ Scanner :: struct {
 MULTIPLIER :: 512
 
 scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
-	s^  = {}
-	s.c = c
+	to_copy := s.buf[s.read_head:s.write_head]
+	if len(to_copy) == 0 {
+		transaction_allocator_destroy(c)
+		s^  = {}
+		s.c = c
+		return
+	}
+
+	to_alloc := max(MULTIPLIER, len(to_copy))
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v, to_alloc=%v", td.id, c.socket, len(to_copy), to_alloc)
+
+	new_arena := _server_thread_get_free_arena(to_alloc)
+	new_buf, err := make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	assert(err == nil)
+	new_arena.last = raw_data(new_buf)
+	n := copy(new_buf, to_copy)
+
+	transaction_allocator_destroy(c)
+	c.transaction_arena.tail = new_arena
+
+	s^ = {
+		c          = c,
+		buf        = new_buf,
+		read_head  = 0,
+		write_head = n,
+		allocator  = &c.transaction_arena,
+	}
 }
 
 _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
@@ -63,6 +88,7 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 	err: runtime.Allocator_Error
 	s.buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
 	assert(err == nil)
+	new_arena.last = raw_data(s.buf)
 	s.read_head  = 0
 	s.write_head = copy(s.buf, to_copy)
 
