@@ -1,8 +1,10 @@
 package test_core_net_http
 
+import "core:fmt"
 import "core:io"
 import "core:mem"
 import "core:mem/virtual"
+import "core:strings"
 import "core:testing"
 
 import http "core:http2"
@@ -463,4 +465,132 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	empty_oob_n, empty_oob_err := io.read_at(empty_stream, empty_buf[:], 1)
 	testing.expect_value(t, empty_oob_err, io.Error.Invalid_Offset)
 	testing.expect_value(t, empty_oob_n, 0)
+}
+
+@(test)
+test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
+	s := http.make_server({})
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	setup_conn :: proc(t: ^testing.T, c: ^http.Connection, payload: string, req_max: int) {
+		c^ = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = c
+		c.temp_arena.c = c
+
+		tx_alloc := http.transaction_allocator(c)
+		c.vars.allocator = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.res.headers.allocator = tx_alloc
+		c.res.buf.allocator = tx_alloc
+		c.scanner.c = c
+		c.scanner.allocator = &c.transaction_arena
+
+		// Prevent invalid_request -> respond -> _do_send from calling nbio without an event loop.
+		c.res.progress.max = 0
+		c.res.sends = 1
+		c.req.progress.max = req_max
+
+		if len(payload) > 0 {
+			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+			testing.expect_value(t, buf_err, nil)
+			c.scanner.buf = buf
+			c.scanner.write_head = copy(buf, payload)
+		}
+	}
+
+	cleanup_conn :: proc(c: ^http.Connection) {
+		http.temp_allocator_destroy(c)
+		http.transaction_allocator_destroy(c)
+	}
+
+	// 1. Exhausted request quota before request-line completes -> 414 URI Too Long.
+	{
+		c: http.Connection
+		setup_conn(t, &c, "GET /too-long-uri-without-crlf", 0)
+		defer cleanup_conn(&c)
+
+		http.scan_line(&c.scanner, http.on_rline1)
+		testing.expect_value(t, c.res.status, http.Status.URI_Too_Long)
+		testing.expect(t, c.res.state == .Error)
+	}
+
+	// 2. Exhausted request quota after request-line during header scanning -> 431 Request Header Fields Too Large.
+	{
+		c: http.Connection
+		setup_conn(t, &c, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Big: incomplete", 0)
+		defer cleanup_conn(&c)
+
+		http.scan_line(&c.scanner, http.on_rline1)
+		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
+		testing.expect(t, c.res.state == .Error)
+	}
+
+	// 3. Header count exceeding max_headers (default 128) -> 431 Request Header Fields Too Large.
+	{
+		c: http.Connection
+		setup_conn(t, &c, "", s.opts.request_quota.max_size)
+		defer cleanup_conn(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		b := strings.builder_make(tx_alloc)
+		strings.write_string(&b, "GET / HTTP/1.1\r\nHost: localhost\r\n")
+		for i in 0 ..< s.opts.max_headers {
+			fmt.sbprintf(&b, "X-H%d: 1\r\n", i)
+		}
+		strings.write_string(&b, "\r\n")
+		payload := strings.to_string(b)
+
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		c.scanner.buf = buf
+		c.scanner.write_head = copy(buf, payload)
+
+		http.scan_line(&c.scanner, http.on_rline1)
+		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
+		testing.expect(t, c.res.state == .Error)
+		testing.expect_value(t, http.headers_len(c.req.headers), s.opts.max_headers)
+	}
+
+	// 4a. Content-Length exceeding body_quota.max_size -> 413 Payload Too Large.
+	{
+		c: http.Connection
+		setup_conn(t, &c, "", 10 * mem.Megabyte)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "10485761"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
+		testing.expect(t, c.res.state == .Error)
+	}
+
+	// 4b. Exhausted body quota during body scanning -> 413 Payload Too Large.
+	{
+		c: http.Connection
+		setup_conn(t, &c, "5\r\nhe", 0)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
+		testing.expect(t, c.res.state == .Error)
+	}
 }

@@ -257,7 +257,12 @@ scanner_pump :: proc(s: ^Scanner) {
 
 			max := s.c.req.progress.max
 			if max == 0 {
-				invalid_request(s.c, .Payload_Too_Large)
+				if s.c.res.state == .None {
+					status := s.c.req.line.version == {} ? Status.URI_Too_Long : Status.Request_Header_Fields_Too_Large
+					invalid_request(s.c, status)
+				} else {
+					invalid_request(s.c, .Payload_Too_Large)
+				}
 				return
 			} else if max > 0 {
 				dst = dst[:min(len(dst), max)]
@@ -464,8 +469,11 @@ _body_chunked :: proc(req: ^Request) {
 		// A recipient MUST ignore (or consider as an error) any fields that are forbidden to be sent in a trailer.
 		if header_allowed_trailer(key) {
 			_headers_set_writable(&c.req.headers)
-			headers_add(&c.req.headers, key, val)
+			added := _request_add_header(c, key, val)
 			_headers_set_readonly(&c.req.headers)
+			if !added {
+				return
+			}
 		}
 
 		scan_line(&c.scanner, on_trailer)
@@ -482,6 +490,11 @@ _body_length :: proc(req: ^Request) {
 
 	if !has_clen || clen == 0 {
 		_body_cb(req, nil, is_partial=false)
+		return
+	}
+
+	if c.req.progress.max >= 0 && clen > c.req.progress.max {
+		invalid_request(c, .Payload_Too_Large)
 		return
 	}
 

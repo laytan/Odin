@@ -20,9 +20,9 @@ Quota :: struct {
 //
 // Allow at least 20 seconds to receive the headers. If the client sends data, increase the timeout
 // by 1 second for every 500 bytes received. But do not allow more than 40 seconds in total.
-// Only accept up to a MiB of data containing the request line and headers.
+// Only accept up to 64 KiB of data containing the request line and headers.
 DEFAULT_HEADERS_QUOTA :: Quota{
-	max_size = mem.Megabyte,
+	max_size = 64 * mem.Kilobyte,
 	min      = 20 * time.Second,
 	max      = 40 * time.Second,
 	min_rate = 500,
@@ -32,9 +32,9 @@ DEFAULT_HEADERS_QUOTA :: Quota{
 // Default quota for receiving bodies, this is intentionally permissive.
 //
 // Allow at least 20 seconds to receive the body. If the client sends data, increase the timeout
-// by 1 second for every 500 bytes received. With no total limit (client may send 500b/s indefinitely).
+// by 1 second for every 500 bytes received. Up to 10 MiB total, with no absolute duration limit.
 DEFAULT_BODY_QUOTA :: Quota{
-	max_size = 0, // No max body size.
+	max_size = 10 * mem.Megabyte,
 	min      = 20 * time.Second,
 	max      = 0,
 	min_rate = 500,

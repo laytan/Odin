@@ -46,11 +46,14 @@ Server_Options :: struct {
 	request_quota:  Quota,
 	body_quota:     Quota,
 	response_quota: Quota,
+	// Maximum number of request headers (and chunked trailers) accepted. Zero defaults to DEFAULT_MAX_HEADERS; negative disables the limit.
+	max_headers:    int,
 }
 
-DEFAULT_BACKLOG  :: 1000
-DEFAULT_ADDRESS  :: nbio.IP4_Loopback
-DEFAULT_PORT     :: 8080
+DEFAULT_BACKLOG     :: 1000
+DEFAULT_ADDRESS     :: nbio.IP4_Loopback
+DEFAULT_PORT        :: 8080
+DEFAULT_MAX_HEADERS :: 128
 
 General_Error :: enum i32 {
 	Allocation_Failed,
@@ -81,6 +84,9 @@ _server_options_apply_defaults :: proc(opts: ^Server_Options) {
 	}
 	if opts.response_quota == {} {
 		opts.response_quota = DEFAULT_SEND_QUOTA
+	}
+	if opts.max_headers == 0 {
+		opts.max_headers = DEFAULT_MAX_HEADERS
 	}
 }
 
@@ -464,107 +470,121 @@ _serve_connection :: proc(c: ^Connection) {
 	c.res.deferred.allocator = allocator
 
 	scan_line(&c.scanner, on_rline1)
+}
 
-	on_rline1 :: proc(c: ^Connection, line: []byte) {
-		if len(line) == 0 {
-			scan_line(&c.scanner, on_rline)
-			return
-		}
-
-		on_rline(c, line)
+on_rline1 :: proc(c: ^Connection, line: []byte) {
+	if len(line) == 0 {
+		scan_line(&c.scanner, on_rline)
+		return
 	}
 
-	on_rline :: proc(c: ^Connection, line: []byte) {
-		log.debugf("http[t=%v][c=%v]: rline=%q", td.id, c.socket, line)
+	on_rline(c, line)
+}
 
-		line, err := requestline_parse(string(line))
-		if err != nil {
-			log.warnf("http[t=%v][c=%v]: err=%v", td.id, c.socket, err)
-			#partial switch err {
-			case .Method_Not_Implemented: invalid_request(c, .Method_Not_Allowed)
-			case:                         invalid_request(c, .Bad_Request)
-			}
-			return
+on_rline :: proc(c: ^Connection, line: []byte) {
+	log.debugf("http[t=%v][c=%v]: rline=%q", td.id, c.socket, line)
+
+	line, err := requestline_parse(string(line))
+	if err != nil {
+		log.warnf("http[t=%v][c=%v]: err=%v", td.id, c.socket, err)
+		#partial switch err {
+		case .Method_Not_Implemented: invalid_request(c, .Method_Not_Allowed)
+		case:                         invalid_request(c, .Bad_Request)
 		}
-
-		if line.version.major != 1 || line.version.minor > 1 {
-			log.warnf("http[t=%v][c=%v]: version=%v.%v, status=%v", td.id, c.socket, line.version.major, line.version.minor, Status.HTTP_Version_Not_Supported)
-			invalid_request(c, .HTTP_Version_Not_Supported)
-			return
-		}
-
-		log.debugf("http[t=%v][c=%v]: method=%v, target=%q, version=%v.%v", td.id, c.socket, line.method, line.target, line.version.major, line.version.minor)
-		c.req.line = line
-
-		scan_line(&c.scanner, on_header)
+		return
 	}
 
-	on_header :: proc(c: ^Connection, line: []byte) {
-		if len(line) == 0 {
-			on_headers(c)
-			return
-		}
-
-		key, value, ok := header_parse(string(line))
-		if !ok {
-			invalid_request(c, .Bad_Request)
-			return
-		}
-
-		log.debugf("http[t=%v][c=%v]: key=%q, value=%q", td.id, c.socket, key, value)
-
-		if alloc_err := headers_add(&c.req.headers, key, value); alloc_err != nil {
-			log.errorf("http[t=%v][c=%v]: msg=\"headers_add allocation error\", err=%v", td.id, c.socket, alloc_err)
-			invalid_request(c, .Internal_Server_Error)
-			return
-		}
-
-		scan_line(&c.scanner, on_header)
+	if line.version.major != 1 || line.version.minor > 1 {
+		log.warnf("http[t=%v][c=%v]: version=%v.%v, status=%v", td.id, c.socket, line.version.major, line.version.minor, Status.HTTP_Version_Not_Supported)
+		invalid_request(c, .HTTP_Version_Not_Supported)
+		return
 	}
 
-	on_headers :: proc(c: ^Connection) {
-		log.debugf("http[t=%v][c=%v]: msg=\"got headers\"", td.id, c.socket)
+	log.debugf("http[t=%v][c=%v]: method=%v, target=%q, version=%v.%v", td.id, c.socket, line.method, line.target, line.version.major, line.version.minor)
+	c.req.line = line
 
-		if !validate_headers(c) {
-			invalid_request(c, .Bad_Request)
-			return
-		}
+	scan_line(&c.scanner, on_header)
+}
 
-		c.res.state = .Handling
-		progression_reset(&c.req.progress, td.s.opts.body_quota)
-		_headers_set_readonly(&c.req.headers)
+on_header :: proc(c: ^Connection, line: []byte) {
+	if len(line) == 0 {
+		on_headers(c)
+		return
+	}
 
-		// Automatically respond with a continue status when the client has the Expect: 100-continue header.
-		if expect, ok := headers_get(c.req.headers, "expect");
-			ok && _headers_eq(expect, "100-continue") && !td.s.opts.no_auto_expect_continue {
-			if c.req.line.version == {1, 1} {
-				send_continue(&c.res)
-				if c.res.state == .Error {
-					return
-				}
+	key, value, ok := header_parse(string(line))
+	if !ok {
+		invalid_request(c, .Bad_Request)
+		return
+	}
+
+	log.debugf("http[t=%v][c=%v]: key=%q, value=%q", td.id, c.socket, key, value)
+
+	if !_request_add_header(c, key, value) {
+		return
+	}
+
+	scan_line(&c.scanner, on_header)
+}
+
+// Enforces max_headers and appends a parsed header/trailer to c.req.headers.
+_request_add_header :: proc(c: ^Connection, key, val: string) -> bool {
+	if td.s.opts.max_headers > 0 && headers_len(c.req.headers) >= td.s.opts.max_headers {
+		invalid_request(c, .Request_Header_Fields_Too_Large)
+		return false
+	}
+
+	if alloc_err := headers_add(&c.req.headers, key, val); alloc_err != nil {
+		log.errorf("http[t=%v][c=%v]: msg=\"headers_add allocation error\", err=%v", td.id, c.socket, alloc_err)
+		invalid_request(c, .Internal_Server_Error)
+		return false
+	}
+
+	return true
+}
+
+on_headers :: proc(c: ^Connection) {
+	log.debugf("http[t=%v][c=%v]: msg=\"got headers\"", td.id, c.socket)
+
+	if !validate_headers(c) {
+		invalid_request(c, .Bad_Request)
+		return
+	}
+
+	c.res.state = .Handling
+	progression_reset(&c.req.progress, td.s.opts.body_quota)
+	_headers_set_readonly(&c.req.headers)
+
+	// Automatically respond with a continue status when the client has the Expect: 100-continue header.
+	if expect, ok := headers_get(c.req.headers, "expect");
+		ok && _headers_eq(expect, "100-continue") && !td.s.opts.no_auto_expect_continue {
+		if c.req.line.version == {1, 1} {
+			send_continue(&c.res)
+			if c.res.state == .Error {
+				return
 			}
 		}
+	}
 
-		// An options request with the "*" is a no-op/ping request to
-		// check for server capabilities and should not be sent to handlers.
-		if c.req.line.method == .Options && c.req.line.target == "*" {
-			c.res.status = .OK
-			respond(&c.res)
-		} else {
-			// Give the handler this request as a GET, since the HTTP spec
-			// says a HEAD is identical to a GET but just without writing the body,
-			// handlers shouldn't have to worry about it.
-			if c.req.line.method == .Head && !td.s.opts.no_redirect_head_to_get {
-				c.req.is_redirected_head = true
-				c.req.line.method = .Get
-			}
-
-			context.temp_allocator = temp_allocator(c) 
-			c.ctx.vars.allocator   = transaction_allocator(c)
-			c.res.status = .OK
-			assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
-			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
+	// An options request with the "*" is a no-op/ping request to
+	// check for server capabilities and should not be sent to handlers.
+	if c.req.line.method == .Options && c.req.line.target == "*" {
+		c.res.status = .OK
+		respond(&c.res)
+	} else {
+		// Give the handler this request as a GET, since the HTTP spec
+		// says a HEAD is identical to a GET but just without writing the body,
+		// handlers shouldn't have to worry about it.
+		if c.req.line.method == .Head && !td.s.opts.no_redirect_head_to_get {
+			c.req.is_redirected_head = true
+			c.req.line.method = .Get
 		}
+
+		context.temp_allocator = temp_allocator(c)
+		c.ctx.vars.allocator   = transaction_allocator(c)
+		c.res.status = .OK
+		assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
+		td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
 	}
 }
 
