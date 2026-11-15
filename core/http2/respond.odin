@@ -332,6 +332,8 @@ send_continue :: proc(res: ^Response, on_sent: Send_Callback = nil) {
 }
 
 respond :: proc(res: ^Response) {
+	c := connection_of_response(res)
+
 	switch res.state {
 	case .Error:
 		return
@@ -348,10 +350,12 @@ respond :: proc(res: ^Response) {
 	}
 
 	res.state = .Sent
-	_check_send_done(connection_of_response(res))
+	_check_send_done(c)
 }
 
 respond_bytes :: proc(res: ^Response, bytes: []byte) {
+	c := connection_of_response(res)
+
 	switch res.state {
 	case .Error:
 		return
@@ -372,6 +376,7 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 	}
 
 	res.state = .Sent
+	_check_send_done(c)
 }
 
 send_response_heading :: proc(res: ^Response) {

@@ -770,3 +770,241 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 		testing.expect(t, c.res.state == .Error)
 	}
 }
+
+@(test)
+test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
+	Test_State :: struct {
+		t:              ^testing.T,
+		mode:           enum {
+			Unconsumed,
+			Consumed_Keepalive,
+			Partial_Cb_Respond,
+		},
+		req_count:      int,
+		must_close_1:   bool,
+		res1_had_close: bool,
+		second_target:  string,
+		body_cb_calls:  int,
+		body_received:  [64]byte,
+		body_len:       int,
+		body_finished:  bool,
+		finish:         proc(c: ^http.Connection, pending_sends := 0),
+	}
+
+	Test_Env :: struct {
+		s:      http.Server,
+		thread: http.Server_Thread,
+		prev:   ^http.Server_Thread,
+		c:      http.Connection,
+	}
+
+	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
+		http.write_response_heading(&c.res)
+		c.res.state = .Sending
+		c.res.sends = pending_sends
+		http.respond(&c.res)
+	}
+
+	test_handler := http.Handler{
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			state := (^Test_State)(h.user_data)
+			c := http.connection_of_context(ctx)
+			state.req_count += 1
+
+			if state.req_count == 2 {
+				state.second_target = strings.clone(ctx.req.line.target, context.allocator)
+				finish_test_response(c, pending_sends = 1)
+				return
+			}
+
+			switch state.mode {
+			case .Unconsumed:
+				state.must_close_1 = http.response_must_close(c)
+				finish_test_response(c, pending_sends = 1)
+				state.res1_had_close = strings.contains(string(c.res.buf[:]), "Connection: close\r\n")
+
+			case .Consumed_Keepalive:
+				state.finish = finish_test_response
+				http.context_add(ctx, state)
+				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+					ctx := http.context_of_request(req)
+					state := http.context_get(ctx, ^Test_State)^
+					c := http.connection_of_request(req)
+
+					state.body_cb_calls += 1
+					if len(data) > 0 {
+						n := copy(state.body_received[state.body_len:], data)
+						state.body_len += n
+					}
+					if !is_partial {
+						state.body_finished = true
+						state.must_close_1 = http.response_must_close(c)
+						state.finish(c, 0)
+					}
+				})
+
+			case .Partial_Cb_Respond:
+				state.finish = finish_test_response
+				http.context_add(ctx, state)
+				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+					ctx := http.context_of_request(req)
+					state := http.context_get(ctx, ^Test_State)^
+					c := http.connection_of_request(req)
+
+					state.body_cb_calls += 1
+					if len(data) > 0 {
+						n := copy(state.body_received[state.body_len:], data)
+						state.body_len += n
+					}
+					if is_partial {
+						state.must_close_1 = http.response_must_close(c)
+						state.finish(c, 1)
+					}
+				})
+			}
+		},
+	}
+
+	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: ^http.Handler, payload: string, env: ^Test_Env) {
+		test_handler.user_data = state
+		env.s = http.make_server({handler = test_handler^})
+		err := virtual.arena_init_growing(&env.s.temp_allocator_backing, 64 * mem.Megabyte)
+		testing.expect_value(t, err, nil)
+
+		env.thread = http.Server_Thread{s = &env.s, id = 1}
+		env.prev = http.td
+		http.td = &env.thread
+
+		env.c = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		env.c.transaction_arena.c = &env.c
+		env.c.temp_arena.c = &env.c
+
+		tx_alloc := http.transaction_allocator(&env.c)
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		env.c.scanner.buf = buf
+		env.c.scanner.write_head = copy(buf, payload)
+		env.c.scanner.allocator = &env.c.transaction_arena
+
+		http._serve_connection(&env.c)
+	}
+
+	cleanup_env :: proc(env: ^Test_Env) {
+		http.temp_allocator_destroy(&env.c)
+		http.transaction_allocator_destroy(&env.c)
+		http._server_thread_free_arenas_destroy(&env.thread)
+		http.td = env.prev
+		virtual.arena_destroy(&env.s.temp_allocator_backing)
+	}
+
+	// 1. Unconsumed Content-Length body requires closing, writes Connection: close, and schedules no body scan.
+	{
+		state := Test_State{t = t, mode = .Unconsumed}
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /unconsumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, state.req_count, 1)
+		testing.expect(t, state.must_close_1, "expected unconsumed Content-Length body to require closing")
+		testing.expect(t, state.res1_had_close, "expected Connection: close header for unconsumed Content-Length")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no body scan scheduled")
+	}
+
+	// 2. Unconsumed Transfer-Encoding: chunked body requires closing, writes Connection: close, and schedules no body scan.
+	{
+		state := Test_State{t = t, mode = .Unconsumed}
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /unconsumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, state.req_count, 1)
+		testing.expect(t, state.must_close_1, "expected unconsumed chunked body to require closing")
+		testing.expect(t, state.res1_had_close, "expected Connection: close header for unconsumed chunked body")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no body scan scheduled")
+	}
+
+	// 3. Fully consumed Content-Length body stays keep-alive and serves the pipelined next request.
+	{
+		state := Test_State{t = t, mode = .Consumed_Keepalive}
+		defer delete(state.second_target)
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /consumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello" +
+			"GET /after-consumed-cl HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect(t, state.body_finished, "expected consumed Content-Length body to finish")
+		testing.expect(t, !state.must_close_1, "expected consumed Content-Length body not to force Connection: close")
+		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
+		testing.expect_value(t, state.req_count, 2)
+		testing.expect_value(t, state.second_target, "/after-consumed-cl")
+	}
+
+	// 4. Fully consumed Transfer-Encoding: chunked body stays keep-alive and serves the pipelined next request.
+	{
+		state := Test_State{t = t, mode = .Consumed_Keepalive}
+		defer delete(state.second_target)
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /consumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
+			"5\r\nhello\r\n0\r\n\r\n" +
+			"GET /after-consumed-chunked HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect(t, state.body_finished, "expected consumed chunked body to finish")
+		testing.expect(t, !state.must_close_1, "expected consumed chunked body not to force Connection: close")
+		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
+		testing.expect_value(t, state.req_count, 2)
+		testing.expect_value(t, state.second_target, "/after-consumed-chunked")
+	}
+
+	// 5. Partial Body_Cb calling respond() on chunked and Content-Length bodies writes Connection: close and stops scanning.
+	{
+		state := Test_State{t = t, mode = .Partial_Cb_Respond}
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /partial-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
+			"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n" +
+			"GET /should-not-run HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, state.body_cb_calls, 1)
+		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
+		testing.expect_value(t, state.req_count, 1)
+		testing.expect(t, state.must_close_1, "expected partial chunked respond to require closing")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial chunked respond")
+		testing.expect(t, strings.contains(string(env.c.res.buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+	}
+
+	{
+		state := Test_State{t = t, mode = .Partial_Cb_Respond}
+		env: Test_Env
+		run_payload(t, &state, &test_handler,
+			"POST /partial-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, state.body_cb_calls, 1)
+		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
+		testing.expect_value(t, state.req_count, 1)
+		testing.expect(t, state.must_close_1, "expected partial Content-Length respond to require closing")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial Content-Length respond")
+		testing.expect(t, strings.contains(string(env.c.res.buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+	}
+}

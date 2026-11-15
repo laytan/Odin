@@ -40,11 +40,14 @@ Scanner :: struct {
 MULTIPLIER :: 512
 
 scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
+	is_pumping := s.is_pumping
 	to_copy := s.buf[s.read_head:s.write_head]
 	if len(to_copy) == 0 {
 		transaction_allocator_destroy(c)
-		s^  = {}
-		s.c = c
+		s^ = {
+			c          = c,
+			is_pumping = is_pumping,
+		}
 		return
 	}
 
@@ -66,6 +69,7 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 		read_head  = 0,
 		write_head = n,
 		allocator  = &c.transaction_arena,
+		is_pumping = is_pumping,
 	}
 }
 
@@ -323,22 +327,22 @@ scanner_pump :: proc(s: ^Scanner) {
 	}
 }
 
-// TODO: allow use of temp arena (advanced use can use it for streaming, each part can be freed right away)
-// TODO: handle the body cb (when given .Partial) closing the connection, don't keep going then
-
 Body_Cb :: proc(req: ^Request, body: []byte, is_partial: bool)
 
 Body_Request :: struct {
-	cb: Body_Cb,
+	cb:        Body_Cb,
 	curr_size: int,
 }
 
 body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
-	assert(context_get(context_of_request(req), Body_Request) == nil, "body already consumed", loc)
-	context_add(context_of_request(req), Body_Request{
-		cb,
-		0,
-	})
+	c := connection_of_request(req)
+	assert(context_get(&c.ctx, Body_Request) == nil, "body already consumed", loc)
+	context_add(&c.ctx, Body_Request{cb = cb})
+
+	if req.has_consumed_body {
+		_body_cb(req, nil, is_partial=false)
+		return
+	}
 
 	enc_header, ok := get_header(req, "Transfer-Encoding")
 	if ok && _headers_eq(enc_header, "chunked") {
@@ -349,7 +353,11 @@ body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
 }
 
 _body_cb :: proc(req: ^Request, body: []byte, is_partial: bool) {
-	body_req := context_get(context_of_request(req), Body_Request)
+	if !is_partial {
+		req.has_consumed_body = true
+	}
+	c := connection_of_request(req)
+	body_req := context_get(&c.ctx, Body_Request)
 	assert(body_req != nil)
 	body_req.cb(req, body, is_partial)
 }
@@ -402,23 +410,29 @@ _body_chunked :: proc(req: ^Request) {
 			return
 		}
 
+		if c.req.progress.max >= 0 && size > c.req.progress.max {
+			invalid_request(c, .Payload_Too_Large)
+			return
+		}
+
 		if size == 0 {
 			scan_line(&c.scanner, on_trailer)
 			return
 		}
 
 		body_req := context_get(&c.ctx, Body_Request)
-		assert(body_req != nil)
 		body_req.curr_size = size
 		scan_at_most(&c.scanner, size, on_body)
 	}
 
 	on_body :: proc(c: ^Connection, data: []byte) {
 		body_req := context_get(&c.ctx, Body_Request)
-		assert(body_req != nil)
 		body_req.curr_size -= len(data)
 
 		_body_cb(&c.req, data, is_partial=true)
+		if c.res.state == .Sent || c.res.state == .Error || c.scanner.scan.callback != nil {
+			return
+		}
 
 		if body_req.curr_size > 0 {
 			scan_at_most(&c.scanner, body_req.curr_size, on_body)
@@ -485,7 +499,7 @@ _body_length :: proc(req: ^Request) {
 	}
 
 	if !has_clen || clen == 0 {
-		_body_cb(req, nil, is_partial=false)
+		_body_cb(&c.req, nil, is_partial=false)
 		return
 	}
 
@@ -495,16 +509,17 @@ _body_length :: proc(req: ^Request) {
 	}
 
 	body_req := context_get(&c.ctx, Body_Request)
-	assert(body_req != nil)
 	body_req.curr_size = clen
 	scan_at_most(&c.scanner, clen, on_body)
 
 	on_body :: proc(c: ^Connection, data: []byte) {
 		body_req := context_get(&c.ctx, Body_Request)
-		assert(body_req != nil)
 		body_req.curr_size -= len(data)
 		if body_req.curr_size > 0 {
 			_body_cb(&c.req, data, is_partial=true)
+			if c.res.state == .Sent || c.res.state == .Error || c.scanner.scan.callback != nil {
+				return
+			}
 			scan_at_most(&c.scanner, body_req.curr_size, on_body)
 			return
 		}

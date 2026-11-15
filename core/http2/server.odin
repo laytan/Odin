@@ -219,6 +219,7 @@ Request :: struct {
 	progress:           Progression,
 	line:               Requestline,
 	is_redirected_head: bool,
+	has_consumed_body:  bool,
 	headers:            Headers,
 }
 
@@ -408,6 +409,8 @@ CONN_CLOSE_DELAY :: time.Millisecond * 500
 // Ultimately destroying the connection.
 connection_close :: proc(c: ^Connection) {
 	log.debugf("http[t=%v][c=%v]: msg=\"shutdown\"", td.id, c.socket)
+	c.res.state    = .Error
+	c.scanner.scan = {}
 	nbio.remove(c.curr_recv)
 	c.curr_recv = nil
 	nbio.shutdown(c.socket, .Send)
@@ -457,6 +460,12 @@ connection_destroy :: proc(c: ^Connection) {
 
 invalid_request :: proc(c: ^Connection, status: Status) {
 	log.warnf("http[t=%v][c=%v]: status=%v, msg=\"invalid request\"", td.id, c.socket, status)
+	c.scanner.scan = {}
+	if c.res.state != .None && c.res.state != .Handling {
+		c.res.state = .Error
+		_check_send_done(c)
+		return
+	}
 	c.res.status = status
 	headers_set(&c.res.headers, "connection", "close")
 	respond(&c.res)
@@ -633,6 +642,7 @@ validate_headers :: proc(c: ^Connection) -> bool {
 
 	// RFC 9112 6.3: Reject requests containing both Transfer-Encoding and Content-Length,
 	// multiple Content-Length headers, or an invalid Content-Length value.
+	clen := 0
 	{
 		content_length_n := 0
 		iter := headers_get_all_iterator(&c.req.headers, "content-length")
@@ -648,10 +658,12 @@ validate_headers :: proc(c: ^Connection) -> bool {
 				return false
 			}
 
-			if _, ok := parse_int(cl_val); !ok {
+			parsed_cl, ok := parse_int(cl_val)
+			if !ok {
 				log.warnf("http[t=%v][c=%v]: msg=\"invalid Content-Length header\", value=%q", td.id, c.socket, cl_val)
 				return false
 			}
+			clen = parsed_cl
 		}
 	}
 
@@ -675,6 +687,7 @@ validate_headers :: proc(c: ^Connection) -> bool {
 		}
 	}
 
+	c.req.has_consumed_body = te_n == 0 && clen == 0
 	return true
 }
 
@@ -826,7 +839,7 @@ write_response_heading :: proc(res: ^Response) {
 		}
 	}
 
-	if response_must_close(c) && !headers_has(c.req.headers, "connection") {
+	if response_must_close(c) && !headers_has(res.headers, "connection") {
 		append(&res.buf, "Connection: close\r\n")
 	}
 
@@ -916,8 +929,6 @@ _check_send_done :: proc(c: ^Connection) {
 		return
 	}
 
-	// TODO: if consume body still going, wait for that
-
 	if c.res.state == .Error || response_must_close(c) || response_has_close(&c.res) {
 		connection_close(c)
 		return
@@ -934,26 +945,32 @@ _check_send_done :: proc(c: ^Connection) {
 	clear(&c.res.deferred)
 
 	_serve_connection(c)
+}
 
-	response_has_close :: proc(res: ^Response) -> bool {
-		if connection, _ := headers_get(res.headers, "connection"); connection == "close" {
-			return true
-		}
-
-		return false
+response_has_close :: proc(res: ^Response) -> bool {
+	if connection, ok := headers_get(res.headers, "connection"); ok && _headers_eq(connection, "close") {
+		return true
 	}
+
+	return false
 }
 
 // Determines if the connection needs to be closed after sending the response.
 response_must_close :: proc(c: ^Connection) -> bool {
 	// If the request we are responding to indicates it is closing the connection, close our side too.
-	if connection, _:= headers_get(c.req.headers, "connection"); connection == "close" {
+	if connection, ok := headers_get(c.req.headers, "connection"); ok && _headers_eq(connection, "close") {
 		return true
 	}
 
 	// HTTP 1.0 does not have persistent connections.
 	line := c.req.line
 	if line.version == {1, 0} {
+		return true
+	}
+
+	// If the request had a body that was not fully consumed, close the connection
+	// so leftover body bytes on the wire are not misparsed as the next request.
+	if !c.req.has_consumed_body {
 		return true
 	}
 
