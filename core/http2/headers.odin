@@ -365,8 +365,9 @@ _headers_hash_key :: proc(header: string) -> (res: u64) #no_bounds_check {
 	v1 := u64(0x646f72616e646f6d)
 	v2 := u64(0x6c7967656e657261)
 	v3 := u64(0x7465646279746573)
-	k0 := U8TO64_LE(SECRET[:])
-	k1 := U8TO64_LE(SECRET[8:])
+	k0 := U8TO64_LE(HEADERS_HASH_SECRET[:])
+	k1 := U8TO64_LE(HEADERS_HASH_SECRET[8:])
+	assert(k0 != 0 || k1 != 0, "headers_init_hash_secret() has not been called")
 
 	v3 ~= k1
 	v2 ~= k0
@@ -486,12 +487,14 @@ _headers_eq :: proc(a, b: string) -> bool #no_bounds_check {
 }
 
 @(private="file")
-SECRET: [16]byte
+HEADERS_HASH_SECRET: [16]byte
 
-// TODO: no init
-@(private="file", init)
-init_secret :: proc "contextless" () {
-	runtime.rand_bytes(SECRET[:])
+// Initializes the random SipHash key used for hashing header keys; called during server setup.
+// Safe to call multiple times: no-op if already initialized.
+headers_init_hash_secret :: proc "contextless" () {
+	if HEADERS_HASH_SECRET == {} {
+		runtime.rand_bytes(HEADERS_HASH_SECRET[:])
+	}
 }
 
 @(private="file")
@@ -506,12 +509,25 @@ ASCII_LOWER_U8 :: #force_inline proc "contextless" (x: u8) -> u8 {
 }
 
 @(private="file")
-TOKEN_SET: strings.Ascii_Set
-
-// TODO: no init
-@(init, private)
-init_token_set :: proc "contextless" () {
-	ok: bool
-	TOKEN_SET, ok = strings.ascii_set_make("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-	assert_contextless(ok)
+TOKEN_SET :: strings.Ascii_Set{
+	0,
+	(1 << ('!' - 32)) |
+	(1 << ('#' - 32)) |
+	(1 << ('$' - 32)) |
+	(1 << ('%' - 32)) |
+	(1 << ('&' - 32)) |
+	(1 << ('\'' - 32)) |
+	(1 << ('*' - 32)) |
+	(1 << ('+' - 32)) |
+	(1 << ('-' - 32)) |
+	(1 << ('.' - 32)) |
+	(0x3ff << ('0' - 32)), // '0'..'9'
+	(0x3ff_ffff << ('A' - 64)) | // 'A'..'Z'
+	(1 << ('^' - 64)) |
+	(1 << ('_' - 64)),
+	(1 << ('`' - 96)) |
+	(0x3ff_ffff << ('a' - 96)) | // 'a'..'z'
+	(1 << ('|' - 96)) |
+	(1 << ('~' - 96)),
+	0, 0, 0, 0,
 }

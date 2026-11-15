@@ -663,6 +663,8 @@ _setup :: proc(s: ^Server) -> Server_Error {
 		return .Allocation_Failed
 	}
 
+	headers_init_hash_secret()
+
 	if err := _setup_threads(s); err != nil {
 		virtual.arena_destroy(&s.temp_allocator_backing)
 		return .Allocation_Failed

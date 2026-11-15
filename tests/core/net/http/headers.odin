@@ -1,9 +1,15 @@
 package test_core_net_http
 
 import "core:fmt"
+import "core:strings"
 import "core:testing"
 
 import http "core:http2"
+
+@(init)
+init_test_hash_secret :: proc "contextless" () {
+	http.headers_init_hash_secret()
+}
 
 @(test)
 test_header_value_iterator :: proc(t: ^testing.T) {
@@ -118,4 +124,29 @@ test_headers_delete_removes_all_multi_value_entries :: proc(t: ^testing.T) {
 	keep, keep_ok := http.headers_get(h, "x-keep")
 	testing.expect(t, keep_ok, "unrelated header should remain")
 	testing.expect_value(t, keep, "keep-val")
+}
+
+@(test)
+test_headers_valid_key :: proc(t: ^testing.T) {
+	expected, ok := strings.ascii_set_make("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+	testing.expect(t, ok, "expected ASCII token set construction to succeed")
+
+	testing.expect(t, !http.headers_valid_key(""), "expected empty header key to be invalid")
+
+	for c in 0..=255 {
+		b := [1]byte{u8(c)}
+		s := string(b[:])
+		testing.expectf(
+			t,
+			http.headers_valid_key(s) == strings.ascii_set_contains(expected, u8(c)),
+			"mismatch for byte 0x%02x",
+			c,
+		)
+	}
+
+	testing.expect(t, http.headers_valid_key("Content-Type"))
+	testing.expect(t, http.headers_valid_key("X-Custom_Header.1"))
+	testing.expect(t, !http.headers_valid_key("Bad Header"))
+	testing.expect(t, !http.headers_valid_key("Bad:Header"))
+	testing.expect(t, !http.headers_valid_key("Bad\r\nHeader"))
 }
