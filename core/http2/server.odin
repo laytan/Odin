@@ -458,6 +458,7 @@ _serve_connection :: proc(c: ^Connection) {
 			case .Method_Not_Implemented: invalid_request(c, .Method_Not_Allowed)
 			case:                         invalid_request(c, .Bad_Request)
 			}
+			return
 		}
 
 		if line.version.major != 1 || line.version.minor > 1 {
