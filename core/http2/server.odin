@@ -6,7 +6,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "base:sanitizer"
 
-import "core:bytes"
 import "core:container/xar"
 import "core:io"
 import "core:log"
@@ -43,6 +42,11 @@ Server_Options :: struct {
 	handler:      Handler,
 	no_auto_expect_continue: bool,
 	no_redirect_head_to_get: bool,
+	thread_initializer: proc(),
+
+	request_quota:  Quota,
+	body_quota:     Quota,
+	response_quota: Quota,
 }
 
 DEFAULT_BACKLOG  :: 1000
@@ -197,14 +201,16 @@ context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 }
 
 Request :: struct {
-	line:    Requestline,
+	progress:           Progression,
+	line:               Requestline,
 	is_redirected_head: bool,
-	headers: Headers,
+	headers:            Headers,
 }
 
 Response :: struct {
-	status:  Status,
-	headers: Headers,
+	progress: Progression,
+	status:   Status,
+	headers:  Headers,
 
 	// TODO: prive
 	buf: [dynamic]byte,
@@ -212,10 +218,12 @@ Response :: struct {
 	deferred: [dynamic]proc(ctx: ^Ctx),
 
 	// TODO: prive
+	last_send: time.Time,
 	sends: int,
 	sent:  int,
 	// TODO: prive
 	state: enum {
+		None,
 		Handling,
 		Sending,  // send or send_file is called at least once (and heading is sent).
 		Sent,     // respond was called.
@@ -274,6 +282,10 @@ _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 
 _server_thread_serve :: proc(thread: ^Server_Thread) {
 	thread.event_loop = nbio.current_thread_event_loop()
+
+	if thread.s.opts.thread_initializer != nil {
+		thread.s.opts.thread_initializer()
+	}
 
 	sync.one_shot_event_wait(&thread.s.serve)
 
@@ -365,19 +377,17 @@ connection_close :: proc(c: ^Connection) {
 	nbio.shutdown(c.socket, .Send)
 
 	@(static) junk: [1024]byte
-	c.headers_quota.max = CONN_CLOSE_DELAY
-	c.scanner.last_recv_start = nbio.now()
-	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
+	c.req.progress.timeout = CONN_CLOSE_DELAY
+	c.scanner.last_recv_start = now()
+	nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
-		c.curr_recv = nil
-		now := nbio.now()
-		c.headers_quota.max -= time.diff(c.scanner.last_recv_start, now)
-		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.headers_quota.max)
+		c.req.progress.timeout -= since(c.scanner.last_recv_start)
+		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.req.progress.timeout)
 		if op.recv.err == nil && op.recv.received > 0 {
-			if c.headers_quota.max > 0 {
-				c.scanner.last_recv_start = now
-				c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.headers_quota.max)
+			if c.req.progress.timeout > 0 {
+				c.scanner.last_recv_start = now()
+				nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
 				return
 			}
 		}
@@ -422,14 +432,13 @@ _serve_connection :: proc(c: ^Connection) {
 	c.temp_arena = get_arena(c)
 	c.transaction_arena = get_arena(c)
 
-	c.headers_quota = DEFAULT_HEADERS_QUOTA
-	c.body_quota    = DEFAULT_BODY_QUOTA
-	progression_reset(&c.headers_progression, c.headers_quota)
-	progression_reset(&c.body_progression, c.body_quota)
-
 	allocator := transaction_allocator(c)
 
 	// c.buf.allocator          = allocator
+
+	progression_init(&c.req.progress, td.s.opts.request_quota)
+	progression_init(&c.res.progress, td.s.opts.response_quota)
+
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
 	c.vars.allocator         = allocator
@@ -438,11 +447,11 @@ _serve_connection :: proc(c: ^Connection) {
 
 	scanner_reset(&c.scanner, c)
 
-	scan_header_line(&c.scanner, on_rline1)
+	scan_line(&c.scanner, on_rline1)
 
 	on_rline1 :: proc(c: ^Connection, line: []byte) {
 		if len(line) == 0 {
-			scan_header_line(&c.scanner, on_rline)
+			scan_line(&c.scanner, on_rline)
 			return
 		}
 
@@ -470,7 +479,7 @@ _serve_connection :: proc(c: ^Connection) {
 		log.debugf("http[t=%v][c=%v]: method=%v, target=%q, version=%v.%v", td.id, c.socket, line.method, line.target, line.version.major, line.version.minor)
 		c.req.line = line
 
-		scan_header_line(&c.scanner, on_header)
+		scan_line(&c.scanner, on_header)
 	}
 
 	on_header :: proc(c: ^Connection, line: []byte) {
@@ -493,7 +502,7 @@ _serve_connection :: proc(c: ^Connection) {
 			return
 		}
 
-		scan_header_line(&c.scanner, on_header)
+		scan_line(&c.scanner, on_header)
 	}
 
 	on_headers :: proc(c: ^Connection) {
@@ -504,6 +513,8 @@ _serve_connection :: proc(c: ^Connection) {
 			return
 		}
 
+		c.res.state = .Handling
+		progression_reset(&c.req.progress, td.s.opts.body_quota)
 		_headers_set_readonly(&c.req.headers)
 
 		// // Automatically respond with a continue status when the client has the Expect: 100-continue header.
@@ -535,64 +546,64 @@ _serve_connection :: proc(c: ^Connection) {
 			td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
 		}
 	}
+}
 
-	validate_headers :: proc(c: ^Connection) -> bool {
-		// RFC 7230 3.3.3: If a Transfer-Encoding header field
-		// is present in a request and the chunked transfer coding is not
-		// the final encoding, the message body length cannot be determined
-		// reliably; the server MUST respond with the 400 (Bad Request)
-		// status code and then close the connection.
-		if enc_header, ok := headers_get(c.req.headers, "transfer-encoding"); ok {
-			if !strings.has_suffix(enc_header, "chunked") {
-				log.warnf("http[t=%v][c=%v]: msg=\"Transfer-Encoding does not end with chunked\"", td.id, c.socket)
-				return false
-			}
-
-			// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
-			// Content-Length header field, the Transfer-Encoding overrides the
-			// Content-Length.  Such a message might indicate an attempt to
-			// perform request smuggling (Section 9.5) or response splitting
-			// (Section 9.4) and ought to be handled as an error.
-			headers_delete(c.req.headers, "content-length")
-		} else {
-			// RFC 7230 3.3.3: If a message is received without Transfer-Encoding and with
-			// either multiple Content-Length header fields having differing
-			// field-values or a single Content-Length header field having an
-			// invalid value, then the message framing is invalid and the
-			// recipient MUST treat it as an unrecoverable error.
-			content_length_n := 0
-			iter := headers_get_all_iterator(&c.req.headers, "content-length")
-			for _ in headers_get_all_iter(&iter) {
-				content_length_n += 1
-				if content_length_n > 1 {
-					log.warnf("http[t=%v][c=%v]: msg=\"expected at most one Content-Length header\"", td.id, c.socket)
-					return false
-				}
-			}
+validate_headers :: proc(c: ^Connection) -> bool {
+	// RFC 7230 3.3.3: If a Transfer-Encoding header field
+	// is present in a request and the chunked transfer coding is not
+	// the final encoding, the message body length cannot be determined
+	// reliably; the server MUST respond with the 400 (Bad Request)
+	// status code and then close the connection.
+	if enc_header, ok := headers_get(c.req.headers, "transfer-encoding"); ok {
+		if !strings.has_suffix(enc_header, "chunked") {
+			log.warnf("http[t=%v][c=%v]: msg=\"Transfer-Encoding does not end with chunked\"", td.id, c.socket)
+			return false
 		}
 
-		// RFC 7230 5.4: Server MUST respond with 400 to any request
-		// with multiple "Host" header fields.
-		{
-			host_n := 0
-			iter := headers_get_all_iterator(&c.req.headers, "host")
-			for _ in headers_get_all_iter(&iter) {
-				host_n += 1
-				if host_n > 1 {
-					break
-				}
-			}
-
-			// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
-			// HTTP/1.1 request message that lacks a Host header field.
-			if host_n != 1 {
-				log.warnf("http[t=%v][c=%v]: msg=\"expected exactly one Host header\"", td.id, c.socket)
+		// RFC 7230 3.3.3: If a message is received with both a Transfer-Encoding and a
+		// Content-Length header field, the Transfer-Encoding overrides the
+		// Content-Length.  Such a message might indicate an attempt to
+		// perform request smuggling (Section 9.5) or response splitting
+		// (Section 9.4) and ought to be handled as an error.
+		headers_delete(c.req.headers, "content-length")
+	} else {
+		// RFC 7230 3.3.3: If a message is received without Transfer-Encoding and with
+		// either multiple Content-Length header fields having differing
+		// field-values or a single Content-Length header field having an
+		// invalid value, then the message framing is invalid and the
+		// recipient MUST treat it as an unrecoverable error.
+		content_length_n := 0
+		iter := headers_get_all_iterator(&c.req.headers, "content-length")
+		for _ in headers_get_all_iter(&iter) {
+			content_length_n += 1
+			if content_length_n > 1 {
+				log.warnf("http[t=%v][c=%v]: msg=\"expected at most one Content-Length header\"", td.id, c.socket)
 				return false
 			}
 		}
-
-		return true
 	}
+
+	// RFC 7230 5.4: Server MUST respond with 400 to any request
+	// with multiple "Host" header fields.
+	{
+		host_n := 0
+		iter := headers_get_all_iterator(&c.req.headers, "host")
+		for _ in headers_get_all_iter(&iter) {
+			host_n += 1
+			if host_n > 1 {
+				break
+			}
+		}
+
+		// RFC 7230 5.4: A server MUST respond with a 400 (Bad Request) status code to any
+		// HTTP/1.1 request message that lacks a Host header field.
+		if host_n != 1 {
+			log.warnf("http[t=%v][c=%v]: msg=\"expected exactly one Host header\"", td.id, c.socket)
+			return false
+		}
+	}
+
+	return true
 }
 
 _serve :: proc(s: ^Server) {
@@ -796,6 +807,8 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 		unimplemented("on_send type")
 	}
 
+	progression_update(&c.res.progress, td.s.opts.response_quota, sent, since(c.res.last_send))
+
 	if err != nil {
 		log.warnf("http[t=%v][c=%v]: msg=\"send error\", err=%v", td.id, c.socket, err)
 
@@ -811,6 +824,10 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 
 	if on_sent != nil { on_sent(c, err) }
 
+	_check_send_done(c)
+}
+
+_check_send_done :: proc(c: ^Connection) {
 	assert(c.res.sends >= 0)
 	if (c.res.state != .Sent && c.res.state != .Error) || c.res.sends > 0 {
 		return
@@ -825,7 +842,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 
 	// TODO: informational/take over connection
 
-	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, sent, c.socket)
+	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
 
 	#reverse for deferred in c.res.deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
@@ -864,351 +881,6 @@ response_must_close :: proc(c: ^Connection) -> bool {
 date_update :: proc(_: ^nbio.Operation) {
 	nbio.timeout(time.Second, date_update)
 	date_write(td.date[:], nbio.now())
-}
-
-Scan_Splitter :: struct {
-	procedure: proc(user_data: rawptr, data: []byte) -> (int, int, int, bool),
-	user_data: rawptr,
-}
-
-Scan_Cb :: proc(c: ^Connection, data: []byte)
-
-Scan :: struct #all_or_none {
-	split:          Scan_Splitter,
-	allocator:      ^Arena,
-	timeout:        time.Duration,
-	quota:          ^Quota,
-	progression:    ^Progression,
-	limit_status:   Status,
-	callback:       Scan_Cb,
-}
-
-Scanner :: struct {
-	// container_off?
-	c:          ^Connection,
-
-	buf:        []byte,
-	read_head:  int,
-	write_head: int,
-	allocator:  ^Arena,
-
-	scan:       Scan,
-
-	is_pumping: bool,
-
-	last_recv_start: time.Time,
-	last_recv_dur:   time.Duration,
-	last_recv_n:     int,
-}
-
-MULTIPLIER :: 512
-
-scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
-	s^  = {}
-	s.c = c
-}
-
-_scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
-	if a != s.allocator {
-		return false
-	}
-
-	to_copy := s.buf[s.read_head:s.write_head]
-	to_alloc := max(MULTIPLIER, len(to_copy))
-	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", td.id, s.c.socket, len(to_copy), to_alloc)
-
-	if len(to_copy) == 0 {
-		s.buf = {}
-		s.read_head, s.write_head = 0, 0
-		return false
-	}
-
-	new_arena := _server_thread_get_free_arena(to_alloc)
-	err: runtime.Allocator_Error
-	s.buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
-	assert(err == nil)
-	s.read_head  = 0
-	s.write_head = copy(s.buf, to_copy)
-
-	arena_free_all(a)
-	a.tail = new_arena
-	return true
-}
-
-_scan_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, allocator: ^Arena, cb: Scan_Cb) {
-	_scan_bytes_with_quota(s, n, timeout, allocator, nil, nil, .Internal_Server_Error, cb)
-}
-
-_scan_bytes_with_quota :: proc(
-	s: ^Scanner,
-	n: int,
-	timeout: time.Duration,
-	allocator: ^Arena,
-	quota: ^Quota,
-	progression: ^Progression,
-	limit_status: Status,
-	cb: Scan_Cb,
-) {
-	s.scan = {
-		split        = split_n(n),
-		allocator    = allocator,
-		timeout      = timeout,
-		quota        = quota,
-		progression  = progression,
-		limit_status = limit_status,
-		callback     = cb,
-	}
-	scanner_pump(s)
-}
-
-scan_bytes :: proc(s: ^Scanner, n: int, cb: Scan_Cb) {
-	_scan_bytes_with_quota(
-		s,
-		n,
-		nbio.NO_TIMEOUT,
-		&s.c.transaction_arena,
-		&s.c.body_quota,
-		&s.c.body_progression,
-		.Payload_Too_Large,
-		cb,
-	)
-}
-
-scan_temp_bytes :: proc(s: ^Scanner, n: int, timeout: time.Duration, cb: Scan_Cb) {
-	_scan_bytes_with_quota(
-		s,
-		n,
-		timeout,
-		&s.c.temp_arena,
-		&s.c.body_quota,
-		&s.c.body_progression,
-		.Payload_Too_Large,
-		cb,
-	)
-}
-
-_scan_line :: proc(
-	s: ^Scanner,
-	timeout: time.Duration,
-	allocator: ^Arena,
-	quota: ^Quota,
-	progression: ^Progression,
-	limit_status: Status,
-	cb: Scan_Cb,
-) {
-	s.scan = {
-		split        = split_line(),
-		allocator    = allocator,
-		timeout      = timeout,
-		quota        = quota,
-		progression  = progression,
-		limit_status = limit_status,
-		callback     = cb,
-	}
-	scanner_pump(s)
-}
-
-scan_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, nbio.NO_TIMEOUT, &s.c.transaction_arena, &s.c.headers_quota, &s.c.headers_progression, .Request_Header_Fields_Too_Large, cb)
-}
-
-scan_temp_header_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, nbio.NO_TIMEOUT, &s.c.temp_arena, &s.c.headers_quota, &s.c.headers_progression, .Request_Header_Fields_Too_Large, cb)
-}
-
-scan_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, nbio.NO_TIMEOUT, &s.c.transaction_arena, &s.c.body_quota, &s.c.body_progression, .Payload_Too_Large, cb)
-}
-
-scan_temp_body_line :: proc(s: ^Scanner, cb: Scan_Cb) {
-	_scan_line(s, nbio.NO_TIMEOUT, &s.c.temp_arena, &s.c.body_quota, &s.c.body_progression, .Payload_Too_Large, cb)
-}
-
-split_n :: proc(n: int) -> Scan_Splitter {
-	return {
-		procedure = proc(needed: rawptr, data: []byte) -> (offset, n, advance: int, ok: bool) {
-			needed := int(uintptr(needed))
-			if len(data) < needed {
-				return
-			}
-
-			return 0, needed, needed, true
-		},
-		user_data = rawptr(uintptr(n)),
-	}
-}
-
-split_line :: proc() -> Scan_Splitter {
-	return {
-		procedure = proc(_: rawptr, data: []byte) -> (offset, n, advance: int, ok: bool) {
-			start := 0
-			for {
-				index := bytes.index_byte(data[start:], '\r')
-				if index < 0 {
-					return
-				}
-				index += start
-
-				if len(data) > index+1 && data[index+1] == '\n' {
-					return 0, index, index+2, true
-				}
-
-				start = index+1
-			}
-		},
-	}
-}
-
-scanner_pump :: proc(s: ^Scanner) {
-	if s.is_pumping { return }
-
-	s.is_pumping = true
-	defer s.is_pumping = false
-
-	for s.scan.callback != nil {
-		offset, n, advance, ok := s.scan.split.procedure(s.scan.split.user_data, s.buf[s.read_head:s.write_head])
-		if ok {
-			assert(advance >= n && n >= offset)
-
-			data: []byte
-			// PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
-			if s.scan.allocator != s.allocator {
-				to_copy := s.buf[s.read_head+offset:s.write_head]
-
-				s.allocator = s.scan.allocator
-				err: runtime.Allocator_Error
-				s.buf, err = make([]byte, max(len(to_copy), MULTIPLIER), arena_allocator(s.allocator))
-				assert(err == nil) // TODO: 
-				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
-
-				s.read_head  = advance-offset
-				s.write_head = copy(s.buf, to_copy)
-				assert(s.write_head == len(to_copy))
-
-				data = s.buf[:n]
-			} else {
-				data = s.buf[s.read_head+offset:][:n]
-				s.read_head += advance
-			}
-
-			cb := s.scan.callback
-			s.scan = {}
-			cb(s.c, data)
-		} else {
-			if s.scan.progression != nil {
-				if s.scan.progression.max == 0 {
-					limit_status := s.scan.limit_status
-					s.scan = {}
-					invalid_request(s.c, limit_status)
-					return
-				}
-
-				if s.scan.progression.timeout == 0 {
-					s.scan = {}
-					invalid_request(s.c, .Request_Timeout)
-					return
-				}
-			}
-
-			capacity := len(s.buf)-s.write_head
-			if capacity < MULTIPLIER || s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
-				prev_buf := s.buf
-				buf_left := s.buf[s.read_head:s.write_head]
-				new_size := max(MULTIPLIER, len(prev_buf) * 2)
-				if s.scan.progression != nil && s.scan.progression.max >= 0 {
-					new_size = min(new_size, len(buf_left)+s.scan.progression.max)
-				}
-
-				s.allocator = s.scan.allocator
-
-				err: mem.Allocator_Error
-				s.buf, err = _arena_block_resize_in_place(s.allocator.tail, s.buf, new_size, 1, false)
-				if err == nil {
-					log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
-				} else {
-					s.buf, err = make([]byte, new_size, arena_allocator(s.allocator))
-					assert(err == nil) // TODO: err
-					log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
-
-					s.read_head  = 0
-					s.write_head = copy(s.buf[:], buf_left)
-					assert(s.write_head == len(buf_left))
-				}
-			}
-
-			recv_buf := s.buf[s.write_head:]
-			if s.scan.progression != nil {
-				recv_buf = recv_buf[:progression_max_transfer(s.scan.progression^, len(recv_buf))]
-			}
-
-			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(recv_buf), scanner_timeout(s.scan))
-			s.last_recv_start = nbio.now()
-			s.c.curr_recv = nbio.recv_poly(
-				s.c.socket,
-				{recv_buf},
-				s,
-				scanner_on_recv,
-				timeout=scanner_timeout(s.scan),
-			)
-			return
-		}
-	}
-
-	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
-		s.c.curr_recv = nil
-		if op.recv.err != nil {
-			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, s.c.socket, op.recv.err)
-			switch op.recv.err.(nbio.TCP_Recv_Error) {
-			case .Timeout:
-				invalid_request(s.c, .Request_Timeout)
-			case .Not_Connected, .Connection_Closed:
-				connection_destroy(s.c)
-			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
-				fallthrough
-			case:
-				invalid_request(s.c, .Internal_Server_Error)
-			}
-			return
-		}
-
-		if op.recv.received == 0 {
-			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, s.c.socket)
-			connection_destroy(s.c)
-			return
-		}
-
-		s.last_recv_dur = time.diff(s.last_recv_start, nbio.now())
-		s.last_recv_n   = op.recv.received
-		if s.scan.progression != nil {
-			dur := s.last_recv_dur
-			if dur < 0 {
-				dur = 0
-			}
-			progression_update(s.scan.progression, s.scan.quota^, s.last_recv_n, dur)
-		}
-
-		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, s.last_recv_n, len(op.recv.bufs[0]), s.last_recv_dur)
-		s.write_head += op.recv.received
-
-		scanner_pump(s)
-	}
-}
-
-scanner_timeout :: proc(scan: Scan) -> time.Duration {
-	timeout := scan.timeout
-	if scan.progression == nil {
-		return timeout
-	}
-
-	quota_timeout := progression_next_timeout(scan.progression^)
-	if timeout < 0 {
-		return quota_timeout
-	}
-	if quota_timeout < 0 {
-		return timeout
-	}
-
-	return min(timeout, quota_timeout)
 }
 
 now :: nbio.now

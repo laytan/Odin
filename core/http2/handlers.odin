@@ -4,6 +4,7 @@ package http
 
 import "base:runtime"
 
+import "core:io"
 import "core:log"
 import "core:net"
 import "core:strings"
@@ -72,7 +73,7 @@ logged :: proc(next: ^Handler) -> Handler {
 				fmt.eprintfln(
 					"[%v] %v - %v %q %v.%v -> %v %m %v",
 					string(date[:]),
-					net.address_to_string(c.remote.address, transaction_allocator(c)),
+					net.endpoint_to_string(c.remote, transaction_allocator(c)),
 					method_string(.Head if ctx.req.is_redirected_head else ctx.req.line.method),
 					ctx.req.line.target,
 					ctx.req.line.version.major,
@@ -101,3 +102,153 @@ logged :: proc(next: ^Handler) -> Handler {
 	}
 }
 
+Body_Parser_State :: struct {
+	h:     ^Handler,
+	parts: [dynamic][]byte,
+}
+
+body_parser :: proc(next: ^Handler) -> Handler {
+	return {
+		next   = next,
+		handle = proc(h: ^Handler, ctx: ^Ctx) {
+			assert(context_get(ctx, Body_Parser_State) == nil)
+			s := context_add(ctx, Body_Parser_State{
+				h = h,
+			})
+			s.parts.allocator = transaction_allocator(ctx)
+
+			body(&ctx.req, on_body)
+
+			on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
+				ctx := context_of_request(r)
+				s := context_get(ctx, Body_Parser_State)
+				fmt.println(s.h, s, len(body), is_partial)
+				assert(s != nil)
+
+				if len(body) > 0 {
+					append(&s.parts, body)
+				}
+
+				if !is_partial {
+					s.h.next.handle(s.h.next, ctx)
+				}
+			}
+		},
+	}
+}
+
+Body_Parser_Iterator :: struct {
+	state: ^Body_Parser_State,
+	i:     int,
+}
+
+body_parser_iterator :: proc(ctx: ^Ctx) -> Body_Parser_Iterator {
+	return {
+		state = context_get(ctx, Body_Parser_State),
+		i     = 0,
+	}
+}
+
+body_parser_iter :: proc(s: ^Body_Parser_Iterator) -> ([]byte, int, bool) {
+	if len(s.state.parts) <= s.i {
+		return nil, 0, false
+	}
+
+	defer s.i += 1
+	part := s.state.parts[s.i]
+	return part, s.i, true
+}
+
+Body_Parser_Stream :: struct {
+	state: ^Body_Parser_State,
+	off:   i64,
+}
+
+body_parser_stream_init :: proc(s: ^Body_Parser_Stream, ctx: ^Ctx) {
+	s.state = context_get(ctx, Body_Parser_State)
+	assert(s.state != nil)
+	s.off = 0
+}
+
+body_parser_stream :: proc(s: ^Body_Parser_Stream) -> io.Stream {
+	return {
+		data = s,
+		procedure = proc(s: rawptr, mode: io.Stream_Mode, buf: []byte, off: i64, from: io.Seek_From) -> (i64, io.Error) {
+			s := (^Body_Parser_Stream)(s)
+
+			switch mode {
+			case .Read:
+				n, err := read_at(s, buf, s.off)
+				s.off += n
+				return n, err
+
+			case .Read_At:
+				return read_at(s, buf, off)
+
+			case .Seek:
+				switch from {
+				case .Start:
+					s.off = off
+				case .Current:
+					s.off += off
+				case .End:
+					size: i64
+					for part in s.state.parts {
+						size += i64(len(part))
+					}
+					s.off = size-off
+				case:
+					return 0, .Invalid_Whence
+				}
+
+				return s.off, nil
+
+			case .Size:
+				size: i64
+				for part in s.state.parts {
+					size += i64(len(part))
+				}
+				return size, nil
+
+			case .Query:
+				return io.query_utility({.Read, .Read_At, .Seek, .Size, .Query})
+
+			case .Close, .Flush, .Write, .Write_At, .Destroy:
+				return 0, .Unsupported
+
+			case:
+				return 0, .Unsupported
+			}
+
+			read_at :: proc(s: ^Body_Parser_Stream, buf: []byte, off: i64) -> (i64, io.Error) {
+				curr: i64
+				start_idx, start_part: int
+				for part, i in s.state.parts {
+					if curr + i64(len(part)) >= off {
+						start_part = i
+						start_idx  = int(off - curr)
+						curr       = off
+						break
+					}
+
+					curr += i64(len(part))
+				}
+
+				if curr != off {
+					return 0, .Invalid_Offset
+				}
+
+				n: int
+				n += copy(buf[n:], s.state.parts[start_part][start_idx:])
+				if n < len(buf) {
+					for part in s.state.parts[start_part:] {
+						n += copy(buf[n:], part)
+						if n == len(buf) { break }
+					}
+				}
+
+				return i64(n), nil
+			}
+		},
+	}
+}

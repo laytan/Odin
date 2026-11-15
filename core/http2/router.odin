@@ -37,7 +37,8 @@ router :: proc(router: ^Router) -> Handler {
 		if match == nil {
 			match = context_add(ctx, _Route_Match{})
 
-			target, target_ok := net.percent_decode(rline.target, transaction_allocator(ctx))
+			without_query, _, _ := strings.partition(rline.target, "?")
+			target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
 			if !target_ok {
 				ctx.res.status = .Not_Found
 				respond(&ctx.res)

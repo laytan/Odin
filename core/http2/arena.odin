@@ -5,7 +5,6 @@ import "base:intrinsics"
 import "base:runtime"
 import "base:sanitizer"
 
-import "core:log"
 import "core:math"
 import "core:math/bits"
 import "core:mem"
@@ -136,11 +135,6 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 		arena := td.free_arenas[bucket]
 		if arena != nil {
 			if len(arena.data) < size {
-				{
-					context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-					log.debugf("http[t=%v]: size=%M, bucket=%v, got=%M", td.id, size, bucket, len(arena.data))
-				}
-
 				td.free_arenas[bucket] = nil
 				arena.offset = size_of(_Arena_Block)
 				arena.peak_used, arena.temp_count = 0, 0
@@ -153,11 +147,6 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 			for prev := arena.prev; prev != nil; arena, prev = prev, prev.prev {
 				if len(prev.data) < size {
 					continue
-				}
-
-				{
-					context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-					log.debugf("http[t=%v]: size=%M, bucket=%v, got=%M", td.id, size, bucket, len(prev.data))
 				}
 
 				arena.prev = prev.prev
@@ -176,11 +165,6 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 				continue
 			}
 
-			{
-				context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-				log.debugf("http[t=%v]: size=%M, bucket=%v, check=%v, got=%M", td.id, size, bucket, check, len(free_arena.data))
-			}
-
 			td.free_arenas[check] = free_arena.prev
 			free_arena.offset = size_of(_Arena_Block)
 			free_arena.peak_used, free_arena.temp_count = 0, 0
@@ -189,11 +173,6 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 			sanitizer.address_unpoison(free_arena.data[size_of(_Arena_Block):])
 			return free_arena
 		}
-	}
-
-	{
-		context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-		log.debugf("http[t=%v]: size=%M, bucket=%v", td.id, size, bucket)
 	}
 
 	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), uint(align))
@@ -212,11 +191,6 @@ _server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
 	bucket := _bucket_to_put(len(arena.data))
 	arena.prev = td.free_arenas[bucket]
 	td.free_arenas[bucket] = arena
-
-	{
-		context.temp_allocator = runtime.default_temp_allocator(&runtime.global_default_temp_allocator_data)
-		log.debugf("http[t=%v]: size=%M, bucket=%v", td.id, len(arena.data), bucket)
-	}
 }
 
 _push_arena_block :: proc(a: ^Arena, size, align: int) -> ^_Arena_Block {

@@ -3,10 +3,11 @@ package http
 
 import "base:intrinsics"
 
+import "core:io"
+import "core:net"
+import "core:strconv"
 import "core:strings"
 import "core:time"
-import "core:strconv"
-import "core:io"
 
 Version :: struct {
 	major: u8,
@@ -374,6 +375,10 @@ context_of_response :: proc(res: ^Response) -> ^Ctx {
 	return container_of(res, Ctx, "res")
 }
 
+context_of_request :: proc(req: ^Request) -> ^Ctx {
+	return container_of(req, Ctx, "req")
+}
+
 connection_of_response :: proc(res: ^Response) -> ^Connection {
 	return container_of(res, Connection, "res")
 }
@@ -458,6 +463,86 @@ request_cookies_iter :: proc(cookies: ^string) -> (key: string, value: string, o
 	return
 }
 
+Query_Entry :: struct {
+	key, value: string,
+}
+
+query_iter :: proc(query: ^string) -> (entry: Query_Entry, ok: bool) {
+	if len(query) == 0 { return }
+
+	ok = true
+
+	i := strings.index(query^, "=")
+	if i < 0 {
+		entry.key = query^
+		query^ = ""
+		return
+	}
+
+	entry.key = query[:i]
+	query^ = query[i+1:]
+
+	i = strings.index(query^, "&")
+	if i < 0 {
+		entry.value = query^
+		query^ = ""
+		return
+	}
+
+	entry.value = query[:i]
+	query^ = query[i+1:]
+	return
+}
+
+query_of_url :: proc(url: string) -> string {
+	idx := strings.index_byte(url, '?')
+	if idx <= 0 || idx == len(url) {
+		return ""
+	}
+
+	return url[idx+1:]
+}
+
+query_get :: proc(url: string, key: string) -> (val: string, ok: bool) #optional_ok {
+	q := query_of_url(url)
+	for entry in #force_inline query_iter(&q) {
+		if entry.key == key {
+			return entry.value, true
+		}
+	}
+	return
+}
+
+query_get_percent_decoded :: proc(url: string, key: string, allocator := context.temp_allocator) -> (val: string, ok: bool) {
+	str := query_get(url, key) or_return
+	return net.percent_decode(str, allocator)
+}
+
+query_get_bool :: proc(url: string, key: string) -> (result, set: bool) #optional_ok {
+	str := query_get(url, key) or_return
+	set = true
+	switch str {
+	case "", "false", "0", "no":
+	case:
+		result = true
+	}
+	return
+}
+
+query_get_int :: proc(url: string, key: string, base := 0) -> (result: int, ok: bool, set: bool) {
+	str := query_get(url, key) or_return
+	set = true
+	result, ok = strconv.parse_int(str, base)
+	return
+}
+
+query_get_uint :: proc(url: string, key: string, base := 0) -> (result: uint, ok: bool, set: bool) {
+	str := query_get(url, key) or_return
+	set = true
+	result, ok = strconv.parse_uint(str, base)
+	return
+}
+
 @(private)
 parse_int :: proc(str: string) -> (val: int, ok: bool) {
 	overflow: bool
@@ -471,6 +556,32 @@ parse_int :: proc(str: string) -> (val: int, ok: bool) {
 		case:
 			return
 		}
+	}
+
+	ok = true
+	return
+}
+
+@(private)
+parse_int16 :: proc(str: string) -> (val: int, ok: bool) {
+	overflow: bool
+	for b in transmute([]byte)str {
+		digit: int
+		switch b {
+		case '0'..='9':
+			digit = int(b-'0')
+		case 'a'..='z':
+			digit = int(b-'a'+10)
+		case 'A'..='Z':
+			digit = int(b-'A'+10)
+		case:
+			return
+		}
+
+		val, overflow = intrinsics.overflow_mul(val, 16)
+		if overflow { return }
+		val, overflow = intrinsics.overflow_add(val, digit)
+		if overflow { return }
 	}
 
 	ok = true

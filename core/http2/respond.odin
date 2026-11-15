@@ -18,6 +18,18 @@ set_content_length_header :: proc(res: ^Response, length: int, loc := #caller_lo
 	set_header(res, "Content-Length", strings.to_string(b), loc)
 }
 
+get_content_length_header :: proc(req: ^Request) -> (clen: int, has, ok: bool) {
+	clen_str, has_clen := get_header(req, "Content-Length")
+	if !has_clen {
+		ok = true
+		return
+	}
+	has = true
+
+	clen, ok = parse_int(clen_str)
+	return
+}
+
 set_content_range_header :: proc(res: ^Response, range: Maybe([2]int), size: int, loc := #caller_location) {
 	b := strings.builder_make(0, 32, transaction_allocator(connection_of_response(res)))
 
@@ -188,13 +200,14 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 SEND_ENTIRE_FILE :: nbio.SEND_ENTIRE_FILE
 
 send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: int = SEND_ENTIRE_FILE, on_sent: Send_Callback = nil) {
+	nbytes := nbytes
 	c := connection_of_response(res)
 	log.debugf("http[t=%v][c=%v]: offset=%v, nbytes=%v", td.id, c.socket, offset, nbytes)
 
 	switch res.state {
 	case .Error:
 		return
-	case .Handling:
+	case .None, .Handling:
 		send_response_heading(res)
 	case .Sending:
 	case .Sent:
@@ -204,35 +217,90 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 	}
 
 	if nbytes > 0 && wants_body(&c.req) {
-		// TODO: quota/timeout
+		max := c.res.progress.max
+		timeout := c.req.progress.timeout
+		if max == 0 || timeout == 0 {
+			res.state = .Error
+			_check_send_done(c)
+			return
+		}
+
+		if nbytes != SEND_ENTIRE_FILE && max >= 0 {
+			nbytes = min(nbytes, c.res.progress.max)
+		}
+
+		if timeout < 0 {
+			timeout = nbio.NO_TIMEOUT
+		}
+
 		res.sends += 1
-		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes)
+		res.last_send = now()
+		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes, timeout=timeout)
 	}
 }
 
 send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
-	c := connection_of_response(res)
-
 	switch res.state {
 	case .Error:
 		return
-	case .Handling:
+	case .None, .Handling:
 		write_response_heading(res)
 		res.state = .Sending
 		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
 		new_bufs[0] = res.buf[:]
 		copy(new_bufs[1:], bufs)
-		// TODO: quota/timeout
-		res.sends += 1
-		nbio.send_poly2(c.socket, new_bufs, c, on_sent, on_send)
+		do_send(res, new_bufs, on_sent)
 	case .Sending:
-		// TODO: quota/timeout
-		res.sends += 1
-		nbio.send_poly2(c.socket, bufs, c, on_sent, on_send)
+		do_send(res, bufs, on_sent)
 	case .Sent:
 		panic("response has been sent already")
 	case:
 		unreachable()
+	}
+
+	do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
+		bufs := bufs
+		c := connection_of_response(res)
+
+		max := c.res.progress.max
+		timeout := c.req.progress.timeout
+		if max == 0 || timeout == 0 {
+			res.state = .Error
+			_check_send_done(c)
+			return
+		}
+
+		if max > 0 {
+			bufs = constraint_bufs(bufs, max)
+		}
+
+		if timeout < 0 {
+			timeout = nbio.NO_TIMEOUT
+		}
+
+		res.sends += 1
+		res.last_send = now()
+		nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
+	}
+
+	constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
+		total: int
+		for buf in bufs {
+			total += len(buf)
+		}
+
+		constrained := bufs
+		for n := total; n > max; {
+			last := &constrained[len(constrained)-1]
+			take := min(len(last), n-max)
+			last^ = last[:take]
+			if len(last) == 0 {
+				constrained = constrained[:len(constrained)-1]
+			}
+			n -= take
+		}
+
+		return constrained
 	}
 }
 
@@ -240,7 +308,7 @@ respond :: proc(res: ^Response) {
 	switch res.state {
 	case .Error:
 		return
-	case .Handling:
+	case .None, .Handling:
 		send_response_heading(res)
 	case .Sending:
 	case .Sent:
@@ -252,9 +320,25 @@ respond :: proc(res: ^Response) {
 	res.state = .Sent
 }
 
-send_response_heading :: proc(res: ^Response) {
-	assert(res.state == .Handling)
+respond_bytes :: proc(res: ^Response, bytes: []byte) {
+	switch res.state {
+	case .Error:
+		return
+	case .None, .Handling:
+		set_content_length_header(res, len(bytes))
+		write_response_heading(res)
+		res.state = .Sending
+		send(res, {res.buf[:], bytes})
+	case .Sent, .Sending:
+		panic("response has been sent already")
+	case:
+		unreachable()
+	}
 
+	res.state = .Sent
+}
+
+send_response_heading :: proc(res: ^Response) {
 	write_response_heading(res)
 
 	res.state = .Sending
