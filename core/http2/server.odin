@@ -654,11 +654,12 @@ _setup :: proc(s: ^Server) -> Server_Error {
 		}
 	}
 
-	if err := _setup_threads(s); err != nil {
+	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil {
 		return .Allocation_Failed
 	}
 
-	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil {
+	if err := _setup_threads(s); err != nil {
+		virtual.arena_destroy(&s.temp_allocator_backing)
 		return .Allocation_Failed
 	}
 

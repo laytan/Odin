@@ -134,8 +134,8 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 	if bucket == BUCKETS-1 {
 		arena := td.free_arenas[bucket]
 		if arena != nil {
-			if len(arena.data) < size {
-				td.free_arenas[bucket] = nil
+			if len(arena.data) >= size {
+				td.free_arenas[bucket] = arena.prev
 				arena.offset = size_of(_Arena_Block)
 				arena.peak_used, arena.temp_count = 0, 0
 				arena.prev = nil
@@ -173,6 +173,8 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 			sanitizer.address_unpoison(free_arena.data[size_of(_Arena_Block):])
 			return free_arena
 		}
+
+		size = 1 << (uint(bucket) + SHIFT)
 	}
 
 	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), uint(align))
