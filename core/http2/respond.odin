@@ -218,7 +218,7 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 
 	if nbytes > 0 && wants_body(&c.req) {
 		max := c.res.progress.max
-		timeout := c.req.progress.timeout
+		timeout := c.res.progress.timeout
 		if max == 0 || timeout == 0 {
 			res.state = .Error
 			_check_send_done(c)
@@ -263,7 +263,7 @@ send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 		c := connection_of_response(res)
 
 		max := c.res.progress.max
-		timeout := c.req.progress.timeout
+		timeout := c.res.progress.timeout
 		if max == 0 || timeout == 0 {
 			res.state = .Error
 			_check_send_done(c)
