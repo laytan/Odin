@@ -91,6 +91,17 @@
   - Add chunked response streaming (`send_chunk` / chunked `io.Writer` integrated with `res.sends` tracking).
 - [x] **Lazy `100 Continue` in `body()` (`server.odin`, `respond.odin`, `scanner.odin`)**: Moved automatic `100 Continue` sending from `on_headers` into `_body_length`/`_body_chunked` via `_maybe_send_continue` (skipping when the request is rejected before/during `body()`, has no body, or already has buffered body bytes in the scanner), made `send_continue` package-private, and removed `Server_Options.no_auto_expect_continue`.
 - [x] **Move `HEAD -> GET` fallback from `server.odin` to `Router` (`server.odin`, `respond.odin`, `handlers.odin`, `router.odin`)**: Preserved `req.line.method == .Head` in `on_headers` (removing `Request.is_redirected_head`, `Server_Options.no_redirect_head_to_get`, and `logged` ternary checks), simplified `wants_body`, initialized `match.vars.allocator` on the transaction arena, and fell back to `router.routes[.Get]` when no explicit `.Head` route matches before checking `router.all`.
+- [ ] **Accept error recovery & allocation-failure socket cleanup (`server.odin`)**:
+  - Re-arm `thread.curr_accept = nbio.accept_poly(...)` (or back off) when `op.accept.err != nil` in `_on_accept` so a transient accept error does not permanently stop a worker thread from accepting connections.
+  - Close `op.accept.client` when `xar.push(&thread.connections, ...)` fails in `_on_accept`.
+- [ ] **Skip graceful close drain on dead-socket send errors (`server.odin`)**:
+  - In `on_send` / `_check_send_done`, destroy the connection immediately via `connection_destroy(c)` when a send fails due to a closed/reset/broken connection instead of running `connection_close(c)`'s `nbio.shutdown` and `500ms` `CONN_CLOSE_DELAY` drain.
+- [ ] **Field visibility & stale inline `TODO` cleanup (`server.odin`)**:
+  - Resolve `// TODO: prive` markers on internal `Ctx` and `Response` fields and remove stale inline `TODO` comments for already-completed items (`quota option on server`, `max length`, `send quota too`).
+- [ ] **`core/websocket` polish (`core/websocket/server.odin`)**:
+  - **Bound per-send header memory on long-lived connections**: Avoid growing `c.transaction_arena` on every `_send_multi` (`Outgoing_Frame_Header`) over the lifetime of an upgraded connection (e.g. recycle via a per-connection freelist or free on `http.send`'s `on_sent` callback).
+  - **Recycle `ws.arena` on `Ping`/`Pong` control frames**: Destroy/recycle the frame arena after `Pong` is received or after the echoed `Pong` send completes for `Ping`, instead of holding it until the next data/close frame.
+  - **Enforce `GET` method in `_prepare_upgrade`**: Reject non-`GET` requests (such as `HEAD` routed via `Router`'s `.Head -> .Get` fallback or `route_all`) per RFC 6455 §4.2.1.
 - [ ] **Testing, docs & package relocation**:
   - Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
   - Rewrite usage examples and overview into `doc.odin`.
