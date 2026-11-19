@@ -127,7 +127,7 @@ apply_range_to_size :: proc(range: Range, size: int) -> (offset, nbytes: int, ok
 }
 
 wants_body :: proc(req: ^Request) -> bool {
-	return req.line.method != .Head && !req.is_redirected_head
+	return req.line.method != .Head
 }
 
 set_header :: proc(res: ^Response, key, value: string, loc := #caller_location) {

@@ -40,7 +40,6 @@ Server_Options :: struct {
 	backlog:      int,
 	thread_count: int,
 	handler:      Handler,
-	no_redirect_head_to_get: bool,
 	thread_initializer: proc(),
 
 	request_quota:  Quota,
@@ -215,12 +214,11 @@ context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 }
 
 Request :: struct {
-	quota:              ^Quota,
-	progress:           Progression,
-	line:               Requestline,
-	is_redirected_head: bool,
-	has_consumed_body:  bool,
-	headers:            Headers,
+	quota:             ^Quota,
+	progress:          Progression,
+	line:              Requestline,
+	has_consumed_body: bool,
+	headers:           Headers,
 }
 
 Response :: struct {
@@ -637,14 +635,6 @@ on_headers :: proc(c: ^Connection) {
 		c.res.status = .OK
 		respond(&c.res)
 	} else {
-		// Give the handler this request as a GET, since the HTTP spec
-		// says a HEAD is identical to a GET but just without writing the body,
-		// handlers shouldn't have to worry about it.
-		if c.req.line.method == .Head && !td.s.opts.no_redirect_head_to_get {
-			c.req.is_redirected_head = true
-			c.req.line.method = .Get
-		}
-
 		context.temp_allocator = temp_allocator(c)
 		c.ctx.vars.allocator   = transaction_allocator(c)
 		c.res.status = .OK
@@ -841,9 +831,6 @@ write_response_heading :: proc(res: ^Response) {
 
 	// PERF: to avoid resizes and reallocs of the buffer.
 	// We could keep a list of buffers instead.
-
-	// if c.req.is_redirected_head {
-	// }
 
 	w := buf_writer(&res.buf)
 

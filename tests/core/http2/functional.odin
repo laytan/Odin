@@ -301,3 +301,185 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 	testing.expect(t, !ctx.too_big_413.saw_100, "expected 413 POST /echo not to receive 100 Continue")
 	testing.expect_value(t, ctx.too_big_413.response.status, c.long(413))
 }
+
+Head_Case_Result :: struct {
+	setopt_ok:      bool,
+	perform_err:    curl.code,
+	getinfo_err:    curl.code,
+	clen_err:       curl.code,
+	content_length: curl.off_t,
+	response:       Curl_Response,
+}
+
+Head_Server_State :: struct {
+	ping_count:         int,
+	ping_methods:       [2]http.Method,
+	custom_head_count:  int,
+	custom_head_method: http.Method,
+	custom_get_count:   int,
+	custom_get_method:  http.Method,
+}
+
+Head_Test_Context :: struct {
+	server:       ^http.Server,
+	endpoint_err: net.Socket_Info_Error,
+	handle_ok:    bool,
+	head_ping:    Head_Case_Result,
+	get_ping:     Head_Case_Result,
+	head_custom:  Head_Case_Result,
+	get_custom:   Head_Case_Result,
+}
+
+@(test)
+test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	srv_state: Head_Server_State
+
+	r: http.Router
+	defer http.router_destroy(r)
+	http.route_get(&r, "/ping", http.Handler{
+		user_data = &srv_state,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Head_Server_State)(h.user_data)
+			if st.ping_count < len(st.ping_methods) {
+				st.ping_methods[st.ping_count] = ctx.req.line.method
+			}
+			st.ping_count += 1
+			http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
+		},
+	})
+	http.route_head(&r, "/custom", http.Handler{
+		user_data = &srv_state,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Head_Server_State)(h.user_data)
+			st.custom_head_count += 1
+			st.custom_head_method = ctx.req.line.method
+			http.set_content_length_header(&ctx.res, 9)
+			http.respond(&ctx.res)
+		},
+	})
+	http.route_get(&r, "/custom", http.Handler{
+		user_data = &srv_state,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Head_Server_State)(h.user_data)
+			st.custom_get_count += 1
+			st.custom_get_method = ctx.req.line.method
+			http.respond_bytes(&ctx.res, transmute([]byte)string("custom-ok"))
+		},
+	})
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = 18083,
+		thread_count = 1,
+		handler      = http.router(&r),
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	ctx := Head_Test_Context{server = &server}
+	defer delete(ctx.head_ping.response.body)
+	defer delete(ctx.get_ping.response.body)
+	defer delete(ctx.head_custom.response.body)
+	defer delete(ctx.get_custom.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Head_Test_Context)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		do_req :: proc(handle: ^curl.CURL, port: int, path: string, is_head: bool, res: ^Head_Case_Result) {
+			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
+			method_ok := curl.easy_setopt(handle, .NOBODY, c.long(1)) == .E_OK if is_head else (
+				curl.easy_setopt(handle, .NOBODY, c.long(0)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPGET, c.long(1)) == .E_OK
+			)
+			res.setopt_ok = method_ok &&
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK
+			if !res.setopt_ok {
+				return
+			}
+
+			res.perform_err = curl.easy_perform(handle)
+			res.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.response.status)
+			res.clen_err    = curl.easy_getinfo(handle, .CONTENT_LENGTH_DOWNLOAD_T, &res.content_length)
+		}
+
+		do_req(handle, endpoint.port, "/ping", true, &ctx.head_ping)
+		do_req(handle, endpoint.port, "/ping", false, &ctx.get_ping)
+		do_req(handle, endpoint.port, "/custom", true, &ctx.head_custom)
+		do_req(handle, endpoint.port, "/custom", false, &ctx.get_custom)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) {
+		return
+	}
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") {
+		return
+	}
+
+	// 1. HEAD /ping falls back to route_get, receives Content-Length: 4 and empty body, and handler sees .Head.
+	testing.expect(t, ctx.head_ping.setopt_ok, "head_ping: setopt failed")
+	testing.expectf(t, ctx.head_ping.perform_err == .E_OK, "head_ping: curl failed: %s", curl.easy_strerror(ctx.head_ping.perform_err))
+	testing.expect_value(t, ctx.head_ping.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.head_ping.clen_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.head_ping.response.status, c.long(200))
+	testing.expect_value(t, ctx.head_ping.content_length, curl.off_t(4))
+	testing.expect_value(t, len(ctx.head_ping.response.body), 0)
+
+	// 2. Subsequent GET /ping on the same keep-alive connection receives full "pong" body and handler sees .Get.
+	testing.expect(t, ctx.get_ping.setopt_ok, "get_ping: setopt failed")
+	testing.expectf(t, ctx.get_ping.perform_err == .E_OK, "get_ping: curl failed: %s", curl.easy_strerror(ctx.get_ping.perform_err))
+	testing.expect_value(t, ctx.get_ping.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.get_ping.response.status, c.long(200))
+	testing.expect_value(t, string(ctx.get_ping.response.body[:]), "pong")
+
+	// 3. HEAD /custom hits explicit route_head (Content-Length: 9, empty body).
+	testing.expect(t, ctx.head_custom.setopt_ok, "head_custom: setopt failed")
+	testing.expectf(t, ctx.head_custom.perform_err == .E_OK, "head_custom: curl failed: %s", curl.easy_strerror(ctx.head_custom.perform_err))
+	testing.expect_value(t, ctx.head_custom.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.head_custom.clen_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.head_custom.response.status, c.long(200))
+	testing.expect_value(t, ctx.head_custom.content_length, curl.off_t(9))
+	testing.expect_value(t, len(ctx.head_custom.response.body), 0)
+
+	// 4. GET /custom hits route_get ("custom-ok").
+	testing.expect(t, ctx.get_custom.setopt_ok, "get_custom: setopt failed")
+	testing.expectf(t, ctx.get_custom.perform_err == .E_OK, "get_custom: curl failed: %s", curl.easy_strerror(ctx.get_custom.perform_err))
+	testing.expect_value(t, ctx.get_custom.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.get_custom.response.status, c.long(200))
+	testing.expect_value(t, string(ctx.get_custom.response.body[:]), "custom-ok")
+
+	// Server-side handler observations.
+	testing.expect_value(t, srv_state.ping_count, 2)
+	testing.expect_value(t, srv_state.ping_methods[0], http.Method.Head)
+	testing.expect_value(t, srv_state.ping_methods[1], http.Method.Get)
+	testing.expect_value(t, srv_state.custom_head_count, 1)
+	testing.expect_value(t, srv_state.custom_head_method, http.Method.Head)
+	testing.expect_value(t, srv_state.custom_get_count, 1)
+	testing.expect_value(t, srv_state.custom_get_method, http.Method.Get)
+}

@@ -74,7 +74,7 @@ logged :: proc(next: ^Handler) -> Handler {
 					"[%v] %v - %v %q %v.%v -> %v %m %v",
 					string(date[:]),
 					net.endpoint_to_string(c.remote, transaction_allocator(c)),
-					method_string(.Head if ctx.req.is_redirected_head else ctx.req.line.method),
+					method_string(ctx.req.line.method),
 					ctx.req.line.target,
 					ctx.req.line.version.major,
 					ctx.req.line.version.minor,
@@ -87,7 +87,7 @@ logged :: proc(next: ^Handler) -> Handler {
 				log.infof(
 					"%v - %v %q %v.%v -> %v %m %v",
 					net.address_to_string(c.remote.address, transaction_allocator(c)),
-					method_string(.Head if ctx.req.is_redirected_head else ctx.req.line.method),
+					method_string(ctx.req.line.method),
 					ctx.req.line.target,
 					ctx.req.line.version.major,
 					ctx.req.line.version.minor,

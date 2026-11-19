@@ -36,6 +36,7 @@ router :: proc(router: ^Router) -> Handler {
 		match := context_get(ctx, _Route_Match)
 		if match == nil {
 			match = context_add(ctx, _Route_Match{})
+			match.vars.allocator = transaction_allocator(ctx)
 
 			without_query, _, _ := strings.partition(rline.target, "?")
 			target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
@@ -53,6 +54,9 @@ router :: proc(router: ^Router) -> Handler {
 		}
 
 		route, has_route := _route_trie_match(router.routes[rline.method], target, &match.vars, &match.suffix)
+		if !has_route && rline.method == .Head {
+			route, has_route = _route_trie_match(router.routes[.Get], target, &match.vars, &match.suffix)
+		}
 		if !has_route {
 			route, has_route = _route_trie_match(router.all, target, &match.vars, &match.suffix)
 			if !has_route {
