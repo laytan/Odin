@@ -32,7 +32,8 @@ Scanner :: struct {
 
 	scan:       Scan,
 
-	is_pumping: bool,
+	is_pumping:      bool,
+	_pump_destroyed: ^bool,
 
 	last_recv_start: time.Time,
 }
@@ -41,12 +42,14 @@ MULTIPLIER :: 512
 
 scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 	is_pumping := s.is_pumping
+	pump_destroyed := s._pump_destroyed
 	to_copy := s.buf[s.read_head:s.write_head]
 	if len(to_copy) == 0 {
 		transaction_allocator_destroy(c)
 		s^ = {
-			c          = c,
-			is_pumping = is_pumping,
+			c               = c,
+			is_pumping      = is_pumping,
+			_pump_destroyed = pump_destroyed,
 		}
 		return
 	}
@@ -64,12 +67,13 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 	c.transaction_arena.tail = new_arena
 
 	s^ = {
-		c          = c,
-		buf        = new_buf,
-		read_head  = 0,
-		write_head = n,
-		allocator  = &c.transaction_arena,
-		is_pumping = is_pumping,
+		c               = c,
+		buf             = new_buf,
+		read_head       = 0,
+		write_head      = n,
+		allocator       = &c.transaction_arena,
+		is_pumping      = is_pumping,
+		_pump_destroyed = pump_destroyed,
 	}
 }
 
@@ -201,10 +205,16 @@ split_line :: proc() -> Scan_Splitter {
 scanner_pump :: proc(s: ^Scanner) {
 	if s.is_pumping { return }
 
+	context.temp_allocator = temp_allocator(s.c)
 	s.is_pumping = true
-	defer s.is_pumping = false
+	destroyed := false
+	s._pump_destroyed = &destroyed
+	defer if !destroyed {
+		s._pump_destroyed = nil
+		s.is_pumping = false
+	}
 
-	for s.scan.callback != nil {
+	for !destroyed && s.scan.callback != nil {
 		offset, n, advance, ok := s.scan.split.procedure(s.scan.split.user_data, s.buf[s.read_head:s.write_head])
 		if ok {
 			assert(advance >= n && n >= offset)
@@ -233,17 +243,29 @@ scanner_pump :: proc(s: ^Scanner) {
 			cb := s.scan.callback
 			s.scan = {}
 			cb(s.c, data)
+			if destroyed { return }
 		} else {
 			capacity := len(s.buf)-s.write_head
-			if capacity < MULTIPLIER || s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
+			if s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
+				buf_left := s.buf[s.read_head:s.write_head]
+				new_size := max(MULTIPLIER, len(buf_left) + MULTIPLIER)
+
+				s.allocator = s.scan.allocator
+				err: mem.Allocator_Error
+				s.buf, err = make([]byte, new_size, arena_allocator(s.allocator))
+				assert(err == nil) // TODO: err
+				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
+
+				s.read_head  = 0
+				s.write_head = copy(s.buf[:], buf_left)
+				assert(s.write_head == len(buf_left))
+			} else if capacity < MULTIPLIER {
 				prev_buf := s.buf
 				buf_left := s.buf[s.read_head:s.write_head]
 				new_size := max(MULTIPLIER, len(prev_buf) * 2)
 
-				s.allocator = s.scan.allocator
-
 				err: mem.Allocator_Error
-				s.buf, err = _arena_block_resize_in_place(s.allocator.tail, s.buf, new_size, 1, false)
+				s.buf, err = _arena_block_resize_in_place(s.allocator != nil ? s.allocator.tail : nil, s.buf, new_size, 1, false)
 				if err == nil {
 					log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
 				} else {

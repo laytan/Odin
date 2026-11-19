@@ -13,8 +13,8 @@
   - `Quota` & `Progression` enforce byte caps, minimum/maximum timeouts, and minimum transfer rates (`min_rate` / `rate_add`) to resist Slowloris and resource exhaustion.
   - Strict RFC 9112 parsing and header validation to prevent HTTP/1.1 request smuggling (`CL.TE`, `TE.CL`, `TE.TE`), header injection, and hash-table DoS.
 - **Upgrade / Hijack support (WebSockets, SSE, custom protocols)**:
-  - **`.Upgraded` mode**: Transitions the connection after sending the upgrade response (e.g., `101 Switching Protocols`) while keeping `Connection`, `Scanner` (on `temp_arena` + `free_all`), and custom `Quota` alive in the server pool.
-  - **Raw detach (`connection_detach`)**: Escape hatch that removes the socket from the server pool and returns `(nbio.TCP_Socket, buffered: []byte)` to user code.
+  - **In-pool upgrades (`send_heading` + `.Sending`)**: Sends the upgrade response heading (e.g., `101 Switching Protocols`) with an optional `on_sent` callback while keeping `Connection`, `Scanner` (`temp_arena` + `free_all`), `response_defer`, `connection_close`, and `request_set_quota`/`response_set_quota` alive in the server pool.
+  - **Raw detach (`connection_detach`)**: Escape hatch that removes the socket from the server pool and returns `(nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` to user code.
 - **No OS signal hijacking**: `core:net/http` will not register signal handlers; user code owns signals and calls `server_shutdown(&s)`.
 
 ---
@@ -73,12 +73,13 @@
 
 ### Priority 3: v1 Features & Polish
 
-- [ ] **Connection upgrade / hijack API (WebSockets, etc.)**:
-  - Add `.Upgraded` connection state and `upgrade` procedure: writes and sends the response heading (e.g., `101 Switching Protocols`), flushes pending sends, runs `response_defer`s, optionally sets/clears the connection's `Quota`, and invokes an upgrade callback with `^Connection`.
-  - In `.Upgraded` state, `Scanner` errors/EOF invoke a user-supplied error/close callback (or `connection_destroy`) rather than calling `invalid_request`, and `scan_temp_*` + `free_all(context.temp_allocator)` enables zero-leak frame scanning.
-  - Provide `connection_detach(c: ^Connection) -> (socket: nbio.TCP_Socket, buffered: []byte)` to completely remove the socket from the server pool.
+- [x] **Connection upgrade / hijack API (WebSockets, etc.) (`server.odin`, `respond.odin`, `scanner.odin`, `arena.odin`, `core/websocket/server.odin`)**:
+  - Added optional `on_sent: Send_Callback = nil` to `send_response_heading`/`send_heading`, made `on_send` bind `context.temp_allocator`, guard `sent > 0`, and check `.Sent`/`.Error` before invoking `on_sent` (allowing safe in-callback detach/destroy), made `connection_close` wait for `res.sends > 0`, and marked `101 Switching Protocols` as non-keep-alive in `_check_send_done`.
+  - Updated `scanner_pump` to bind `context.temp_allocator`, guard re-entrant destroy/detach via `_pump_destroyed`, split allocator-switch reallocation from in-place resize, and guard `a == nil` in `_arena_block_resize_in_place`.
+  - Added `connection_detach(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` sharing `_connection_release` with `connection_destroy`, and updated `core/websocket/server.odin` onto `send_heading`, `request_set_quota`/`response_set_quota`, `response_defer`, and `connection_close`.
 - [ ] **Graceful server shutdown (`server.odin`)**:
   - On `server_shutdown(&s)`, cancel `curr_accept` and `date_update` timers, immediately close idle connections, mark active connections to close after their current response finishes, and tick the event loop until active connections drain or a `shutdown_timeout` expires.
+- [ ] **Per-thread teardown callback (`server.odin`)**: Add `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
 - [ ] **Response `Set-Cookie` support**:
   - Port `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` and add `set_cookie(res: ^Response, cookie: Cookie)` (serializing into `res.headers` via `headers_add(&res.headers, "Set-Cookie", ...)`).
 - [ ] **MIME / `Content-Type` & static file/directory serving**:

@@ -379,11 +379,11 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 	_check_send_done(c)
 }
 
-send_response_heading :: proc(res: ^Response) {
+send_response_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
 	write_response_heading(res)
 
 	res.state = .Sending
-	_do_send(res, {res.buf[:]}, nil)
+	_do_send(res, {res.buf[:]}, on_sent)
 }
 
 respond_handle :: proc(res: ^Response, file: nbio.Handle) {

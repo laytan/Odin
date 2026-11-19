@@ -130,14 +130,23 @@ A HTTP handler that handles upgrade requests, adding upgraded connections to the
 handler :: proc(s: ^Server) -> http.Handler {
 	return http.Handler {
 		user_data = s,
-		handle = proc(handler: ^http.Handler, req: ^http.Request, res: ^http.Response) {
+		handle = proc(handler: ^http.Handler, ctx: ^http.Ctx) {
 			s := (^Server)(handler.user_data)
-			if !_upgrade(req, res) {
+			if !_prepare_upgrade(&ctx.req, &ctx.res) {
+				http.respond(&ctx.res)
 				return
 			}
 
-			c := http.connection_of_response(res)
-			_serve_connection(s, c)
+			c := http.connection_of_context(ctx)
+			ws := http.context_add(ctx, Connection{
+				s = s,
+			})
+			ws.frames.allocator = http.transaction_allocator(c)
+			if s.idle_timeout > 0 {
+				ws.recv_quota = {min = s.idle_timeout}
+			}
+
+			http.send_heading(&ctx.res, _on_upgrade)
 		},
 	}
 }
@@ -151,8 +160,7 @@ Note that the HTTP layer still shuts down the socket and waits a bit before clos
 */
 immediately_close :: proc(c: ^http.Connection, status: Status, reason: string) {
 	send_close(c, status, reason)
-	http.set_header(&c.res, "Connection", "close")
-	http.respond(&c.res)
+	http.connection_close(c)
 }
 
 /*
@@ -276,48 +284,55 @@ _prepare_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
 	return true
 }
 
-_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
-	ok := _prepare_upgrade(req, res)
-	if !ok {
-		http.respond(res)
-	} else {
-		http.send_heading(res)
-	}
-	return ok
-}
-
 Connection :: struct {
-	s:       ^Server,
-	closure: Maybe(Closure),
-	frames:  [dynamic]_Frame,
-	arena:   ^http.Arena,
+	s:          ^Server,
+	closure:    Maybe(Closure),
+	frames:     [dynamic]_Frame,
+	arena:      ^http.Arena,
+	recv_quota: http.Quota,
+	send_quota: http.Quota,
 }
 
-_serve_connection :: proc(s: ^Server, c: ^http.Connection) {
-	ws := http.context_add(&c.ctx, Connection{
-		s     = s,
-	})
-	ws.frames.allocator = http.transaction_allocator(c)
-
-	if s.on_close != nil {
-		http.response_defer(&c.res, proc(res: ^http.Response) {
-			c  := http.connection_of_response(res)
-			ws := http.context_get(&c.ctx, Connection)
-			ws.s.on_close(ws.s, c, ws.closure)
-		})
+_on_upgrade :: proc(c: ^http.Connection, err: http.Send_Error) {
+	if err != nil {
+		return
 	}
+	_serve_connection(c)
+}
+
+_serve_connection :: proc(c: ^http.Connection) {
+	ws := http.context_get(&c.ctx, Connection)
+	s  := ws.s
+
+	http.request_set_quota(&c.req, &ws.recv_quota)
+	http.response_set_quota(&c.res, &ws.send_quota)
+
+	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+		c  := http.connection_of_context(ctx)
+		ws := http.context_get(ctx, Connection)
+		if ws.arena != nil {
+			http.arena_destroy(ws.arena)
+			ws.arena = nil
+		}
+		if ws.s.on_close != nil {
+			ws.s.on_close(ws.s, c, ws.closure)
+		}
+	})
 
 	if s.on_open != nil {
 		s.on_open(s, c)
 	}
+	if c.res.state != .Sending {
+		return
+	}
 
-	scan(s, c, ws, size_of(_Frame_Header), on_frame_header)
+	scan(c, ws, size_of(_Frame_Header), on_frame_header)
 
-	scan :: proc(s: ^Server, c: ^http.Connection, ws: ^Connection, n: int, cb: http.Scan_Cb) {
+	scan :: proc(c: ^http.Connection, ws: ^Connection, n: int, cb: http.Scan_Cb) {
 		if ws.arena == nil {
 			ws.arena = http.bootstrap_arena(c)
 		}
-		http._scan_bytes(&c.scanner, n, s.idle_timeout, ws.arena, cb)
+		http._scan_bytes(&c.scanner, n, ws.arena, cb)
 	}
 
 	on_frame_header :: proc(c: ^http.Connection, data: []byte) {
@@ -351,9 +366,9 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 
 		switch header.hpayload_len {
 		case _LEN_2_BYTES:
-			scan(ws.s, c, ws, size_of(u16be), on_payload_len)
+			scan(c, ws, size_of(u16be), on_payload_len)
 		case _LEN_8_BYTES:
-			scan(ws.s, c, ws, size_of(u64be), on_payload_len)
+			scan(c, ws, size_of(u64be), on_payload_len)
 		case:
 			assert(header.hpayload_len <= 125)
 			frame.payload_len = u64(header.hpayload_len)
@@ -395,7 +410,7 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			scan_size += size_of(_Mask)
 		}
 
-		scan(ws.s, c, ws, scan_size, on_payload)
+		scan(c, ws, scan_size, on_payload)
 	}
 
 	on_payload :: proc(c: ^http.Connection, buf: []byte) {
@@ -547,8 +562,7 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 			}
 
 			pop(&ws.frames)
-			http.set_header(&c.res, "Connection", "close")
-			http.respond(&c.res)
+			http.connection_close(c)
 			return
 		case:
 			unreachable()
@@ -556,7 +570,13 @@ _serve_connection :: proc(s: ^Server, c: ^http.Connection) {
 	}
 
 	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
-		scan(ws.s, c, ws, size_of(_Frame_Header), on_frame_header)
+		if c.res.state != .Sending {
+			return
+		}
+		if ws.s.idle_timeout > 0 {
+			http.progression_reset(&c.req.progress, ws.recv_quota)
+		}
+		scan(c, ws, size_of(_Frame_Header), on_frame_header)
 	}
 }
 

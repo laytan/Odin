@@ -133,3 +133,33 @@ when size_of(uintptr) == 8 {
 		http._server_thread_put_free_arena(got_head)
 	}
 }
+
+@(test)
+test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
+	s: http.Server
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	a := http.bootstrap_arena(nil)
+	testing.expect(t, a != nil && a.tail != nil, "expected bootstrapped arena and initial block")
+
+	alloc := http.arena_allocator(a)
+	small, small_err := mem.alloc_bytes(64, mem.DEFAULT_ALIGNMENT, alloc)
+	testing.expect_value(t, small_err, nil)
+	testing.expect_value(t, len(small), 64)
+
+	large, large_err := mem.alloc_bytes(5000, mem.DEFAULT_ALIGNMENT, alloc)
+	testing.expect_value(t, large_err, nil)
+	testing.expect_value(t, len(large), 5000)
+
+	http.arena_destroy(a)
+	testing.expect(t, thread.free_arenas[0] != nil, "expected initial 4 KiB block in bucket 0 freelist")
+	testing.expect(t, thread.free_arenas[1] != nil, "expected overflow 8 KiB block in bucket 1 freelist")
+}

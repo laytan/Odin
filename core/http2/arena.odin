@@ -88,12 +88,12 @@ arena_free :: proc(a: ^Arena, ptr: rawptr, size: int) -> mem.Allocator_Error {
 
 arena_destroy :: proc(a: ^Arena) {
 	arena := a.tail
+	a.tail = nil
 	for arena != nil {
 		prev := arena.prev
 		_server_thread_put_free_arena(arena)
 		arena = prev
 	}
-	a.tail = nil
 }
 
 arena_free_all :: arena_destroy
@@ -260,7 +260,7 @@ _arena_allocator :: proc(a: ^Arena, $FREE_ALL: bool) -> mem.Allocator {
 
 _arena_block_resize_in_place :: proc(a: ^_Arena_Block, old_data: []byte, size, alignment: int, should_zero: bool) -> ([]byte, mem.Allocator_Error) {
 	old_memory := raw_data(old_data)
-	if old_memory == nil || old_memory != a.last {
+	if a == nil || old_memory == nil || old_memory != a.last {
 		return nil, .Invalid_Pointer
 	}
 

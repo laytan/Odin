@@ -27,6 +27,7 @@ Server :: struct {
 	serve:           sync.One_Shot_Event,
 	running_threads: sync.Wait_Group,
 	shutting_down:   bool,
+	shutdown_mutex:  sync.Mutex,
 
 	temp_allocator_backing: virtual.Arena,
 }
@@ -312,8 +313,6 @@ _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 }
 
 _server_thread_serve :: proc(thread: ^Server_Thread) {
-	thread.event_loop = nbio.current_thread_event_loop()
-
 	if thread.s.opts.thread_initializer != nil {
 		thread.s.opts.thread_initializer()
 	}
@@ -322,6 +321,10 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 
 	sync.wait_group_add(&thread.s.running_threads, 1)
 	defer sync.wait_group_done(&thread.s.running_threads)
+
+	sync.mutex_lock(&thread.s.shutdown_mutex)
+	thread.event_loop = nbio.current_thread_event_loop()
+	sync.mutex_unlock(&thread.s.shutdown_mutex)
 
 	log.debugf("http[t=%v]: msg=\"serving\"", thread.id)
 
@@ -338,6 +341,7 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 		err := nbio.tick()
 		if err != nil {
 			log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
+			_server_thread_shutdown(thread)
 			break
 		}
 	}
@@ -357,12 +361,18 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 		connection_destroy(c)
 	}
 
+	sync.mutex_lock(&thread.s.shutdown_mutex)
+	thread.event_loop = nil
 	nbio.release_thread_event_loop()
+	sync.mutex_unlock(&thread.s.shutdown_mutex)
 }
 
 server_shutdown :: proc(s: ^Server) {
+	sync.mutex_lock(&s.shutdown_mutex)
+	defer sync.mutex_unlock(&s.shutdown_mutex)
+
 	sync.atomic_store(&s.shutting_down, true)
-	for thread in s.threads {
+	for &thread in s.threads {
 		if thread.event_loop != nil {
 			nbio.wake_up(thread.event_loop)
 		}
@@ -408,11 +418,15 @@ CONN_CLOSE_DELAY :: time.Millisecond * 500
 // Sends a FIN, receives for at most CONN_CLOSE_DELAY (making sure the client gets our close / waiting for it to close too).
 // Ultimately destroying the connection.
 connection_close :: proc(c: ^Connection) {
-	log.debugf("http[t=%v][c=%v]: msg=\"shutdown\"", td.id, c.socket)
 	c.res.state    = .Error
 	c.scanner.scan = {}
 	nbio.remove(c.curr_recv)
 	c.curr_recv = nil
+	if c.res.sends > 0 {
+		return
+	}
+
+	log.debugf("http[t=%v][c=%v]: msg=\"shutdown\"", td.id, c.socket)
 	nbio.shutdown(c.socket, .Send)
 
 	@(static) junk: [1024]byte
@@ -436,16 +450,20 @@ connection_close :: proc(c: ^Connection) {
 	}
 }
 
-connection_destroy :: proc(c: ^Connection) {
-	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
+@(private="file")
+_connection_release :: proc(c: ^Connection) {
 	nbio.remove(c.curr_recv)
 	c.curr_recv = nil
-	nbio.close(c.socket)
+	c.scanner.scan = {}
+	if c.scanner._pump_destroyed != nil {
+		c.scanner._pump_destroyed^ = true
+	}
 
 	#reverse for deferred in c.res.deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
 		deferred(&c.ctx)
 	}
+	clear(&c.res.deferred)
 
 	temp_allocator_destroy(c)
 	transaction_allocator_destroy(c)
@@ -458,14 +476,45 @@ connection_destroy :: proc(c: ^Connection) {
 	xar.release(&td.connections, idx)
 }
 
+connection_destroy :: proc(c: ^Connection) {
+	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
+	nbio.remove(c.curr_recv)
+	c.curr_recv = nil
+	if c.socket != {} {
+		nbio.close(c.socket)
+	}
+	_connection_release(c)
+}
+
+// Removes the connection from the server pool without closing the socket, returning the underlying
+// socket and a copy of any unread bytes still buffered in the scanner.
+connection_detach :: proc(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error) {
+	assert(c.res.sends == 0, "cannot detach connection while sends are in flight")
+	assert(allocator.data != &c.temp_arena && allocator.data != &c.transaction_arena, "cannot allocate detached buffer from connection's arena")
+
+	unread := c.scanner.buf[c.scanner.read_head:c.scanner.write_head]
+	if len(unread) > 0 {
+		buffered, err = make([]byte, len(unread), allocator)
+		if err != nil {
+			return
+		}
+		copy(buffered, unread)
+	}
+
+	log.debugf("http[t=%v][c=%v]: msg=\"detach\", buffered=%v", td.id, c.socket, len(buffered))
+	socket = c.socket
+	_connection_release(c)
+	return
+}
+
 invalid_request :: proc(c: ^Connection, status: Status) {
-	log.warnf("http[t=%v][c=%v]: status=%v, msg=\"invalid request\"", td.id, c.socket, status)
 	c.scanner.scan = {}
 	if c.res.state != .None && c.res.state != .Handling {
 		c.res.state = .Error
 		_check_send_done(c)
 		return
 	}
+	log.warnf("http[t=%v][c=%v]: status=%v, msg=\"invalid request\"", td.id, c.socket, status)
 	c.res.status = status
 	headers_set(&c.res.headers, "connection", "close")
 	respond(&c.res)
@@ -881,6 +930,8 @@ Send_Error :: nbio.Send_File_Error
 Send_Callback :: proc(c: ^Connection, err: Send_Error)
 
 on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
+	context.temp_allocator = temp_allocator(c)
+
 	sent: int
 	err: nbio.Send_File_Error
 	#partial switch op.type {
@@ -903,7 +954,9 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 		unimplemented("on_send type")
 	}
 
-	progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res.last_send))
+	if sent > 0 {
+		progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res.last_send))
+	}
 
 	if err != nil {
 		log.warnf("http[t=%v][c=%v]: msg=\"send error\", err=%v", td.id, c.socket, err)
@@ -918,9 +971,13 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	c.res.sends -= 1
 	c.res.sent  += sent
 
+	should_check := c.res.state == .Sent || c.res.state == .Error
+
 	if on_sent != nil { on_sent(c, err) }
 
-	_check_send_done(c)
+	if should_check {
+		_check_send_done(c)
+	}
 }
 
 _check_send_done :: proc(c: ^Connection) {
@@ -929,12 +986,10 @@ _check_send_done :: proc(c: ^Connection) {
 		return
 	}
 
-	if c.res.state == .Error || response_must_close(c) || response_has_close(&c.res) {
+	if c.res.state == .Error || c.res.status == .Switching_Protocols || response_must_close(c) || response_has_close(&c.res) {
 		connection_close(c)
 		return
 	}
-
-	// TODO: informational/take over connection
 
 	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
 
