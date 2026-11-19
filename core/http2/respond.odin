@@ -315,22 +315,6 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 	}
 }
 
-// Sends an informational `HTTP/1.1 100 Continue` response without finalizing the response state,
-// allowing the handler to subsequently read the request body and send the final response.
-send_continue :: proc(res: ^Response, on_sent: Send_Callback = nil) {
-	switch res.state {
-	case .Error:
-		return
-	case .None, .Handling:
-		CONTINUE_RESPONSE :: "HTTP/1.1 100 Continue\r\n\r\n"
-		_do_send(res, {transmute([]byte)string(CONTINUE_RESPONSE)}, on_sent)
-	case .Sending, .Sent:
-		panic("response has been sent already")
-	case:
-		unreachable()
-	}
-}
-
 respond :: proc(res: ^Response) {
 	c := connection_of_response(res)
 

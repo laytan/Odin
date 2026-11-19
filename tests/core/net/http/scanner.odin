@@ -1008,3 +1008,281 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		testing.expect(t, strings.contains(string(env.c.res.buf[:]), "Connection: close\r\n"), "expected Connection: close header")
 	}
 }
+
+@(test)
+test_lazy_expect_continue :: proc(t: ^testing.T) {
+	http.headers_init_hash_secret()
+
+	setup_conn :: proc(t: ^testing.T, thread: ^http.Server_Thread, c: ^http.Connection, payload: string, req_max := 100) {
+		c^ = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = c
+		c.temp_arena.c = c
+
+		tx_alloc := http.transaction_allocator(c)
+		c.vars.allocator = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.res.headers.allocator = tx_alloc
+		c.res.buf.allocator = tx_alloc
+		c.scanner.c = c
+		c.scanner.allocator = &c.transaction_arena
+
+		c.req.progress.max = req_max
+		c.req.progress.timeout = -1
+		// Prevent send_continue/respond -> _do_send from calling nbio without an event loop.
+		c.res.progress.max = 0
+		c.res.sends = 1
+
+		if len(payload) > 0 {
+			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+			testing.expect_value(t, buf_err, nil)
+			c.scanner.buf = buf
+			c.scanner.write_head = copy(buf, payload)
+		}
+	}
+
+	cleanup_conn :: proc(c: ^http.Connection) {
+		http.temp_allocator_destroy(c)
+		http.transaction_allocator_destroy(c)
+	}
+
+	// 1. on_headers rejects (401) without calling body() -> never sends 100 Continue.
+	{
+		Reject_State :: struct {
+			handled:    bool,
+			sends_seen: int,
+			sent_seen:  int,
+		}
+		state: Reject_State
+		handler := http.Handler{
+			user_data = &state,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				st := (^Reject_State)(h.user_data)
+				st.handled = true
+				st.sends_seen = ctx.res.sends
+				st.sent_seen = ctx.res.sent
+				ctx.res.status = .Unauthorized
+				http.write_response_heading(&ctx.res)
+				ctx.res.state = .Sending
+				ctx.res.sends = 1
+				http.respond(&ctx.res)
+			},
+		}
+
+		s := http.make_server({handler = handler})
+		err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+		testing.expect_value(t, err, nil)
+		defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_conn(t, &thread, &c,
+			"POST /reject HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+		)
+		defer cleanup_conn(&c)
+
+		http._serve_connection(&c)
+		testing.expect(t, state.handled, "expected handler to be invoked")
+		testing.expect_value(t, state.sends_seen, 0)
+		testing.expect_value(t, state.sent_seen, 0)
+		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 401 Unauthorized\r\n"), "expected 401 status line")
+	}
+
+	s := http.make_server({})
+	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
+	testing.expect_value(t, err, nil)
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	// 2. Content-Length exceeding body_quota.max_size -> 413 Payload Too Large and no 100 Continue.
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "101"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
+	}
+
+	// 3. Content-Length: 0 -> finishes immediately and does not send 100 Continue.
+	{
+		Zero_State :: struct {
+			calls:       int,
+			is_partial:  bool,
+		}
+
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		c.req.has_consumed_body = true
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "0"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		zs := http.context_add(&c.ctx, Zero_State{})
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
+			zs := http.context_get(http.context_of_request(req), Zero_State)
+			zs.calls += 1
+			zs.is_partial = is_partial
+		})
+		testing.expect_value(t, zs.calls, 1)
+		testing.expect(t, !zs.is_partial, "expected 0-byte body to finish immediately")
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
+		testing.expect_value(t, c.res.sends, 1)
+	}
+
+	// 4. Buffered body bytes already in scanner -> reads body without sending 100 Continue.
+	{
+		Buffered_State :: struct {
+			got:      [16]byte,
+			got_len:  int,
+			finished: bool,
+		}
+
+		c: http.Connection
+		setup_conn(t, &thread, &c, "hello", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		bs := http.context_add(&c.ctx, Buffered_State{})
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
+			bs := http.context_get(http.context_of_request(req), Buffered_State)
+			if len(body) > 0 {
+				bs.got_len += copy(bs.got[bs.got_len:], body)
+			}
+			if !is_partial {
+				bs.finished = true
+			}
+		})
+		testing.expect(t, bs.finished, "expected buffered body to finish")
+		testing.expect_value(t, string(bs.got[:bs.got_len]), "hello")
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
+		testing.expect_value(t, c.res.sends, 1)
+	}
+
+	// 5. HTTP/1.0 with Expect: 100-continue -> does not send 100 Continue and schedules scan.
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 0}
+		c.scanner.is_pumping = true
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
+		testing.expect_value(t, c.res.sends, 1)
+		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
+	}
+
+	// 6. HTTP/1.1 Content-Length with no buffered bytes -> sends 100 Continue lazily.
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res.status, http.Status{})
+		testing.expect_value(t, len(c.res.buf), 0)
+	}
+
+	// 7. HTTP/1.1 chunked body(): sends 100 Continue when quota available, rejects 413 without 100 Continue when max == 0.
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-Continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res.status, http.Status{})
+		testing.expect_value(t, len(c.res.buf), 0)
+	}
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 0)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Handling
+		c.req.line.version = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
+	}
+
+	// 8. Already sending response -> does not send 100 Continue.
+	{
+		c: http.Connection
+		setup_conn(t, &thread, &c, "", 100)
+		defer cleanup_conn(&c)
+
+		c.res.state = .Sending
+		c.req.line.version = {1, 1}
+		c.scanner.is_pumping = true
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.state, type_of(c.res.state).Sending)
+		testing.expect_value(t, c.res.sends, 1)
+		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
+	}
+}

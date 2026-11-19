@@ -40,7 +40,6 @@ Server_Options :: struct {
 	backlog:      int,
 	thread_count: int,
 	handler:      Handler,
-	no_auto_expect_continue: bool,
 	no_redirect_head_to_get: bool,
 	thread_initializer: proc(),
 
@@ -631,17 +630,6 @@ on_headers :: proc(c: ^Connection) {
 	c.req.quota = &td.s.opts.body_quota
 	progression_reset(&c.req.progress, c.req.quota^)
 	_headers_set_readonly(&c.req.headers)
-
-	// Automatically respond with a continue status when the client has the Expect: 100-continue header.
-	if expect, ok := headers_get(c.req.headers, "expect");
-		ok && _headers_eq(expect, "100-continue") && !td.s.opts.no_auto_expect_continue {
-		if c.req.line.version == {1, 1} {
-			send_continue(&c.res)
-			if c.res.state == .Error {
-				return
-			}
-		}
-	}
 
 	// An options request with the "*" is a no-op/ping request to
 	// check for server capabilities and should not be sent to handlers.

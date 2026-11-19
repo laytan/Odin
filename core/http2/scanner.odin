@@ -410,6 +410,9 @@ Remove Trailer from existing header fields
 */
 _body_chunked :: proc(req: ^Request) {
 	c := connection_of_request(req)
+	if !_maybe_send_continue(c) {
+		return
+	}
 	scan_line(&c.scanner, on_size)
 
 	on_size :: proc(c: ^Connection, data: []byte) {
@@ -530,6 +533,10 @@ _body_length :: proc(req: ^Request) {
 		return
 	}
 
+	if !_maybe_send_continue(c) {
+		return
+	}
+
 	body_req := context_get(&c.ctx, Body_Request)
 	body_req.curr_size = clen
 	scan_at_most(&c.scanner, clen, on_body)
@@ -548,6 +555,27 @@ _body_length :: proc(req: ^Request) {
 
 		_body_cb(&c.req, data, is_partial=false)
 	}
+}
+
+_maybe_send_continue :: proc(c: ^Connection) -> bool {
+	if c.res.state != .Handling {
+		return true
+	}
+	if c.req.line.version != {1, 1} {
+		return true
+	}
+	if c.scanner.write_head > c.scanner.read_head {
+		return true
+	}
+	if c.req.progress.max == 0 || c.req.progress.timeout == 0 {
+		return true
+	}
+	if expect, ok := headers_get(c.req.headers, "expect"); ok && _headers_eq(expect, "100-continue") {
+		CONTINUE_RESPONSE :: "HTTP/1.1 100 Continue\r\n\r\n"
+		_do_send(&c.res, {transmute([]byte)string(CONTINUE_RESPONSE)}, nil)
+		return c.res.state != .Error
+	}
+	return true
 }
 
 @(private="file", rodata)

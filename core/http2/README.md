@@ -89,7 +89,7 @@
 - [ ] **Convenience responders & chunked streaming**:
   - Add `respond_plain`, `respond_html`, `respond_json`.
   - Add chunked response streaming (`send_chunk` / chunked `io.Writer` integrated with `res.sends` tracking).
-- [ ] **Lazy `100 Continue` in `body()` (`server.odin`, `scanner.odin`)**: Move automatic `100 Continue` sending from `on_headers` into `body()` so rejected requests (e.g., `401`/`404`/`413`) never send `100 Continue` before the handler decides to read the body, and remove `no_auto_expect_continue` from `Server_Options`.
+- [x] **Lazy `100 Continue` in `body()` (`server.odin`, `respond.odin`, `scanner.odin`)**: Moved automatic `100 Continue` sending from `on_headers` into `_body_length`/`_body_chunked` via `_maybe_send_continue` (skipping when the request is rejected before/during `body()`, has no body, or already has buffered body bytes in the scanner), made `send_continue` package-private, and removed `Server_Options.no_auto_expect_continue`.
 - [ ] **Move `HEAD -> GET` fallback from `server.odin` to `Router` (`server.odin`, `respond.odin`, `router.odin`)**: Keep `req.line.method == .Head` in `on_headers` (removing `Request.is_redirected_head` and `Server_Options.no_redirect_head_to_get`) so handlers and middleware see the real HTTP method, and fall back to the `.Get` route inside `Router` when no explicit `.Head` route matches.
 - [ ] **Testing, docs & package relocation**:
   - Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
