@@ -465,3 +465,68 @@ test_connection_detach :: proc(t: ^testing.T) {
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 }
+
+@(test)
+test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
+	Defer_Check :: struct {
+		ran:     bool,
+		matched: bool,
+	}
+
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	outer_buf: [1024]byte
+	outer_arena: mem.Arena
+	mem.arena_init(&outer_arena, outer_buf[:])
+	prev_temp := context.temp_allocator
+	context.temp_allocator = mem.arena_allocator(&outer_arena)
+	defer context.temp_allocator = prev_temp
+
+	run_check_defer :: proc(ctx: ^http.Ctx) {
+		chk := http.context_get(ctx, ^Defer_Check)^
+		c := http.connection_of_response(&ctx.res)
+		chk.ran     = true
+		chk.matched = context.temp_allocator.data == http.temp_allocator(c).data
+
+		scratch, err := make([]byte, 64, context.temp_allocator)
+		assert(err == nil && len(scratch) == 64)
+		assert(c.temp_arena.tail != nil)
+	}
+
+	// 1. connection_destroy binds context.temp_allocator = temp_allocator(c) for defers and reclaims blocks.
+	{
+		c := push_test_connection(t, &env)
+		chk: Defer_Check
+		http.context_add(&c.ctx, &chk)
+		http.response_defer(&c.ctx, run_check_defer)
+
+		http.connection_destroy(c)
+
+		testing.expect(t, chk.ran, "expected response_defer to run on connection_destroy")
+		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside connection_destroy defer")
+		testing.expect_value(t, outer_arena.offset, 0)
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+		testing.expect(t, env.thread.free_arenas[0] != nil, "expected arena blocks returned to thread freelist")
+	}
+
+	// 2. connection_detach binds context.temp_allocator = temp_allocator(c) for defers.
+	{
+		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(77), payload = "tail")
+		chk: Defer_Check
+		http.context_add(&c.ctx, &chk)
+		http.response_defer(&c.ctx, run_check_defer)
+
+		sock, buffered, derr := http.connection_detach(c, context.allocator)
+		defer delete(buffered)
+
+		testing.expect_value(t, derr, nil)
+		testing.expect_value(t, sock, nbio.TCP_Socket(77))
+		testing.expect_value(t, string(buffered), "tail")
+		testing.expect(t, chk.ran, "expected response_defer to run on connection_detach")
+		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside connection_detach defer")
+		testing.expect_value(t, outer_arena.offset, 0)
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+	}
+}

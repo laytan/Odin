@@ -318,6 +318,7 @@ scanner_pump :: proc(s: ^Scanner) {
 	}
 
 	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
+		context.temp_allocator = temp_allocator(s.c)
 		s.c.curr_recv = nil
 		if op.recv.err != nil {
 			log.warnf("http[t=%v][c=%v]: recv error=%v", td.id, s.c.socket, op.recv.err)

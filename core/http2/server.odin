@@ -283,6 +283,10 @@ _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 }
 
 _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
+	defer if context.temp_allocator.procedure == runtime.default_temp_allocator_proc {
+		runtime.default_temp_allocator_destroy(auto_cast context.temp_allocator.data)
+	}
+
 	thread.s = s
 	thread.id = id
 	td = thread
@@ -325,6 +329,7 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 		}
 
 		err := nbio.tick()
+		free_all(context.temp_allocator)
 		if err != nil {
 			log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
 			_server_thread_shutdown(thread)
@@ -365,7 +370,9 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 			break
 		}
 
-		if err := nbio.tick(); err != nil {
+		err := nbio.tick()
+		free_all(context.temp_allocator)
+		if err != nil {
 			log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
 			break
 		}
@@ -374,6 +381,7 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 	if err := nbio.tick(timeout = 0); err != nil {
 		log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
 	}
+	free_all(context.temp_allocator)
 
 	if thread.s.opts.thread_deinitializer != nil {
 		thread.s.opts.thread_deinitializer()
@@ -479,6 +487,7 @@ connection_close :: proc(c: ^Connection) {
 	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
+		context.temp_allocator = temp_allocator(c)
 		c.curr_recv = nil
 		c.req.progress.timeout -= since(c.scanner.last_recv_start)
 		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.req.progress.timeout)
@@ -503,9 +512,14 @@ _connection_release :: proc(c: ^Connection) {
 		c.scanner._pump_destroyed^ = true
 	}
 
-	#reverse for deferred in c.res._deferred {
-		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-		deferred(&c.ctx)
+	{
+		prev_temp := context.temp_allocator
+		context.temp_allocator = temp_allocator(c)
+		#reverse for deferred in c.res._deferred {
+			log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
+			deferred(&c.ctx)
+		}
+		context.temp_allocator = prev_temp
 	}
 	clear(&c.res._deferred)
 
@@ -1026,9 +1040,14 @@ _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 
 	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
 
-	#reverse for deferred in c.res._deferred {
-		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-		deferred(&c.ctx)
+	{
+		prev_temp := context.temp_allocator
+		context.temp_allocator = temp_allocator(c)
+		#reverse for deferred in c.res._deferred {
+			log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
+			deferred(&c.ctx)
+		}
+		context.temp_allocator = prev_temp
 	}
 	clear(&c.res._deferred)
 

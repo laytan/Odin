@@ -1681,3 +1681,217 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 	testing.expect(t, flags.sent_ran, "expected on_sent callback to run cleanly before teardown")
 	testing.expect(t, flags.defer_ran, "expected response_defer to run once on final teardown")
 }
+
+@(test)
+test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+
+	discard_write :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+		return size * nmemb
+	}
+
+	// 1. Verify response_defer binds temp_allocator(c) across keep-alive, file-path open/stat/error,
+	//    and connection_close paths, and verify _server_thread_serve resets temp_allocator per tick.
+	{
+		Counting_Temp_Allocator :: struct {
+			backing:        mem.Allocator,
+			free_all_count: int,
+		}
+
+		counting := Counting_Temp_Allocator{backing = context.temp_allocator}
+		counting_proc :: proc(
+			allocator_data: rawptr,
+			mode: mem.Allocator_Mode,
+			size, alignment: int,
+			old_memory: rawptr,
+			old_size: int,
+			location := #caller_location,
+		) -> ([]byte, mem.Allocator_Error) {
+			ct := (^Counting_Temp_Allocator)(allocator_data)
+			if mode == .Free_All {
+				ct.free_all_count += 1
+			}
+			return ct.backing.procedure(ct.backing.data, mode, size, alignment, old_memory, old_size, location)
+		}
+
+		prev_temp := context.temp_allocator
+		context.temp_allocator = mem.Allocator{procedure = counting_proc, data = &counting}
+		defer context.temp_allocator = prev_temp
+
+		Temp_Check_State :: struct {
+			defer_calls:   int,
+			defer_matched: int,
+		}
+		srv_state: Temp_Check_State
+
+		r: http.Router
+		defer http.router_destroy(r)
+
+		register_defer_check :: proc(ctx: ^http.Ctx, st: ^Temp_Check_State) {
+			http.context_add(ctx, st)
+			http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+				st := http.context_get(ctx, ^Temp_Check_State)^
+				c := http.connection_of_response(&ctx.res)
+				st.defer_calls += 1
+				if context.temp_allocator.data == http.temp_allocator(c).data {
+					st.defer_matched += 1
+				}
+				scratch, serr := make([]byte, 64, context.temp_allocator)
+				if serr == nil && len(scratch) == 64 {
+					scratch[0] = 1
+				}
+			})
+		}
+
+		http.route_get(&r, "/ok", http.Handler{
+			user_data = &srv_state,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
+				http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
+			},
+		})
+		http.route_get(&r, "/file", http.Handler{
+			user_data = &srv_state,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
+				http.respond_file_path(&ctx.res, "core/http2/README.md")
+			},
+		})
+		http.route_get(&r, "/missing", http.Handler{
+			user_data = &srv_state,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
+				http.respond_file_path(&ctx.res, "core/http2/__does_not_exist__")
+			},
+		})
+		http.route_get(&r, "/close", http.Handler{
+			user_data = &srv_state,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
+				http.set_header(&ctx.res, "connection", "close")
+				http.respond_bytes(&ctx.res, transmute([]byte)string("bye"))
+			},
+		})
+
+		s := http.make_server(http.Server_Options{
+			address      = nbio.IP4_Loopback,
+			port         = 0,
+			thread_count = 1,
+			handler      = http.router(&r),
+		})
+		setup_err := http._setup(&s)
+		if !testing.expect_value(t, setup_err, nil) {
+			http._destroy(&s)
+			return
+		}
+
+		Client_Ctx :: struct {
+			s:            ^http.Server,
+			endpoint_err: net.Socket_Info_Error,
+			handle_ok:    bool,
+			perform_errs: [4]curl.code,
+			statuses:     [4]c.long,
+		}
+		client_ctx := Client_Ctx{s = &s}
+
+		client_thread := thread.create_and_start_with_data(&client_ctx, proc(data: rawptr) {
+			ctx := (^Client_Ctx)(data)
+			defer http.server_shutdown(ctx.s)
+
+			endpoint, endpoint_err := nbio.bound_endpoint(ctx.s.socket)
+			ctx.endpoint_err = endpoint_err
+			if endpoint_err != nil {
+				return
+			}
+
+			handle := curl.easy_init()
+			ctx.handle_ok = handle != nil
+			if handle == nil {
+				return
+			}
+			defer curl.easy_cleanup(handle)
+
+			curl.easy_setopt(handle, .WRITEFUNCTION, discard_write)
+
+			paths := [4]string{"/ok", "/file", "/missing", "/close"}
+			for p, i in paths {
+				url := fmt.ctprintf("http://127.0.0.1:%d%s", endpoint.port, p)
+				curl.easy_setopt(handle, .URL, url)
+				ctx.perform_errs[i] = curl.easy_perform(handle)
+				curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.statuses[i])
+			}
+		})
+
+		http._serve(&s)
+		thread.join(client_thread)
+		thread.destroy(client_thread)
+		http._destroy(&s)
+
+		testing.expect_value(t, client_ctx.endpoint_err, nil)
+		testing.expect(t, client_ctx.handle_ok, "expected curl handle")
+		testing.expect_value(t, client_ctx.perform_errs, [4]curl.code{.E_OK, .E_OK, .E_OK, .E_OK})
+		testing.expect_value(t, client_ctx.statuses, [4]c.long{200, 200, 404, 200})
+		testing.expect_value(t, srv_state.defer_calls, 4)
+		testing.expect_value(t, srv_state.defer_matched, 4)
+		testing.expect(t, counting.free_all_count > 0, "expected _server_thread_serve to free_all context.temp_allocator across ticks")
+	}
+
+	// 2. Multi-threaded server cleans up spawned worker thread's default_temp_allocator cleanly on exit.
+	{
+		s2 := http.make_server(http.Server_Options{
+			address      = nbio.IP4_Loopback,
+			port         = 0,
+			thread_count = 2,
+			handler      = http.handler(proc(ctx: ^http.Ctx) {
+				http.set_header(&ctx.res, "connection", "close")
+				http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
+			}),
+		})
+		setup_err := http._setup(&s2)
+		if !testing.expect_value(t, setup_err, nil) {
+			http._destroy(&s2)
+			return
+		}
+
+		Client2_Ctx :: struct {
+			s:            ^http.Server,
+			endpoint_err: net.Socket_Info_Error,
+			perform_err:  curl.code,
+			status:       c.long,
+		}
+		client2 := Client2_Ctx{s = &s2}
+
+		client_thread := thread.create_and_start_with_data(&client2, proc(data: rawptr) {
+			ctx := (^Client2_Ctx)(data)
+			defer http.server_shutdown(ctx.s)
+
+			endpoint, endpoint_err := nbio.bound_endpoint(ctx.s.socket)
+			ctx.endpoint_err = endpoint_err
+			if endpoint_err != nil {
+				return
+			}
+
+			handle := curl.easy_init()
+			if handle == nil {
+				return
+			}
+			defer curl.easy_cleanup(handle)
+
+			url := fmt.ctprintf("http://127.0.0.1:%d/", endpoint.port)
+			curl.easy_setopt(handle, .URL, url)
+			curl.easy_setopt(handle, .WRITEFUNCTION, discard_write)
+			ctx.perform_err = curl.easy_perform(handle)
+			curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.status)
+		})
+
+		http._serve(&s2)
+		thread.join(client_thread)
+		thread.destroy(client_thread)
+		thread.join(s2.threads[1].thread)
+		http._destroy(&s2)
+
+		testing.expect_value(t, client2.endpoint_err, nil)
+		testing.expect_value(t, client2.perform_err, curl.code.E_OK)
+		testing.expect_value(t, client2.status, c.long(200))
+	}
+}

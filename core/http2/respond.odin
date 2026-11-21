@@ -717,8 +717,10 @@ _respond_handle :: proc(res: ^Response, file: nbio.Handle, redirect_if_dir: bool
 	nbio.stat_poly3(file, res, redirect_if_dir, mime, on_stat)
 
 	on_stat :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool, mime: Maybe(Mime_Type)) {
+		c := connection_of_response(res)
+		context.temp_allocator = temp_allocator(c)
+
 		if op.stat.err != nil {
-			c := connection_of_response(res)
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to stat\", err=%v", td.id, c.socket, op.stat.err)
 			res.status = .Not_Found
 			respond(res)
@@ -731,7 +733,6 @@ _respond_handle :: proc(res: ^Response, file: nbio.Handle, redirect_if_dir: bool
 		}
 
 		if op.stat.type != .Regular || op.stat.size <= 0 || op.stat.size > i64(max(int)) {
-			c := connection_of_response(res)
 			log.warnf("http[t=%v][c=%v]: msg=\"not a regular file, too big, or no size\", type=%v, size=%v", td.id, c.socket, op.stat.type, op.stat.size)
 			res.status = .Not_Found
 			respond(res)
@@ -767,8 +768,10 @@ _respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD, redire
 	nbio.open_poly2(file, res, redirect_if_dir, on_open, dir=dir)
 
 	on_open :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool) {
+		c := connection_of_response(res)
+		context.temp_allocator = temp_allocator(c)
+
 		if op.open.err != nil {
-			c := connection_of_response(res)
 			log.warnf("http[t=%v][c=%v]: msg=\"failed to open\", path=%q, err=%v", td.id, c.socket, op.open.path, op.open.err)
 			res.status = .Not_Found
 			respond(res)
