@@ -4,6 +4,7 @@ import "base:runtime"
 import "base:sanitizer"
 
 import "core:container/xar"
+import "core:log"
 import "core:mem"
 import "core:mem/virtual"
 import "core:nbio"
@@ -593,4 +594,150 @@ test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
 	free_all(http.temp_allocator(c))
 	testing.expect(t, c.scanner.buf == nil, "expected empty scanner buf cleared once curr_recv == nil")
 	testing.expect(t, c.temp_arena.tail == nil, "expected temp_arena freed once curr_recv == nil")
+}
+
+@(test)
+test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
+	make_oom_conn :: proc(t: ^testing.T, s: ^http.Server, thread: ^http.Server_Thread) -> ^http.Connection {
+		c, err := xar.push(&thread.connections, http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		})
+		testing.expect_value(t, err, nil)
+
+		c.transaction_arena.c = c
+		c.temp_arena.c        = c
+		c.scanner.c           = c
+		c.scanner.allocator   = &c.transaction_arena
+
+		tx_alloc := http.transaction_allocator(c)
+		c._vars.allocator         = tx_alloc
+		c.req.headers.allocator  = tx_alloc
+		c.res.headers.allocator  = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
+
+		c.req.quota = &s.opts.request_quota
+		http.progression_init(&c.req.progress, c.req.quota^)
+		c.res.quota = &s.opts.response_quota
+		http.progression_init(&c.res.progress, c.res.quota^)
+		return c
+	}
+
+	exhaust_backing :: proc(s: ^http.Server, thread: ^http.Server_Thread) {
+		http._server_thread_free_arenas_destroy(thread)
+		for {
+			_, aerr := virtual.arena_alloc(&s.temp_allocator_backing, 64, 8)
+			if aerr != nil {
+				break
+			}
+		}
+		for {
+			_, aerr := virtual.arena_alloc(&s.temp_allocator_backing, 1, 1)
+			if aerr != nil {
+				break
+			}
+		}
+	}
+
+	// 1. context_add, response_defer, mid-heading write_response_heading OOM, and send_heading teardown.
+	{
+		backing_buf: [24 * mem.Kilobyte]byte
+		s := http.make_server({})
+		testing.expect_value(t, virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:]), nil)
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		http.date_write(thread.date[:], time.now())
+		xar.init(&thread.connections, context.allocator)
+		defer xar.freelist_destroy(&thread.connections)
+
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := make_oom_conn(t, &s, &thread)
+		exhaust_backing(&s, &thread)
+
+		ptr, add_err := http.context_add(&c.ctx, int(42))
+		testing.expect_value(t, add_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect(t, ptr == nil, "expected nil pointer from context_add on OOM")
+		testing.expect_value(t, len(c._vars), 0)
+
+		def_err := http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {})
+		testing.expect_value(t, def_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, len(c.res._deferred), 0)
+
+		small_buf: [24]byte
+		small_arena: mem.Arena
+		mem.arena_init(&small_arena, small_buf[:])
+		c.res._buf.allocator = mem.arena_allocator(&small_arena)
+		c.res.status = .OK
+		c.res._state = .Handling
+
+		hdr_err := http.write_response_heading(&c.res)
+		testing.expect_value(t, hdr_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, len(c.res._buf), 0)
+
+		c.res._buf = {}
+		c.res._buf.allocator = http.transaction_allocator(c)
+		prev_logger := context.logger
+		context.logger = log.nil_logger()
+		http.send_heading(&c.res)
+		context.logger = prev_logger
+		testing.expect_value(t, active_connection_count(&thread), 0)
+	}
+
+	// 2. scanner_reset OOM, _scanner_free_all OOM fallback pinning, and scanner_pump OOM teardown.
+	{
+		backing_buf: [24 * mem.Kilobyte]byte
+		s := http.make_server({})
+		testing.expect_value(t, virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:]), nil)
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		http.date_write(thread.date[:], time.now())
+		xar.init(&thread.connections, context.allocator)
+		defer xar.freelist_destroy(&thread.connections)
+
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := make_oom_conn(t, &s, &thread)
+		c.scanner.allocator = &c.temp_arena
+
+		buf, buf_err := make([]byte, http.MULTIPLIER, http.temp_allocator(c))
+		testing.expect_value(t, buf_err, nil)
+		c.scanner.buf        = buf
+		c.scanner.read_head  = 0
+		c.scanner.write_head = copy(buf, "hello")
+		orig_block := c.temp_arena.tail
+
+		// Push an 8 KiB overflow block into temp_arena so free_all OOM fallback reclaims it.
+		overflow, ov_err := make([]byte, 5000, http.temp_allocator(c))
+		testing.expect_value(t, ov_err, nil)
+		overflow[0] = 1
+		testing.expect(t, c.temp_arena.tail != orig_block, "expected overflow block in temp_arena")
+
+		exhaust_backing(&s, &thread)
+
+		reset_err := http.scanner_reset(&c.scanner, c)
+		testing.expect_value(t, reset_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hello")
+
+		free_all(http.temp_allocator(c))
+		testing.expect(t, c.temp_arena.tail == orig_block, "expected _scanner_free_all OOM fallback to pin existing buf block")
+		testing.expect(t, thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+		testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer unpoisoned")
+		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hello")
+
+		http._server_thread_free_arenas_destroy(&thread)
+		c.res._state = .Handling
+		prev_logger := context.logger
+		context.logger = log.nil_logger()
+		http.scan_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
+		context.logger = prev_logger
+		testing.expect_value(t, active_connection_count(&thread), 0)
+	}
 }

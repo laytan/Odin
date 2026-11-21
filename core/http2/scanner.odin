@@ -40,7 +40,7 @@ Scanner :: struct {
 
 MULTIPLIER :: 512
 
-scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
+scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Error) {
 	is_pumping := s.is_pumping
 	pump_destroyed := s._pump_destroyed
 	to_copy := s.buf[s.read_head:s.write_head]
@@ -51,15 +51,19 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 			is_pumping      = is_pumping,
 			_pump_destroyed = pump_destroyed,
 		}
-		return
+		return nil
 	}
 
 	to_alloc := max(MULTIPLIER, len(to_copy))
 	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v, to_alloc=%v", td.id, c.socket, len(to_copy), to_alloc)
 
-	new_arena := _server_thread_get_free_arena(to_alloc)
-	new_buf, err := make([]byte, to_alloc, mem.arena_allocator(new_arena))
-	assert(err == nil)
+	new_arena := _server_thread_get_free_arena(to_alloc) or_return
+	new_buf: []byte
+	new_buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	if err != nil {
+		_server_thread_put_free_arena(new_arena)
+		return err
+	}
 	new_arena.last = raw_data(new_buf)
 	n := copy(new_buf, to_copy)
 
@@ -75,6 +79,46 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) {
 		is_pumping      = is_pumping,
 		_pump_destroyed = pump_destroyed,
 	}
+	return nil
+}
+
+@(private="file")
+_scanner_pin_buf_block :: proc(s: ^Scanner, a: ^Arena) -> bool {
+	if len(s.buf) == 0 {
+		return false
+	}
+
+	buf_ptr := uintptr(raw_data(s.buf))
+	buf_block: ^_Arena_Block
+	for block := a.tail; block != nil; block = block.prev {
+		block_start := uintptr(raw_data(block.data))
+		block_end   := block_start + uintptr(len(block.data))
+		if buf_ptr >= block_start && buf_ptr < block_end {
+			assert(buf_ptr + uintptr(len(s.buf)) <= block_end)
+			buf_block = block
+			break
+		}
+	}
+
+	if buf_block == nil {
+		return false
+	}
+
+	block := a.tail
+	a.tail = nil
+	for block != nil {
+		prev := block.prev
+		if block != buf_block {
+			_server_thread_put_free_arena(block)
+		}
+		block = prev
+	}
+
+	buf_block.prev   = nil
+	buf_block.offset = int(buf_ptr - uintptr(raw_data(buf_block.data))) + len(s.buf)
+	buf_block.last   = raw_data(s.buf)
+	a.tail = buf_block
+	return true
 }
 
 _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
@@ -85,43 +129,8 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 	// Never free, poison, or relocate s.buf while an nbio.recv holds a pointer into it.
 	// Reclaim all other blocks in `a` and rewind the pinned block's offset to the end of s.buf.
 	if s.c.curr_recv != nil {
-		if len(s.buf) == 0 {
-			return false
-		}
-
-		buf_ptr := uintptr(raw_data(s.buf))
-		buf_block: ^_Arena_Block
-		for block := a.tail; block != nil; block = block.prev {
-			block_start := uintptr(raw_data(block.data))
-			block_end   := block_start + uintptr(len(block.data))
-			if buf_ptr >= block_start && buf_ptr < block_end {
-				assert(buf_ptr + uintptr(len(s.buf)) <= block_end)
-				buf_block = block
-				break
-			}
-		}
-
-		if buf_block == nil {
-			return false
-		}
-
 		log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all (recv in flight, pinning buf block)\"", td.id, s.c.socket)
-
-		block := a.tail
-		a.tail = nil
-		for block != nil {
-			prev := block.prev
-			if block != buf_block {
-				_server_thread_put_free_arena(block)
-			}
-			block = prev
-		}
-
-		buf_block.prev   = nil
-		buf_block.offset = int(buf_ptr - uintptr(raw_data(buf_block.data))) + len(s.buf)
-		buf_block.last   = raw_data(s.buf)
-		a.tail = buf_block
-		return true
+		return _scanner_pin_buf_block(s, a)
 	}
 
 	to_copy := s.buf[s.read_head:s.write_head]
@@ -134,13 +143,21 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 		return false
 	}
 
-	new_arena := _server_thread_get_free_arena(to_alloc)
-	err: runtime.Allocator_Error
-	s.buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
-	assert(err == nil)
+	new_arena, arena_err := _server_thread_get_free_arena(to_alloc)
+	if arena_err != nil {
+		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", td.id, s.c.socket, arena_err)
+		return _scanner_pin_buf_block(s, a)
+	}
+	new_buf, err := make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	if err != nil {
+		_server_thread_put_free_arena(new_arena)
+		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", td.id, s.c.socket, err)
+		return _scanner_pin_buf_block(s, a)
+	}
+	s.buf          = new_buf
 	new_arena.last = raw_data(s.buf)
-	s.read_head  = 0
-	s.write_head = copy(s.buf, to_copy)
+	s.read_head    = 0
+	s.write_head   = copy(s.buf, to_copy)
 
 	arena_free_all(a)
 	a.tail = new_arena
@@ -266,10 +283,14 @@ scanner_pump :: proc(s: ^Scanner) {
 			if s.scan.allocator != s.allocator {
 				to_copy := s.buf[s.read_head+offset:s.write_head]
 
+				new_buf, err := make([]byte, max(len(to_copy), MULTIPLIER), arena_allocator(s.scan.allocator))
+				if err != nil {
+					log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator) OOM\", err=%v", td.id, s.c.socket, err)
+					invalid_request(s.c, .Internal_Server_Error)
+					return
+				}
 				s.allocator = s.scan.allocator
-				err: runtime.Allocator_Error
-				s.buf, err = make([]byte, max(len(to_copy), MULTIPLIER), arena_allocator(s.allocator))
-				assert(err == nil) // TODO: 
+				s.buf       = new_buf
 				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
 
 				s.read_head  = advance-offset
@@ -292,10 +313,14 @@ scanner_pump :: proc(s: ^Scanner) {
 				buf_left := s.buf[s.read_head:s.write_head]
 				new_size := max(MULTIPLIER, len(buf_left) + MULTIPLIER)
 
+				new_buf, err := make([]byte, new_size, arena_allocator(s.scan.allocator))
+				if err != nil {
+					log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator) OOM\", err=%v", td.id, s.c.socket, err)
+					invalid_request(s.c, .Internal_Server_Error)
+					return
+				}
 				s.allocator = s.scan.allocator
-				err: mem.Allocator_Error
-				s.buf, err = make([]byte, new_size, arena_allocator(s.allocator))
-				assert(err == nil) // TODO: err
+				s.buf       = new_buf
 				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
 
 				s.read_head  = 0
@@ -306,13 +331,18 @@ scanner_pump :: proc(s: ^Scanner) {
 				buf_left := s.buf[s.read_head:s.write_head]
 				new_size := max(MULTIPLIER, len(prev_buf) * 2)
 
-				err: mem.Allocator_Error
-				s.buf, err = _arena_block_resize_in_place(s.allocator != nil ? s.allocator.tail : nil, s.buf, new_size, 1, false)
+				resized, err := _arena_block_resize_in_place(s.allocator != nil ? s.allocator.tail : nil, s.buf, new_size, 1, false)
 				if err == nil {
+					s.buf = resized
 					log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
 				} else {
-					s.buf, err = make([]byte, new_size, arena_allocator(s.allocator))
-					assert(err == nil) // TODO: err
+					new_buf, alloc_err := make([]byte, new_size, arena_allocator(s.allocator))
+					if alloc_err != nil {
+						log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc OOM\", err=%v", td.id, s.c.socket, alloc_err)
+						invalid_request(s.c, .Internal_Server_Error)
+						return
+					}
+					s.buf = new_buf
 					log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
 
 					s.read_head  = 0
@@ -407,7 +437,12 @@ Body_Request :: struct {
 body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
 	ctx := context_of_request(req)
 	assert(context_get(ctx, Body_Request) == nil, "body already consumed", loc)
-	context_add(ctx, Body_Request{cb = cb})
+	if _, err := context_add(ctx, Body_Request{cb = cb}); err != nil {
+		c := connection_of_request(req)
+		log.errorf("http[t=%v][c=%v]: msg=\"body context_add OOM\", err=%v", td.id, c.socket, err)
+		invalid_request(c, .Internal_Server_Error)
+		return
+	}
 
 	if req.has_consumed_body {
 		_body_cb(req, nil, is_partial=false)

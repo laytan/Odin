@@ -394,3 +394,36 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 		testing.expect(t, mem.is_aligned(raw_data(def_bs), mem.DEFAULT_ALIGNMENT), "expected align == 0 to use DEFAULT_ALIGNMENT")
 	}
 }
+
+@(test)
+test_arena_oom_propagation :: proc(t: ^testing.T) {
+	backing_buf: [1024]byte
+	s: http.Server
+	err := virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:])
+	testing.expect_value(t, err, nil)
+
+	thread := http.Server_Thread{s = &s}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	blk, blk_err := http._server_thread_get_free_arena()
+	testing.expect_value(t, blk_err, mem.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, blk == nil, "expected nil block when backing is exhausted")
+
+	boot, boot_err := http.bootstrap_arena(nil)
+	testing.expect_value(t, boot_err, mem.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, boot == nil, "expected nil arena from bootstrap_arena on OOM")
+
+	a := http.get_arena(nil)
+	bs, alloc_err := http.arena_alloc(&a, 64, 8)
+	testing.expect_value(t, alloc_err, mem.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, bs == nil, "expected nil slice from arena_alloc on OOM")
+	testing.expect(t, a.tail == nil, "expected tail to remain nil on OOM")
+
+	rbs, resize_err := http.arena_resize(&a, nil, 64, 8)
+	testing.expect_value(t, resize_err, mem.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, rbs == nil, "expected nil slice from arena_resize on OOM")
+	testing.expect(t, a.tail == nil, "expected tail to remain nil on OOM")
+}

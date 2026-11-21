@@ -61,42 +61,42 @@ logged :: proc(next: ^Handler) -> Handler {
 			start: time.Time,
 		}
 
-		context_add(ctx, Logger_Ctx{now()})
+		if _, err := context_add(ctx, Logger_Ctx{now()}); err == nil {
+			response_defer(ctx, proc(ctx: ^Ctx) {
+				c          := connection_of_context(ctx)
+				logger_ctx := context_get(ctx, Logger_Ctx)
 
-		response_defer(ctx, proc(ctx: ^Ctx) {
-			c          := connection_of_context(ctx)
-			logger_ctx := context_get(ctx, Logger_Ctx)
-
-			if context.logger.procedure == runtime.default_logger_proc {
-				date: [DATE_LENGTH]byte
-				date_write(date[:], now())
-				fmt.eprintfln(
-					"[%v] %v - %v %q %v.%v -> %v %m %v",
-					string(date[:]),
-					net.endpoint_to_string(c.remote, transaction_allocator(c)),
-					method_string(ctx.req.line.method),
-					ctx.req.line.target,
-					ctx.req.line.version.major,
-					ctx.req.line.version.minor,
-					strings.trim_right_space(status_string(ctx.res.status)),
-					ctx.res.sent,
-					since(logger_ctx.start),
-				)
-			} else {
-				context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
-				log.infof(
-					"%v - %v %q %v.%v -> %v %m %v",
-					net.address_to_string(c.remote.address, transaction_allocator(c)),
-					method_string(ctx.req.line.method),
-					ctx.req.line.target,
-					ctx.req.line.version.major,
-					ctx.req.line.version.minor,
-					strings.trim_right_space(status_string(ctx.res.status)),
-					ctx.res.sent,
-					since(logger_ctx.start),
-				)
-			}
-		})
+				if context.logger.procedure == runtime.default_logger_proc {
+					date: [DATE_LENGTH]byte
+					date_write(date[:], now())
+					fmt.eprintfln(
+						"[%v] %v - %v %q %v.%v -> %v %m %v",
+						string(date[:]),
+						net.endpoint_to_string(c.remote, transaction_allocator(c)),
+						method_string(ctx.req.line.method),
+						ctx.req.line.target,
+						ctx.req.line.version.major,
+						ctx.req.line.version.minor,
+						strings.trim_right_space(status_string(ctx.res.status)),
+						ctx.res.sent,
+						since(logger_ctx.start),
+					)
+				} else {
+					context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
+					log.infof(
+						"%v - %v %q %v.%v -> %v %m %v",
+						net.address_to_string(c.remote.address, transaction_allocator(c)),
+						method_string(ctx.req.line.method),
+						ctx.req.line.target,
+						ctx.req.line.version.major,
+						ctx.req.line.version.minor,
+						strings.trim_right_space(status_string(ctx.res.status)),
+						ctx.res.sent,
+						since(logger_ctx.start),
+					)
+				}
+			})
+		}
 
 		h.next.handle(h.next, ctx)
 	}
@@ -112,9 +112,13 @@ body_parser :: proc(next: ^Handler) -> Handler {
 		next   = next,
 		handle = proc(h: ^Handler, ctx: ^Ctx) {
 			assert(context_get(ctx, Body_Parser_State) == nil)
-			s := context_add(ctx, Body_Parser_State{
+			s, add_err := context_add(ctx, Body_Parser_State{
 				h = h,
 			})
+			if add_err != nil {
+				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+				return
+			}
 			s.parts.allocator = transaction_allocator(ctx)
 
 			body(&ctx.req, on_body)
@@ -125,7 +129,10 @@ body_parser :: proc(next: ^Handler) -> Handler {
 				assert(s != nil)
 
 				if len(body) > 0 {
-					append(&s.parts, body)
+					if _, app_err := append(&s.parts, body); app_err != nil {
+						invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+						return
+					}
 				}
 
 				if !is_partial {

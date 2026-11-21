@@ -21,12 +21,16 @@ get_arena :: proc(c: ^Connection) -> Arena {
 	}
 }
 
-bootstrap_arena :: proc(c: ^Connection) -> ^Arena {
-	block := _server_thread_get_free_arena()
-	arena := new(Arena, mem.arena_allocator(block))
+bootstrap_arena :: proc(c: ^Connection) -> (arena: ^Arena, err: mem.Allocator_Error) #optional_allocator_error {
+	block := _server_thread_get_free_arena() or_return
+	arena, err = new(Arena, mem.arena_allocator(block))
+	if err != nil {
+		_server_thread_put_free_arena(block)
+		return nil, err
+	}
 	arena.c    = c
 	arena.tail = block
-	return arena
+	return arena, nil
 }
 
 arena_allocator :: proc(a: ^Arena) -> mem.Allocator {
@@ -40,11 +44,11 @@ arena_alloc :: proc(a: ^Arena, size, align: int, should_zero := true) -> (bs: []
 	if align < 0 || !math.is_power_of_two(align) { return nil, .Invalid_Argument }
 
 	arena := a.tail
-	if arena == nil { arena = _push_arena_block(a, size, align) }
+	if arena == nil { arena = _push_arena_block(a, size, align) or_return }
 
 	bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, align)
 	if err == .Out_Of_Memory {
-		arena = _push_arena_block(a, size, align)
+		arena = _push_arena_block(a, size, align) or_return
 		bs, err = mem.arena_alloc_bytes_non_zeroed(arena, size, align)
 	}
 
@@ -162,27 +166,27 @@ _arena_block_reset :: proc(arena: ^_Arena_Block) -> ^_Arena_Block {
 	return arena
 }
 
-_server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> ^_Arena_Block {
+_server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) #optional_allocator_error {
 	align     := align == 0 ? mem.DEFAULT_ALIGNMENT : align
 	align_pad := max(0, align - align_of(_Arena_Block))
 	size      := max(ARENA_SIZE, size_of(_Arena_Block) + align_pad + size)
 	bucket    := _bucket_for(size)
 
 	if bucket == BUCKETS-1 {
-		arena := td.free_arenas[bucket]
-		if arena != nil {
-			if len(arena.data) >= size {
-				td.free_arenas[bucket] = arena.prev
-				return _arena_block_reset(arena)
+		blk := td.free_arenas[bucket]
+		if blk != nil {
+			if len(blk.data) >= size {
+				td.free_arenas[bucket] = blk.prev
+				return _arena_block_reset(blk), nil
 			}
 
-			for prev := arena.prev; prev != nil; arena, prev = prev, prev.prev {
+			for prev := blk.prev; prev != nil; blk, prev = prev, prev.prev {
 				if len(prev.data) < size {
 					continue
 				}
 
-				arena.prev = prev.prev
-				return _arena_block_reset(prev)
+				blk.prev = prev.prev
+				return _arena_block_reset(prev), nil
 			}
 		}
 	} else {
@@ -193,17 +197,16 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 			}
 
 			td.free_arenas[check] = free_arena.prev
-			return _arena_block_reset(free_arena)
+			return _arena_block_reset(free_arena), nil
 		}
 
 		size = 1 << (uint(bucket) + SHIFT)
 	}
 
-	data, err := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), align_of(_Arena_Block))
-	assert(err == nil) // TODO: Handle
+	data := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), align_of(_Arena_Block)) or_return
 	sanitizer.address_unpoison(data)
 
-	arena := (^_Arena_Block)(raw_data(data))
+	arena = (^_Arena_Block)(raw_data(data))
 	arena^ = {
 		base = {
 			data   = data,
@@ -211,7 +214,7 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 		},
 	}
 
-	return arena
+	return arena, nil
 }
 
 _server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
@@ -231,11 +234,11 @@ _server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
 	}
 }
 
-_push_arena_block :: proc(a: ^Arena, size, align: int) -> ^_Arena_Block {
-	arena := _server_thread_get_free_arena(size, align == 0 ? mem.DEFAULT_ALIGNMENT : align)
+_push_arena_block :: proc(a: ^Arena, size, align: int) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) {
+	arena = _server_thread_get_free_arena(size, align == 0 ? mem.DEFAULT_ALIGNMENT : align) or_return
 	arena.prev = a.tail
 	a.tail = arena
-	return arena
+	return arena, nil
 }
 
 _arena_allocator :: proc(a: ^Arena, $FREE_ALL: bool) -> mem.Allocator {

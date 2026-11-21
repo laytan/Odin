@@ -194,13 +194,16 @@ _Context_Var :: struct {
 	val: rawptr,
 }
 
-context_add :: proc(ctx: ^Ctx, var: $T) -> ^T {
-	val := new_clone(var, transaction_allocator(ctx))
-	append(&ctx._vars, _Context_Var{
+context_add :: proc(ctx: ^Ctx, var: $T) -> (val: ^T, err: runtime.Allocator_Error) #optional_allocator_error {
+	val = new_clone(var, transaction_allocator(ctx)) or_return
+	_, err = append(&ctx._vars, _Context_Var{
 		id  = T,
 		val = val,
 	})
-	return val
+	if err != nil {
+		return nil, err
+	}
+	return val, nil
 }
 
 context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
@@ -255,8 +258,9 @@ response_set_quota :: proc(res: ^Response, quota: ^Quota) {
 	progression_set_quota(&res.progress, quota^)
 }
 
-response_defer :: proc(ctx: ^Ctx, deffered: proc(^Ctx)) {
-	append(&ctx.res._deferred, deffered)
+response_defer :: proc(ctx: ^Ctx, deferred: proc(^Ctx)) -> runtime.Allocator_Error {
+	_, err := append(&ctx.res._deferred, deferred)
+	return err
 }
 
 @(thread_local)
@@ -584,7 +588,11 @@ _serve_connection :: proc(c: ^Connection) {
 	c.temp_arena.c        = c
 	c.transaction_arena.c = c
 
-	scanner_reset(&c.scanner, c)
+	if err := scanner_reset(&c.scanner, c); err != nil {
+		log.errorf("http[t=%v][c=%v]: msg=\"scanner_reset allocation error\", err=%v", td.id, c.socket, err)
+		connection_destroy(c)
+		return
+	}
 	temp_allocator_destroy(c)
 
 	c.ctx = {}
@@ -878,11 +886,16 @@ header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_
 
 // PERF: we could read the next request after "consume body" is done already, while response is still being sent
 
-write_response_heading :: proc(res: ^Response) {
-	// if len(res._buf) > 0 {
-	// 	return
-	// }
+write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error) {
+	append_str :: #force_inline proc(buf: ^[dynamic]byte, s: string) -> runtime.Allocator_Error {
+		_, aerr := append(buf, s)
+		return aerr
+	}
+
 	assert(len(res._buf) == 0)
+	defer if err != nil {
+		clear(&res._buf)
+	}
 
 	c := connection_of_response(res)
 
@@ -896,49 +909,52 @@ write_response_heading :: proc(res: ^Response) {
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
 	reserve_size    := MIN + (AVG_HEADER_SIZE * headers_len(res.headers))
-	reserve(&res._buf, reserve_size)
+	_ = reserve(&res._buf, reserve_size)
 
-	append(&res._buf, "HTTP/1.1 ")
+	append_str(&res._buf, "HTTP/1.1 ") or_return
 
 	status := status_string(res.status)
 	if len(status) > 0 {
-		append(&res._buf, status)
+		append_str(&res._buf, status) or_return
 	} else {
-		_, err := io.write_int(w, int(res.status))
-		assert(err == nil) // TODO
-		append(&res._buf, " \r\n")
+		if _, write_err := io.write_int(w, int(res.status)); write_err != nil {
+			return .Out_Of_Memory
+		}
+		append_str(&res._buf, " \r\n") or_return
 	}
 
 	// Per RFC 9910 6.6.1 a Date header must be added in 2xx, 3xx, 4xx responses.
 	if !headers_has(res.headers, "date") {
-		append(&res._buf, "Date: ")
-		append(&res._buf, ..td.date[:])
-		append(&res._buf, "\r\n")
+		append_str(&res._buf, "Date: ") or_return
+		if _, aerr := append(&res._buf, ..td.date[:]); aerr != nil {
+			return aerr
+		}
+		append_str(&res._buf, "\r\n") or_return
 	}
 
 	if response_needs_content_length(c) {
 		if !headers_has(res.headers, "content-length") && !headers_has(res.headers, "transfer-encoding") {
-			append(&res._buf, "Content-Length: 0\r\n")
+			append_str(&res._buf, "Content-Length: 0\r\n") or_return
 		}
 	}
 
 	if response_must_close(c) && !headers_has(res.headers, "connection") {
-		append(&res._buf, "Connection: close\r\n")
+		append_str(&res._buf, "Connection: close\r\n") or_return
 	}
 
 	for i := 0; header, value in headers_iter(&res.headers, &i) {
 		headers_valid_key(header) or_continue
-		append(&res._buf, header)
-		append(&res._buf, ": ")
+		append_str(&res._buf, header) or_return
+		append_str(&res._buf, ": ") or_return
 
 		for value := value; part in header_value_iterator(&value) {
-			append(&res._buf, part)
+			append_str(&res._buf, part) or_return
 		}
 
-		append(&res._buf, "\r\n")
+		append_str(&res._buf, "\r\n") or_return
 	}
 
-	append(&res._buf, "\r\n")
+	append_str(&res._buf, "\r\n") or_return
 
 	// A server MUST NOT send a Content-Length header field in any response
 	// with a status code of 1xx (Informational) or 204 (No Content).  A
@@ -955,6 +971,8 @@ write_response_heading :: proc(res: ^Response) {
 
 		return true
 	}
+
+	return nil
 }
 
 Send_Error :: nbio.Send_File_Error

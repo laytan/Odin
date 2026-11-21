@@ -84,7 +84,12 @@ router :: proc(router: ^Router) -> Handler {
 
 		match := context_get(ctx, _Route_Match)
 		if match == nil {
-			match = context_add(ctx, _Route_Match{})
+			add_err: runtime.Allocator_Error
+			match, add_err = context_add(ctx, _Route_Match{})
+			if add_err != nil {
+				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+				return
+			}
 			match.vars.allocator = transaction_allocator(ctx)
 
 			without_query, _, _ := strings.partition(rline.target, "?")

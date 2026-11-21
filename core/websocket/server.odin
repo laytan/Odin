@@ -449,9 +449,17 @@ _detach_scanner_arena :: proc(c: ^http.Connection, ws: ^_Connection) -> (old: ^h
 	if c.scanner.allocator == old {
 		unread := c.scanner.buf[c.scanner.read_head:c.scanner.write_head]
 		if len(unread) > 0 {
-			new_arena := http.bootstrap_arena(c)
+			new_arena, arena_err := http.bootstrap_arena(c)
+			if arena_err != nil {
+				http.connection_close(c)
+				return nil
+			}
 			new_buf, alloc_err := make([]byte, max(len(unread), http.MULTIPLIER), http.arena_allocator(new_arena))
-			assert(alloc_err == nil)
+			if alloc_err != nil {
+				http.arena_destroy(new_arena)
+				http.connection_close(c)
+				return nil
+			}
 			c.scanner.buf        = new_buf
 			c.scanner.read_head  = 0
 			c.scanner.write_head = copy(new_buf, unread)
@@ -526,7 +534,12 @@ _serve_connection :: proc(c: ^http.Connection) {
 
 	scan :: proc(c: ^http.Connection, ws: ^_Connection, n: int, cb: http.Scan_Cb) {
 		if ws.arena == nil {
-			ws.arena = http.bootstrap_arena(c)
+			arena, err := http.bootstrap_arena(c)
+			if err != nil {
+				http.connection_close(c)
+				return
+			}
+			ws.arena = arena
 		}
 		http._scan_bytes(&c.scanner, n, ws.arena, cb)
 	}

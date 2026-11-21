@@ -133,16 +133,16 @@ wants_body :: proc(req: ^Request) -> bool {
 	return req.line.method != .Head
 }
 
-set_header :: proc(res: ^Response, key, value: string, loc := #caller_location) {
-	headers_set(&res.headers, key, value, loc)
+set_header :: proc(res: ^Response, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
+	return headers_set(&res.headers, key, value, loc)
 }
 
 get_header :: proc(req: ^Request, key: string) -> (string, bool) {
 	return headers_get(req.headers, key)
 }
 
-set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) {
-	b := strings.builder_make(0, 64, transaction_allocator(connection_of_response(res)))
+set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) -> mem.Allocator_Error {
+	b := strings.builder_make(0, 64, transaction_allocator(connection_of_response(res))) or_return
 	strings.write_string(&b, c.name)
 	strings.write_byte(&b, '=')
 	strings.write_string(&b, c.value)
@@ -188,7 +188,7 @@ set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) {
 		strings.write_string(&b, "; HttpOnly")
 	}
 
-	headers_add(&res.headers, "Set-Cookie", strings.to_string(b), loc)
+	return headers_add(&res.headers, "Set-Cookie", strings.to_string(b), loc)
 }
 
 // TODO: prob want some configuration for the range handling, if it should be done at all, how to handle if-range
@@ -204,7 +204,12 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 
 	{
 		last_modified_buf, err := make([]byte, DATE_LENGTH, allocator)
-		assert(err == nil) // TODO: err
+		if err != nil {
+			log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Last-Modified buffer\", err=%v", td.id, c.socket, err)
+			res._state = .Error
+			_check_send_done(c, skip_graceful = true)
+			return
+		}
 		date_write(last_modified_buf, last_modified)
 		set_header(res, "Last-Modified", string(last_modified_buf))
 	}
@@ -262,6 +267,9 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 		return
 	case .None, .Handling:
 		send_heading(res)
+		if res._state == .Error {
+			return
+		}
 	case .Sending:
 	case .Sent:
 		panic("response has been sent already")
@@ -298,7 +306,12 @@ send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	case .Error:
 		return
 	case .None, .Handling:
-		write_response_heading(res)
+		if err := write_response_heading(res); err != nil {
+			log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
+			res._state = .Error
+			_check_send_done(c, skip_graceful = true)
+			return
+		}
 		res._state = .Sending
 		if !wants_body(&c.req) || len(bufs) == 0 {
 			_do_send(res, {res._buf[:]}, on_sent)
@@ -389,10 +402,24 @@ _begin_chunked :: proc(res: ^Response) -> ^_Chunked_State {
 	assert(!headers_has(res.headers, "content-length"), "cannot use chunked encoding with Content-Length header")
 
 	if !headers_has(res.headers, "transfer-encoding") {
-		set_header(res, "Transfer-Encoding", "chunked")
+		if err := set_header(res, "Transfer-Encoding", "chunked"); err != nil {
+			c := connection_of_response(res)
+			log.errorf("http[t=%v][c=%v]: msg=\"failed to set Transfer-Encoding header\", err=%v", td.id, c.socket, err)
+			res._state = .Error
+			_check_send_done(c, skip_graceful = true)
+			return nil
+		}
 	}
 
-	return context_add(ctx, _Chunked_State{})
+	state, err := context_add(ctx, _Chunked_State{})
+	if err != nil {
+		c := connection_of_response(res)
+		log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Chunked_State\", err=%v", td.id, c.socket, err)
+		res._state = .Error
+		_check_send_done(c, skip_graceful = true)
+		return nil
+	}
+	return state
 }
 
 _write_chunk_header :: proc(dst: []byte, size: int) -> []byte {
@@ -500,6 +527,9 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 
 	c := connection_of_response(res)
 	state := _begin_chunked(res)
+	if state == nil {
+		return
+	}
 
 	total, non_empty := 0, 0
 	for buf in bufs {
@@ -683,7 +713,13 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 }
 
 send_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
-	write_response_heading(res)
+	if err := write_response_heading(res); err != nil {
+		c := connection_of_response(res)
+		log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
+		res._state = .Error
+		_check_send_done(c, skip_graceful = true)
+		return
+	}
 
 	res._state = .Sending
 	_do_send(res, {res._buf[:]}, on_sent)
@@ -788,11 +824,23 @@ _respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD, redire
 		ctx := context_of_response(res)
 
 		Respond_File_Path_Handle :: distinct nbio.Handle
-		context_add(ctx, Respond_File_Path_Handle(op.open.handle))
-		response_defer(ctx, proc(ctx: ^Ctx) {
+		if _, add_err := context_add(ctx, Respond_File_Path_Handle(op.open.handle)); add_err != nil {
+			log.errorf("http[t=%v][c=%v]: msg=\"failed to record opened file handle\", err=%v", td.id, c.socket, add_err)
+			nbio.close(op.open.handle)
+			res._state = .Error
+			_check_send_done(c, skip_graceful = true)
+			return
+		}
+		if def_err := response_defer(ctx, proc(ctx: ^Ctx) {
 			handle := context_get(ctx, Respond_File_Path_Handle)
 			nbio.close(nbio.Handle(handle^))
-		})
+		}); def_err != nil {
+			log.errorf("http[t=%v][c=%v]: msg=\"failed to register file handle defer\", err=%v", td.id, c.socket, def_err)
+			nbio.close(op.open.handle)
+			res._state = .Error
+			_check_send_done(c, skip_graceful = true)
+			return
+		}
 
 		_respond_handle(res, op.open.handle, redirect_if_dir, mime)
 	}
