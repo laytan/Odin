@@ -8,6 +8,7 @@ import "core:fmt"
 import "core:net"
 import "core:nbio"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 import "core:time"
@@ -482,4 +483,203 @@ test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
 	testing.expect_value(t, srv_state.custom_head_method, http.Method.Head)
 	testing.expect_value(t, srv_state.custom_get_count, 1)
 	testing.expect_value(t, srv_state.custom_get_method, http.Method.Get)
+}
+
+Shutdown_Server_State :: struct {
+	slow_started: sync.One_Shot_Event,
+}
+
+Shutdown_Test_Context :: struct {
+	server:              ^http.Server,
+	srv:                 ^Shutdown_Server_State,
+	endpoint_err:        net.Socket_Info_Error,
+	idle_sock:           net.TCP_Socket,
+	idle_dial_err:       net.Network_Error,
+	stalled_sock:        net.TCP_Socket,
+	stalled_dial_err:    net.Network_Error,
+	stalled_send_err:    net.TCP_Send_Error,
+	handle_ok:           bool,
+	ping_setopt_ok:      bool,
+	ping_perform_err:    curl.code,
+	ping_getinfo_err:    curl.code,
+	ping_res:            Curl_Response,
+	slow_setopt_ok:      bool,
+	slow_perform_err:    curl.code,
+	slow_getinfo_err:    curl.code,
+	slow_saw_conn_close: bool,
+	slow_res:            Curl_Response,
+	shutdown_started_at: time.Time,
+}
+
+curl_check_conn_close_header :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+	context = runtime.default_context()
+
+	real_size := int(size) * int(nmemb)
+	line := strings.trim_space(string(contents[:real_size]))
+	if strings.equal_fold(line, "connection: close") {
+		saw_close := (^bool)(userp)
+		saw_close^ = true
+	}
+
+	return c.size_t(real_size)
+}
+
+@(test)
+test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	srv_state: Shutdown_Server_State
+
+	r: http.Router
+	defer http.router_destroy(r)
+	http.route_get(&r, "/ping", proc(ctx: ^http.Ctx) {
+		http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
+	})
+	http.route_get(&r, "/slow", http.Handler{
+		user_data = &srv_state,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Shutdown_Server_State)(h.user_data)
+			sync.one_shot_event_signal(&st.slow_started)
+			nbio.timeout_poly(40 * time.Millisecond, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
+				http.respond_bytes(&ctx.res, transmute([]byte)string("slow-ok"))
+			})
+		},
+	})
+
+	server := http.make_server(http.Server_Options{
+		address          = nbio.IP4_Loopback,
+		port             = 18084,
+		thread_count     = 1,
+		shutdown_timeout = 200 * time.Millisecond,
+		handler          = http.router(&r),
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	ctx := Shutdown_Test_Context{
+		server = &server,
+		srv    = &srv_state,
+	}
+	defer delete(ctx.ping_res.body)
+	defer delete(ctx.slow_res.body)
+	defer if ctx.idle_sock != 0 { net.close(ctx.idle_sock) }
+	defer if ctx.stalled_sock != 0 { net.close(ctx.stalled_sock) }
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Shutdown_Test_Context)(data)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			http.server_shutdown(ctx.server)
+			return
+		}
+
+		ctx.idle_sock, ctx.idle_dial_err = net.dial_tcp(endpoint)
+		if ctx.idle_dial_err != nil {
+			http.server_shutdown(ctx.server)
+			return
+		}
+
+		ctx.stalled_sock, ctx.stalled_dial_err = net.dial_tcp(endpoint)
+		if ctx.stalled_dial_err != nil {
+			http.server_shutdown(ctx.server)
+			return
+		}
+		_, ctx.stalled_send_err = net.send_tcp(ctx.stalled_sock, transmute([]byte)string("GET /stalled"))
+		if ctx.stalled_send_err != nil {
+			http.server_shutdown(ctx.server)
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			http.server_shutdown(ctx.server)
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		ping_url := fmt.ctprintf("http://127.0.0.1:%d/ping", endpoint.port)
+		ctx.ping_setopt_ok =
+			curl.easy_setopt(handle, .URL, ping_url) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.ping_res) == .E_OK
+		if !ctx.ping_setopt_ok {
+			http.server_shutdown(ctx.server)
+			return
+		}
+
+		ctx.ping_perform_err = curl.easy_perform(handle)
+		ctx.ping_getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.ping_res.status)
+
+		shutdown_thread := thread.create_and_start_with_data(ctx, proc(data: rawptr) {
+			ctx := (^Shutdown_Test_Context)(data)
+			sync.one_shot_event_wait(&ctx.srv.slow_started)
+			ctx.shutdown_started_at = time.now()
+			http.server_shutdown(ctx.server)
+		})
+		defer {
+			sync.one_shot_event_signal(&ctx.srv.slow_started)
+			thread.join(shutdown_thread)
+			thread.destroy(shutdown_thread)
+		}
+
+		slow_url := fmt.ctprintf("http://127.0.0.1:%d/slow", endpoint.port)
+		ctx.slow_setopt_ok =
+			curl.easy_setopt(handle, .URL, slow_url) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.slow_res) == .E_OK &&
+			curl.easy_setopt(handle, .HEADERFUNCTION, curl_check_conn_close_header) == .E_OK &&
+			curl.easy_setopt(handle, .HEADERDATA, &ctx.slow_saw_conn_close) == .E_OK
+		if !ctx.slow_setopt_ok {
+			return
+		}
+
+		ctx.slow_perform_err = curl.easy_perform(handle)
+		ctx.slow_getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.slow_res.status)
+	})
+
+	http._serve(&server)
+	serve_finished_at := time.now()
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect_value(t, ctx.idle_dial_err, nil) { return }
+	if !testing.expect_value(t, ctx.stalled_dial_err, nil) { return }
+	if !testing.expect_value(t, ctx.stalled_send_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+
+	// 1. Warmup request on keep-alive connection succeeds.
+	testing.expect(t, ctx.ping_setopt_ok, "ping: setopt failed")
+	testing.expectf(t, ctx.ping_perform_err == .E_OK, "ping: curl failed: %s", curl.easy_strerror(ctx.ping_perform_err))
+	testing.expect_value(t, ctx.ping_getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.ping_res.status, c.long(200))
+	testing.expect_value(t, string(ctx.ping_res.body[:]), "pong")
+
+	// 2. In-flight request overlapping with server_shutdown finishes with 200, Connection: close, and body.
+	testing.expect(t, ctx.slow_setopt_ok, "slow: setopt failed")
+	testing.expectf(t, ctx.slow_perform_err == .E_OK, "slow: curl failed: %s", curl.easy_strerror(ctx.slow_perform_err))
+	testing.expect_value(t, ctx.slow_getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.slow_res.status, c.long(200))
+	testing.expect_value(t, string(ctx.slow_res.body[:]), "slow-ok")
+	testing.expect(t, ctx.slow_saw_conn_close, "expected in-flight response during shutdown to include Connection: close")
+
+	// 3. Stalled active connection keeps shutdown waiting until shutdown_timeout expires, without hanging.
+	shutdown_elapsed := time.diff(ctx.shutdown_started_at, serve_finished_at)
+	testing.expect(t, shutdown_elapsed >= 150 * time.Millisecond, "expected shutdown to wait for shutdown_timeout on stalled active connection")
+	testing.expect(t, shutdown_elapsed < 2 * time.Second, "expected shutdown not to hang past shutdown_timeout")
+
+	// 4. Both idle and stalled connections were closed by the server.
+	eof_buf: [16]byte
+	idle_n, idle_recv_err := net.recv_tcp(ctx.idle_sock, eof_buf[:])
+	testing.expect(t, idle_n == 0 || idle_recv_err != nil, "expected idle socket to be closed by server shutdown")
+	stalled_n, stalled_recv_err := net.recv_tcp(ctx.stalled_sock, eof_buf[:])
+	testing.expect(t, stalled_n == 0 || stalled_recv_err != nil, "expected stalled socket to be closed after shutdown_timeout")
 }

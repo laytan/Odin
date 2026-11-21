@@ -46,13 +46,16 @@ Server_Options :: struct {
 	body_quota:     Quota,
 	response_quota: Quota,
 	// Maximum number of request headers (and chunked trailers) accepted. Zero defaults to DEFAULT_MAX_HEADERS; negative disables the limit.
-	max_headers:    int,
+	max_headers:      int,
+	// Maximum time to wait for active connections to finish during server_shutdown. Zero defaults to DEFAULT_SHUTDOWN_TIMEOUT; negative disables the timeout.
+	shutdown_timeout: time.Duration,
 }
 
-DEFAULT_BACKLOG     :: 1000
-DEFAULT_ADDRESS     :: nbio.IP4_Loopback
-DEFAULT_PORT        :: 8080
-DEFAULT_MAX_HEADERS :: 128
+DEFAULT_BACKLOG          :: 1000
+DEFAULT_ADDRESS          :: nbio.IP4_Loopback
+DEFAULT_PORT             :: 8080
+DEFAULT_MAX_HEADERS      :: 128
+DEFAULT_SHUTDOWN_TIMEOUT :: 10 * time.Second
 
 General_Error :: enum i32 {
 	Allocation_Failed,
@@ -86,6 +89,9 @@ _server_options_apply_defaults :: proc(opts: ^Server_Options) {
 	}
 	if opts.max_headers == 0 {
 		opts.max_headers = DEFAULT_MAX_HEADERS
+	}
+	if opts.shutdown_timeout == 0 {
+		opts.shutdown_timeout = DEFAULT_SHUTDOWN_TIMEOUT
 	}
 }
 
@@ -344,6 +350,18 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 	}
 }
 
+_is_scanning_request_line :: proc(c: ^Connection) -> bool {
+	return c.res.state == .None && c.req.line.version == {}
+}
+
+_is_scanning_headers :: proc(c: ^Connection) -> bool {
+	return c.res.state == .None && c.req.line.version != {}
+}
+
+_connection_is_idle :: proc(c: ^Connection) -> bool {
+	return _is_scanning_request_line(c) && c.scanner.read_head == c.scanner.write_head
+}
+
 _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 	nbio.remove(thread.curr_accept)
 	thread.curr_accept = nil
@@ -353,9 +371,42 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 
 	iter := xar.freelist_iterator(&thread.connections)
 	for c, _ in xar.freelist_iterate_by_ptr(&iter) {
-		nbio.remove(c.curr_recv)
-		c.curr_recv = nil
+		if _connection_is_idle(c) {
+			connection_destroy(c)
+		}
+	}
+
+	timed_out := false
+	shutdown_timer: ^nbio.Operation
+	if thread.s.opts.shutdown_timeout > 0 {
+		shutdown_timer = nbio.timeout_poly(thread.s.opts.shutdown_timeout, &timed_out, proc(_: ^nbio.Operation, timed_out: ^bool) {
+			timed_out^ = true
+		})
+	}
+
+	for !timed_out {
+		iter = xar.freelist_iterator(&thread.connections)
+		if _, _, has_active := xar.freelist_iterate_by_ptr(&iter); !has_active {
+			break
+		}
+
+		if err := nbio.tick(); err != nil {
+			log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
+			break
+		}
+	}
+
+	if !timed_out {
+		nbio.remove(shutdown_timer)
+	}
+
+	iter = xar.freelist_iterator(&thread.connections)
+	for c, _ in xar.freelist_iterate_by_ptr(&iter) {
 		connection_destroy(c)
+	}
+
+	if err := nbio.tick(timeout = 0); err != nil {
+		log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
 	}
 
 	sync.mutex_lock(&thread.s.shutdown_mutex)
@@ -422,6 +473,10 @@ connection_close :: proc(c: ^Connection) {
 	if c.res.sends > 0 {
 		return
 	}
+	if c.socket == {} {
+		connection_destroy(c)
+		return
+	}
 
 	log.debugf("http[t=%v][c=%v]: msg=\"shutdown\"", td.id, c.socket)
 	nbio.shutdown(c.socket, .Send)
@@ -479,6 +534,7 @@ connection_destroy :: proc(c: ^Connection) {
 	c.curr_recv = nil
 	if c.socket != {} {
 		nbio.close(c.socket)
+		c.socket = {}
 	}
 	_connection_release(c)
 }
@@ -987,6 +1043,10 @@ response_has_close :: proc(res: ^Response) -> bool {
 
 // Determines if the connection needs to be closed after sending the response.
 response_must_close :: proc(c: ^Connection) -> bool {
+	if sync.atomic_load(&td.s.shutting_down) {
+		return true
+	}
+
 	// If the request we are responding to indicates it is closing the connection, close our side too.
 	if connection, ok := headers_get(c.req.headers, "connection"); ok && _headers_eq(connection, "close") {
 		return true

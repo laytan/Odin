@@ -77,8 +77,9 @@
   - Added optional `on_sent: Send_Callback = nil` to `send_response_heading`/`send_heading`, made `on_send` bind `context.temp_allocator`, guard `sent > 0`, and check `.Sent`/`.Error` before invoking `on_sent` (allowing safe in-callback detach/destroy), made `connection_close` wait for `res.sends > 0`, and marked `101 Switching Protocols` as non-keep-alive in `_check_send_done`.
   - Updated `scanner_pump` to bind `context.temp_allocator`, guard re-entrant destroy/detach via `_pump_destroyed`, split allocator-switch reallocation from in-place resize, and guard `a == nil` in `_arena_block_resize_in_place`.
   - Added `connection_detach(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` sharing `_connection_release` with `connection_destroy`, and updated `core/websocket/server.odin` onto `send_heading`, `request_set_quota`/`response_set_quota`, `response_defer`, and `connection_close`.
-- [ ] **Graceful server shutdown (`server.odin`)**:
-  - On `server_shutdown(&s)`, cancel `curr_accept` and `date_update` timers, immediately close idle connections, mark active connections to close after their current response finishes, and tick the event loop until active connections drain or a `shutdown_timeout` expires.
+- [x] **Graceful server shutdown (`server.odin`)**:
+  - Added `Server_Options.shutdown_timeout` (defaulting to `DEFAULT_SHUTDOWN_TIMEOUT`, `10 * time.Second`; `< 0` disables timeout) and updated `response_must_close` to return `true` when `s.shutting_down` is set.
+  - Updated `_server_thread_shutdown` to cancel `curr_accept` and `curr_date`, immediately destroy idle connections (`_connection_is_idle`), tick the event loop until active connections drain or `shutdown_timeout` expires, destroy any remaining connections, and flush pending operations before releasing the event loop.
 - [ ] **Per-thread teardown callback (`server.odin`)**: Add `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
 - [ ] **Response `Set-Cookie` support**:
   - Port `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` and add `set_cookie(res: ^Response, cookie: Cookie)` (serializing into `res.headers` via `headers_add(&res.headers, "Set-Cookie", ...)`).

@@ -283,9 +283,10 @@ scanner_pump :: proc(s: ^Scanner) {
 
 			max := s.c.req.progress.max
 			if max == 0 {
-				if s.c.res.state == .None {
-					status := s.c.req.line.version == {} ? Status.URI_Too_Long : Status.Request_Header_Fields_Too_Large
-					invalid_request(s.c, status)
+				if _is_scanning_request_line(s.c) {
+					invalid_request(s.c, .URI_Too_Long)
+				} else if _is_scanning_headers(s.c) {
+					invalid_request(s.c, .Request_Header_Fields_Too_Large)
 				} else {
 					invalid_request(s.c, .Payload_Too_Large)
 				}
