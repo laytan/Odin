@@ -485,8 +485,12 @@ test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
 	testing.expect_value(t, srv_state.custom_get_method, http.Method.Get)
 }
 
+@(thread_local, private="file")
+_tls_test_buf: []byte
+
 Shutdown_Server_State :: struct {
-	slow_started: sync.One_Shot_Event,
+	slow_started:    sync.One_Shot_Event,
+	handler_saw_tls: bool,
 }
 
 Shutdown_Test_Context :: struct {
@@ -539,6 +543,7 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 		user_data = &srv_state,
 		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
 			st := (^Shutdown_Server_State)(h.user_data)
+			st.handler_saw_tls = len(_tls_test_buf) >= 6 && string(_tls_test_buf[:6]) == "tls-ok"
 			sync.one_shot_event_signal(&st.slow_started)
 			nbio.timeout_poly(40 * time.Millisecond, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
 				http.respond_bytes(&ctx.res, transmute([]byte)string("slow-ok"))
@@ -547,11 +552,19 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	})
 
 	server := http.make_server(http.Server_Options{
-		address          = nbio.IP4_Loopback,
-		port             = 18084,
-		thread_count     = 1,
-		shutdown_timeout = 200 * time.Millisecond,
-		handler          = http.router(&r),
+		address              = nbio.IP4_Loopback,
+		port                 = 18084,
+		thread_count         = 1,
+		shutdown_timeout     = 200 * time.Millisecond,
+		handler              = http.router(&r),
+		thread_initializer = proc() {
+			_tls_test_buf = make([]byte, 16)
+			copy(_tls_test_buf, "tls-ok")
+		},
+		thread_deinitializer = proc() {
+			delete(_tls_test_buf)
+			_tls_test_buf = nil
+		},
 	})
 
 	setup_err := http._setup(&server)
@@ -682,4 +695,8 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	testing.expect(t, idle_n == 0 || idle_recv_err != nil, "expected idle socket to be closed by server shutdown")
 	stalled_n, stalled_recv_err := net.recv_tcp(ctx.stalled_sock, eof_buf[:])
 	testing.expect(t, stalled_n == 0 || stalled_recv_err != nil, "expected stalled socket to be closed after shutdown_timeout")
+
+	// 5. thread_initializer ran before request handling and thread_deinitializer cleaned up on shutdown.
+	testing.expect(t, srv_state.handler_saw_tls, "expected handler to see thread_initializer state")
+	testing.expect(t, _tls_test_buf == nil, "expected thread_deinitializer to clean up thread-local state")
 }

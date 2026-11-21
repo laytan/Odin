@@ -80,7 +80,7 @@
 - [x] **Graceful server shutdown (`server.odin`)**:
   - Added `Server_Options.shutdown_timeout` (defaulting to `DEFAULT_SHUTDOWN_TIMEOUT`, `10 * time.Second`; `< 0` disables timeout) and updated `response_must_close` to return `true` when `s.shutting_down` is set.
   - Updated `_server_thread_shutdown` to cancel `curr_accept` and `curr_date`, immediately destroy idle connections (`_connection_is_idle`), tick the event loop until active connections drain or `shutdown_timeout` expires, destroy any remaining connections, and flush pending operations before releasing the event loop.
-- [ ] **Per-thread teardown callback (`server.odin`)**: Add `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
+- [x] **Per-thread teardown callback (`server.odin`)**: Added `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
 - [ ] **Response `Set-Cookie` support**:
   - Port `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` and add `set_cookie(res: ^Response, cookie: Cookie)` (serializing into `res.headers` via `headers_add(&res.headers, "Set-Cookie", ...)`).
 - [ ] **MIME / `Content-Type` & static file/directory serving**:

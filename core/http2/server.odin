@@ -35,12 +35,13 @@ Server :: struct {
 Endpoint :: nbio.Endpoint
 
 Server_Options :: struct {
-	address:      nbio.Address,
-	port:         int,
-	backlog:      int,
-	thread_count: int,
-	handler:      Handler,
-	thread_initializer: proc(),
+	address:              nbio.Address,
+	port:                 int,
+	backlog:              int,
+	thread_count:         int,
+	handler:              Handler,
+	thread_initializer:   proc(),
+	thread_deinitializer: proc(),
 
 	request_quota:  Quota,
 	body_quota:     Quota,
@@ -407,6 +408,10 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 
 	if err := nbio.tick(timeout = 0); err != nil {
 		log.errorf("http[t=%v]: msg=\"event loop tick error\" err=%v", thread.id, err)
+	}
+
+	if thread.s.opts.thread_deinitializer != nil {
+		thread.s.opts.thread_deinitializer()
 	}
 
 	sync.mutex_lock(&thread.s.shutdown_mutex)
