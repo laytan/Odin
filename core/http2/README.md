@@ -87,9 +87,9 @@
   - [x] Ported `Mime_Type`, `mime_from_extension` (returning `(Mime_Type, bool)` so unknown extensions omit `Content-Type`), and `mime_to_content_type` into `http.odin`.
   - [x] Automatically set `Content-Type` in `respond_file` and `respond_file_path` when not already set and extension is recognized.
   - [x] Added `respond_file_content` and `respond_dir` (with `_resolve_dir_path` traversal/backslash/NUL/prefix protection, `index.html` resolution, `dir` handle forwarding, and regular-file enforcement in `respond_handle`).
-- [ ] **Convenience responders & chunked streaming**:
-  - Add `respond_plain`, `respond_html`, `respond_json`.
-  - Add chunked response streaming (`send_chunk` / chunked `io.Writer` integrated with `res.sends` tracking).
+- [x] **Convenience responders & chunked streaming**:
+  - Added `respond_plain`, `respond_html`, and `respond_json` (marshaling onto `transaction_arena` and respecting pre-set `Content-Type`).
+  - Added `send_chunk` and `Chunked_Writer` (`chunked_writer_init`) backed by `Ctx` state (`_Chunked_State`), detaching sent buffers cleanly and emitting `"0\r\n\r\n"` in `respond` with `res.sends` tracking.
 - [x] **Lazy `100 Continue` in `body()` (`server.odin`, `respond.odin`, `scanner.odin`)**: Moved automatic `100 Continue` sending from `on_headers` into `_body_length`/`_body_chunked` via `_maybe_send_continue` (skipping when the request is rejected before/during `body()`, has no body, or already has buffered body bytes in the scanner), made `send_continue` package-private, and removed `Server_Options.no_auto_expect_continue`.
 - [x] **Move `HEAD -> GET` fallback from `server.odin` to `Router` (`server.odin`, `respond.odin`, `handlers.odin`, `router.odin`)**: Preserved `req.line.method == .Head` in `on_headers` (removing `Request.is_redirected_head`, `Server_Options.no_redirect_head_to_get`, and `logged` ternary checks), simplified `wants_body`, initialized `match.vars.allocator` on the transaction arena, and fell back to `router.routes[.Get]` when no explicit `.Head` route matches before checking `router.all`.
 - [ ] **Accept error recovery & allocation-failure socket cleanup (`server.odin`)**:

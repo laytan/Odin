@@ -4,7 +4,9 @@ package tests_http2
 import "base:runtime"
 
 import c "core:c/libc"
+import "core:encoding/json"
 import "core:fmt"
+import "core:io"
 import "core:net"
 import "core:nbio"
 import "core:os"
@@ -919,4 +921,211 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(ctx.dir_root_redirect.location_buf[:ctx.dir_root_redirect.location_len]), "/static/?v=1")
 	testing.expect_value(t, string(ctx.dir_sub_redirect.location_buf[:ctx.dir_sub_redirect.location_len]),   "/old/dns/")
 	testing.expect(t, len(ctx.license.response.body) > 0, "expected non-empty LICENSE file body")
+}
+
+@(test)
+test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	Json_Payload :: struct {
+		msg:   string `json:"msg"`,
+		count: int    `json:"count"`,
+	}
+
+	Chunk_Chain_State :: struct {
+		step: int,
+	}
+
+	on_chunk_chain :: proc(c: ^http.Connection, err: http.Send_Error) {
+		if err != nil { return }
+		st := http.context_get(&c.ctx, Chunk_Chain_State)
+		st.step += 1
+		switch st.step {
+		case 1:
+			http.send_chunk(&c.res, {nil, transmute([]byte)string("two-")})
+			http.send_chunk(&c.res, {transmute([]byte)string("three")}, on_chunk_chain)
+		case 2:
+			http.respond(&c.res)
+		}
+	}
+
+	r: http.Router
+	defer http.router_destroy(r)
+	http.route_get(&r, "/plain", proc(ctx: ^http.Ctx) {
+		http.respond_plain(&ctx.res, "hello plain")
+	})
+	http.route_get(&r, "/html", proc(ctx: ^http.Ctx) {
+		http.respond_html(&ctx.res, "<h1>hello</h1>")
+	})
+	http.route_get(&r, "/json", proc(ctx: ^http.Ctx) {
+		if err := http.respond_json(&ctx.res, Json_Payload{msg = "ok", count = 3}); err != nil {
+			ctx.res.status = .Internal_Server_Error
+			http.respond_plain(&ctx.res, "marshal error")
+		}
+	})
+	http.route_get(&r, "/json-err", proc(ctx: ^http.Ctx) {
+		bad := proc() {}
+		if err := http.respond_json(&ctx.res, bad); err != nil {
+			ctx.res.status = .Internal_Server_Error
+			http.respond_plain(&ctx.res, "marshal error")
+		}
+	})
+	http.route_get(&r, "/chunks", proc(ctx: ^http.Ctx) {
+		http.context_add(ctx, Chunk_Chain_State{})
+		http.send_chunk(&ctx.res, {transmute([]byte)string("one-")}, on_chunk_chain)
+	})
+	http.route_get(&r, "/writer", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "Content-Type", "application/x-ndjson")
+		cw: http.Chunked_Writer
+		w := http.chunked_writer_init(&cw, &ctx.res, chunk_size = 8)
+		defer io.close(w)
+
+		fmt.wprintln(w, "line1")
+		io.flush(w)
+		opt: json.Marshal_Options
+		json.marshal_to_writer(w, Json_Payload{msg = "stream", count = 7}, &opt)
+	})
+	http.route_get(&r, "/writer-unbuffered", proc(ctx: ^http.Ctx) {
+		cw: http.Chunked_Writer
+		w := http.chunked_writer_init(&cw, &ctx.res, chunk_size = 0)
+		defer io.close(w)
+
+		io.write_string(w, "alpha-")
+		io.write_string(w, "beta")
+	})
+	http.route_get(&r, "/writer-empty", proc(ctx: ^http.Ctx) {
+		cw: http.Chunked_Writer
+		w := http.chunked_writer_init(&cw, &ctx.res)
+		io.close(w)
+	})
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = 18086,
+		thread_count = 1,
+		handler      = http.router(&r),
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Respond_Helpers_Context :: struct {
+		server:            ^http.Server,
+		endpoint_err:      net.Socket_Info_Error,
+		handle_ok:         bool,
+		plain:             File_Case_Result,
+		html:              File_Case_Result,
+		json_get:          File_Case_Result,
+		json_head:         File_Case_Result,
+		json_err:          File_Case_Result,
+		chunks:            File_Case_Result,
+		writer:            File_Case_Result,
+		writer_unbuffered: File_Case_Result,
+		writer_empty:      File_Case_Result,
+		writer_head:       File_Case_Result,
+		after_keepalive:   File_Case_Result,
+	}
+
+	ctx := Respond_Helpers_Context{server = &server}
+	defer delete(ctx.plain.response.body)
+	defer delete(ctx.html.response.body)
+	defer delete(ctx.json_get.response.body)
+	defer delete(ctx.json_head.response.body)
+	defer delete(ctx.json_err.response.body)
+	defer delete(ctx.chunks.response.body)
+	defer delete(ctx.writer.response.body)
+	defer delete(ctx.writer_unbuffered.response.body)
+	defer delete(ctx.writer_empty.response.body)
+	defer delete(ctx.writer_head.response.body)
+	defer delete(ctx.after_keepalive.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Respond_Helpers_Context)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		do_req :: proc(handle: ^curl.CURL, port: int, path: string, is_head: bool, res: ^File_Case_Result) {
+			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
+			method_ok := curl.easy_setopt(handle, .NOBODY, c.long(1)) == .E_OK if is_head else (
+				curl.easy_setopt(handle, .NOBODY, c.long(0)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPGET, c.long(1)) == .E_OK
+			)
+			res.setopt_ok = method_ok &&
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK
+			if !res.setopt_ok {
+				return
+			}
+
+			res.perform_err = curl.easy_perform(handle)
+			res.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.response.status)
+			ct: cstring
+			res.ct_err = curl.easy_getinfo(handle, .CONTENT_TYPE, &ct)
+			if ct != nil {
+				res.has_content_type = true
+				res.content_type_len = copy(res.content_type_buf[:], string(ct))
+			}
+		}
+
+		do_req(handle, endpoint.port, "/plain",             false, &ctx.plain)
+		do_req(handle, endpoint.port, "/html",              false, &ctx.html)
+		do_req(handle, endpoint.port, "/json",              false, &ctx.json_get)
+		do_req(handle, endpoint.port, "/json",              true,  &ctx.json_head)
+		do_req(handle, endpoint.port, "/json-err",          false, &ctx.json_err)
+		do_req(handle, endpoint.port, "/chunks",            false, &ctx.chunks)
+		do_req(handle, endpoint.port, "/writer",            false, &ctx.writer)
+		do_req(handle, endpoint.port, "/writer-unbuffered", false, &ctx.writer_unbuffered)
+		do_req(handle, endpoint.port, "/writer-empty",      false, &ctx.writer_empty)
+		do_req(handle, endpoint.port, "/writer",            true,  &ctx.writer_head)
+		do_req(handle, endpoint.port, "/plain",             false, &ctx.after_keepalive)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+
+	check :: proc(t: ^testing.T, name: string, res: ^File_Case_Result, expect_status: c.long, expect_has_ct: bool, expect_ct: string, expect_body: string) {
+		testing.expectf(t, res.setopt_ok, "%s: setopt failed", name)
+		testing.expectf(t, res.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(res.perform_err))
+		testing.expect_value(t, res.getinfo_err, curl.code.E_OK)
+		testing.expect_value(t, res.ct_err, curl.code.E_OK)
+		testing.expect_value(t, res.response.status, expect_status)
+		testing.expect_value(t, res.has_content_type, expect_has_ct)
+		if expect_has_ct {
+			testing.expect_value(t, string(res.content_type_buf[:res.content_type_len]), expect_ct)
+		}
+		testing.expect_value(t, string(res.response.body[:]), expect_body)
+	}
+
+	check(t, "plain",             &ctx.plain,             200, true,  "text/plain",           "hello plain")
+	check(t, "html",              &ctx.html,              200, true,  "text/html",            "<h1>hello</h1>")
+	check(t, "json_get",          &ctx.json_get,          200, true,  "application/json",     `{"msg":"ok","count":3}`)
+	check(t, "json_head",         &ctx.json_head,         200, true,  "application/json",     "")
+	check(t, "json_err",          &ctx.json_err,          500, true,  "text/plain",           "marshal error")
+	check(t, "chunks",            &ctx.chunks,            200, false, "",                     "one-two-three")
+	check(t, "writer",            &ctx.writer,            200, true,  "application/x-ndjson", "line1\n" + `{"msg":"stream","count":7}`)
+	check(t, "writer_unbuffered", &ctx.writer_unbuffered, 200, false, "",                     "alpha-beta")
+	check(t, "writer_empty",      &ctx.writer_empty,      200, false, "",                     "")
+	check(t, "writer_head",       &ctx.writer_head,       200, true,  "application/x-ndjson", "")
+	check(t, "after_keepalive",   &ctx.after_keepalive,   200, true,  "text/plain",           "hello plain")
 }

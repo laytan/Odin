@@ -1,6 +1,8 @@
 package test_core_net_http
 
+import "core:encoding/json"
 import "core:fmt"
+import "core:io"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -477,5 +479,145 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		http.respond_file_content(&c.res, "LICENSE", transmute([]byte)string("MIT"))
 		_, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, !has_ct)
+	}
+}
+
+@(test)
+test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	// 1. respond_plain sets Content-Type: text/plain and Content-Length.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.respond_plain(&c.res, "hello world")
+		ct, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, has_ct)
+		testing.expect_value(t, ct, "text/plain")
+		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 11\r\n"), "expected Content-Length: 11")
+	}
+
+	// 2. respond_html sets Content-Type: text/html and preserves pre-set Content-Type.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.respond_html(&c.res, "<p>hi</p>")
+		ct, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, has_ct)
+		testing.expect_value(t, ct, "text/html")
+		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 9\r\n"), "expected Content-Length: 9")
+	}
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.set_header(&c.res, "Content-Type", "application/xhtml+xml")
+		http.respond_html(&c.res, "<p>hi</p>")
+		ct, _ := http.headers_get(c.res.headers, "content-type")
+		testing.expect_value(t, ct, "application/xhtml+xml")
+	}
+
+	// 3. respond_json sets Content-Type: application/json and Content-Length, preserves HEAD Content-Length.
+	{
+		Payload :: struct {
+			name: string `json:"name"`,
+			n:    int    `json:"n"`,
+		}
+
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.req.line.method  = .Head
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		err := http.respond_json(&c.res, Payload{name = "odin", n = 42})
+		testing.expect_value(t, err, nil)
+		ct, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, has_ct)
+		testing.expect_value(t, ct, "application/json")
+		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 22\r\n"), "expected Content-Length: 22")
+	}
+
+	// 4. respond_json returns error cleanly before touching headers or response buffer.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		bad := proc() {}
+		err := http.respond_json(&c.res, bad)
+		testing.expect_value(t, err, json.Marshal_Error(json.Marshal_Data_Error.Unsupported_Type))
+		testing.expect(t, c.res.state == .Handling, "expected state to remain .Handling on marshal error")
+		testing.expect_value(t, len(c.res.buf), 0)
+		_, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, !has_ct)
+	}
+
+	// 5. _write_chunk_header formats hex length + CRLF cleanly.
+	{
+		buf: [20]byte
+		testing.expect_value(t, string(http._write_chunk_header(buf[:], 1)),    "1\r\n")
+		testing.expect_value(t, string(http._write_chunk_header(buf[:], 15)),   "f\r\n")
+		testing.expect_value(t, string(http._write_chunk_header(buf[:], 255)),  "ff\r\n")
+		testing.expect_value(t, string(http._write_chunk_header(buf[:], 4096)), "1000\r\n")
+	}
+
+	// 6. chunked_writer_init sets Transfer-Encoding: chunked lazily without sending headers,
+	//    buffers writes below chunk_size, and returns .Closed after io.destroy.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		cw: http.Chunked_Writer
+		w := http.chunked_writer_init(&cw, &c.res, chunk_size = 8)
+
+		te, has_te := http.headers_get(c.res.headers, "transfer-encoding")
+		testing.expect(t, has_te)
+		testing.expect_value(t, te, "chunked")
+		testing.expect(t, c.res.state == .Handling, "expected headers not to flush on init")
+		testing.expect_value(t, len(c.res.buf), 0)
+
+		n, werr := io.write_string(w, "hi!")
+		testing.expect_value(t, werr, io.Error.None)
+		testing.expect_value(t, n, 3)
+		testing.expect_value(t, string(cw.buf[:]), "hi!")
+		testing.expect(t, c.res.state == .Handling, "expected buffered write not to flush headers")
+		testing.expect_value(t, len(c.res.buf), 0)
+
+		// Destroy flushes remaining buffered bytes and marks the writer closed.
+		derr := io.destroy(w)
+		testing.expect_value(t, derr, io.Error.None)
+		testing.expect(t, cw.ended)
+		testing.expect(t, strings.contains(string(c.res.buf[:]), "Transfer-Encoding: chunked\r\n"), "expected Transfer-Encoding: chunked")
+		testing.expect(t, !strings.contains(string(c.res.buf[:]), "Content-Length:"), "unexpected Content-Length in chunked response")
+
+		n2, werr2 := io.write_string(w, "after")
+		testing.expect_value(t, werr2, io.Error.Closed)
+		testing.expect_value(t, n2, 0)
 	}
 }
