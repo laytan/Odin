@@ -104,7 +104,7 @@
   - **Recycle `ws.arena` on `Ping`/`Pong` control frames**: Added `_recycle_arena_if_idle` preserving any pipelined unread scanner bytes before destroying `ws.arena` on `Ping` (after copying payload into recycled `_Pong_Buf`) and `Pong` when `len(ws.frames) == 0`.
   - **Enforce `GET` method in `_prepare_upgrade`**: Rejected non-`GET` methods (`405 Method Not Allowed` with `Allow: GET`) and non-`HTTP/1.1` versions (`400 Bad Request`) per RFC 6455 §4.2.1.
 - [ ] **Testing, docs & package relocation**:
-  - Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
-  - Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
-  - Rewrite usage examples and overview into `doc.odin`.
-  - Move `core/http2` into `core/net/http`.
+  - [ ] Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
+  - [x] Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
+  - [ ] Rewrite usage examples and overview into `doc.odin`.
+  - [ ] Move `core/http2` into `core/net/http`.
