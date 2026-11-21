@@ -2,14 +2,13 @@
 package http
 
 import "base:intrinsics"
+import "base:runtime"
 
 import "core:nbio"
 import "core:os"
 import "core:log"
 import "core:time"
 import "core:strings"
-
-// TODO: respond_file_content
 
 set_content_length_header :: proc(res: ^Response, length: int, loc := #caller_location) {
 	if length <= 0 { return }
@@ -420,10 +419,34 @@ send_response_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
 	_do_send(res, {res.buf[:]}, on_sent)
 }
 
-respond_handle :: proc(res: ^Response, file: nbio.Handle) {
-	nbio.stat_poly(file, res, on_stat)
+@(private="file")
+_redirect_to_trailing_slash :: proc(res: ^Response) {
+	c := connection_of_response(res)
+	allocator := transaction_allocator(c)
+	path_part, qmark, query_part := strings.partition(c.req.line.target, "?")
+	trimmed_lead := strings.trim_left(path_part, "/")
 
-	on_stat :: proc(op: ^nbio.Operation, res: ^Response) {
+	b := strings.builder_make(0, len(c.req.line.target) + 2, allocator)
+	strings.write_byte(&b, '/')
+	strings.write_string(&b, trimmed_lead)
+	if len(trimmed_lead) > 0 {
+		strings.write_byte(&b, '/')
+	}
+	if qmark != "" {
+		strings.write_byte(&b, '?')
+		strings.write_string(&b, query_part)
+	}
+
+	res.status = .Temporary_Redirect
+	set_header(res, "Location", strings.to_string(b))
+	respond(res)
+}
+
+@(private="file")
+_respond_handle :: proc(res: ^Response, file: nbio.Handle, redirect_if_dir: bool, mime: Maybe(Mime_Type) = nil) {
+	nbio.stat_poly3(file, res, redirect_if_dir, mime, on_stat)
+
+	on_stat :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool, mime: Maybe(Mime_Type)) {
 		if op.stat.err != nil {
 			c := connection_of_response(res)
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to stat\", err=%v", td.id, c.socket, op.stat.err)
@@ -432,33 +455,48 @@ respond_handle :: proc(res: ^Response, file: nbio.Handle) {
 			return
 		}
 
-		if op.stat.size <= 0 || op.stat.size > i64(max(int)) {
+		if op.stat.type == .Directory && redirect_if_dir {
+			_redirect_to_trailing_slash(res)
+			return
+		}
+
+		if op.stat.type != .Regular || op.stat.size <= 0 || op.stat.size > i64(max(int)) {
 			c := connection_of_response(res)
-			log.errorf("http[t=%v][c=%v]: msg=\"file too big or no size\", type=%v, size=%v", td.id, c.socket, op.stat.type, op.stat.size)
+			log.warnf("http[t=%v][c=%v]: msg=\"not a regular file, too big, or no size\", type=%v, size=%v", td.id, c.socket, op.stat.type, op.stat.size)
 			res.status = .Not_Found
 			respond(res)
 			return
+		}
+
+		if m, ok := mime.?; ok && !headers_has(res.headers, "content-type") {
+			set_header(res, "Content-Type", mime_to_content_type(m))
 		}
 
 		_respond_handle_with_size(res, op.stat.handle, int(op.stat.size), op.stat.last_modified)
 	}
 }
 
+respond_handle :: proc(res: ^Response, file: nbio.Handle) {
+	_respond_handle(res, file, redirect_if_dir = false)
+}
+
 respond_file :: proc(res: ^Response, file: ^os.File) -> nbio.Association_Error {
 	handle := nbio.associate_handle(os.fd(file)) or_return
+	mime: Maybe(Mime_Type)
 	if !headers_has(res.headers, "content-type") {
-		if mime, ok := mime_from_extension(os.name(file)); ok {
-			set_header(res, "Content-Type", mime_to_content_type(mime))
+		if m, ok := mime_from_extension(os.name(file)); ok {
+			mime = m
 		}
 	}
-	respond_handle(res, handle)
+	_respond_handle(res, handle, redirect_if_dir = false, mime = mime)
 	return nil
 }
 
-respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
-	nbio.open_poly(file, res, on_open, dir=dir)
+@(private="file")
+_respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD, redirect_if_dir := false) {
+	nbio.open_poly2(file, res, redirect_if_dir, on_open, dir=dir)
 
-	on_open :: proc(op: ^nbio.Operation, res: ^Response) {
+	on_open :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool) {
 		if op.open.err != nil {
 			c := connection_of_response(res)
 			log.warnf("http[t=%v][c=%v]: msg=\"failed to open\", path=%q, err=%v", td.id, c.socket, op.open.path, op.open.err)
@@ -467,13 +505,13 @@ respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 			return
 		}
 
+		mime: Maybe(Mime_Type)
 		if !headers_has(res.headers, "content-type") {
-			if mime, ok := mime_from_extension(op.open.path); ok {
-				set_header(res, "Content-Type", mime_to_content_type(mime))
+			if m, ok := mime_from_extension(op.open.path); ok {
+				mime = m
 			}
 		}
 
-		// TODO: Should respond_file_path take ctx?
 		ctx := context_of_response(res)
 
 		Respond_File_Path_Handle :: distinct nbio.Handle
@@ -483,6 +521,99 @@ respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 			nbio.close(nbio.Handle(handle^))
 		})
 
-		respond_handle(res, op.open.handle)
+		_respond_handle(res, op.open.handle, redirect_if_dir, mime)
 	}
+}
+
+respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
+	_respond_file_path(res, file, dir = dir, redirect_if_dir = false)
+}
+
+/*
+Responds with the given content, automatically setting `Content-Type` from `file`'s extension if not already set.
+Useful when serving files embedded at compile time with `#load(path)`.
+*/
+respond_file_content :: proc(res: ^Response, file: string, content: []byte) {
+	if !headers_has(res.headers, "content-type") {
+		if mime, ok := mime_from_extension(file); ok {
+			set_header(res, "Content-Type", mime_to_content_type(mime))
+		}
+	}
+	respond_bytes(res, content)
+}
+
+_resolve_dir_path :: proc(target, path: string, allocator: runtime.Allocator) -> (resolved: string, is_dir_redirect: bool, ok: bool) {
+	if path == "" {
+		return "", true, true
+	}
+	if path[0] != '/' {
+		return
+	}
+
+	rel := path[1:]
+
+	// Reject decoded ASCII control characters (including NUL/CR/LF) and DEL,
+	// backslashes (Windows path separators), and colons (drive letters / NTFS alternate data streams).
+	for b in transmute([]byte)rel {
+		if b < 0x20 || b == 0x7f || b == '\\' || b == ':' {
+			return
+		}
+	}
+
+	rem := rel
+	for seg in strings.split_iterator(&rem, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return
+		}
+	}
+
+	clean_target := strings.trim_prefix(strings.trim_right(target, "/"), "./")
+	if clean_target == "." {
+		clean_target = ""
+	}
+	wants_index := len(rel) == 0 || rel[len(rel)-1] == '/'
+
+	b := strings.builder_make(0, len(clean_target) + 1 + len(rel) + len("index.html"), allocator)
+	if clean_target != "" {
+		strings.write_string(&b, clean_target)
+		strings.write_byte(&b, '/')
+	}
+	strings.write_string(&b, rel)
+	if wants_index {
+		strings.write_string(&b, "index.html")
+	}
+
+	return strings.to_string(b), false, true
+}
+
+/*
+Serves a static file from `target` (optionally relative to `dir`) for the already percent-decoded request `path`
+(such as `route_suffix(ctx)` from a wildcard route). Redirects bare-prefix (`""`) and directory paths without a
+trailing slash using `307 Temporary Redirect`.
+*/
+respond_dir :: proc(res: ^Response, target, path: string, dir := nbio.CWD) {
+	c := connection_of_response(res)
+	without_query, _, _ := strings.partition(c.req.line.target, "?")
+	// Reject percent-encoded slashes on the raw request target: decoding turns %2f into a '/'
+	// directory separator, whereas browsers still treat %2f as part of a single path segment
+	// (breaking relative URL resolution on directory redirects).
+	if strings.contains(without_query, "%2f") || strings.contains(without_query, "%2F") {
+		res.status = .Not_Found
+		respond(res)
+		return
+	}
+
+	resolved, is_dir_redirect, ok := _resolve_dir_path(target, path, transaction_allocator(c))
+	if !ok {
+		res.status = .Not_Found
+		respond(res)
+		return
+	}
+	if is_dir_redirect {
+		_redirect_to_trailing_slash(res)
+		return
+	}
+
+	has_trailing_slash := len(path) > 0 && path[len(path)-1] == '/'
+	_respond_file_path(res, resolved, dir = dir, redirect_if_dir = !has_trailing_slash)
 }

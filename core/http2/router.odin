@@ -51,6 +51,7 @@ router :: proc(router: ^Router) -> Handler {
 		target := match.target
 		if match.suffix != "" {
 			target = match.suffix
+			match.suffix = ""
 		}
 
 		route, has_route := _route_trie_match(router.routes[rline.method], target, &match.vars, &match.suffix)
@@ -93,6 +94,18 @@ write_routes :: proc(w: io.Writer, r: Router) {
 
 route_params :: proc(ctx: ^Ctx) -> (params: []Route_Param) {
 	return context_get(ctx, _Route_Match).vars[:]
+}
+
+route_target :: proc(ctx: ^Ctx) -> string {
+	match := context_get(ctx, _Route_Match)
+	if match == nil { return "" }
+	return match.target
+}
+
+route_suffix :: proc(ctx: ^Ctx) -> string {
+	match := context_get(ctx, _Route_Match)
+	if match == nil { return "" }
+	return match.suffix
 }
 
 route_param :: proc(params: []Route_Param, name: string) -> string {
@@ -389,12 +402,25 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 
 _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, suffix: ^string) -> (Route, bool) {
 	assert(path[0] == '/')
-	return _trie_match(t, path, vars, len(vars), suffix)
+	return _trie_match(t, path, vars, len(vars), suffix, at_root = true)
 
-	_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string) -> (Route, bool) {
+	_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string, at_root: bool) -> (Route, bool) {
+		orig_path := path
 		path := path
 		segment, ok := _next_path_segment(&path)
 		if !ok {
+			if t.segment == "" && t.route.handler.handle != nil {
+				return t.route, true
+			}
+			if !at_root && raw_data(orig_path)[-1] == '/' {
+				for ts in t.segments {
+					if ts.segment == "*" {
+						assert(ts.route.handler.handle != nil)
+						suffix^ = "/"
+						return ts.route, true
+					}
+				}
+			}
 			return t.route, t.route.handler.handle != nil
 		}
 
@@ -404,11 +430,15 @@ _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Pa
 			switch {
 			case ts.segment == "*":
 				assert(ts.route.handler.handle != nil)
-				suffix^ = string(raw_data(path)[-len(segment)-1:][:len(path)+len(segment)+1])
+				if at_root {
+					suffix^ = orig_path
+				} else {
+					suffix^ = string(raw_data(orig_path)[-1:][:len(orig_path)+1])
+				}
 				return ts.route, true
 
 			case _is_param(ts.segment):
-				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix); has_match {
+				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix, at_root = false); has_match {
 					inject_at(vars, vars_start, Route_Param{
 						name  = ts.segment[1:],
 						value = segment,
@@ -417,7 +447,7 @@ _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Pa
 				}
 
 			case ts.segment == segment:
-				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix); has_match {
+				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix, at_root = false); has_match {
 					return match, true
 				}
 			}
@@ -446,8 +476,6 @@ _next_pattern_segment :: proc(s: ^string) -> (res: string, ok: bool) {
 
 	if st == "*" {
 		return st, false
-	} else if len(st) > len("/*") && st[:len(st)-len("/*")] == "/*" {
-		st = st[:len(st)-len("/*")]
 	}
 
 	m := strings.index_byte(st, '/')

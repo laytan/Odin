@@ -83,10 +83,10 @@
 - [x] **Per-thread teardown callback (`server.odin`)**: Added `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
 - [x] **Response `Set-Cookie` support**:
   - Ported `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` to `http.odin` and added `set_cookie(res: ^Response, c: Cookie)` in `respond.odin` (formatting attributes onto the transaction arena and appending via `headers_add(&res.headers, "Set-Cookie", ...)`), removing the stale `// TODO: cookies` comment in `server.odin`.
-- [ ] **MIME / `Content-Type` & static file/directory serving**:
+- [x] **MIME / `Content-Type` & static file/directory serving**:
   - [x] Ported `Mime_Type`, `mime_from_extension` (returning `(Mime_Type, bool)` so unknown extensions omit `Content-Type`), and `mime_to_content_type` into `http.odin`.
   - [x] Automatically set `Content-Type` in `respond_file` and `respond_file_path` when not already set and extension is recognized.
-  - [ ] Add `respond_file_content` and safe `respond_dir` (with path-traversal protection and `nbio` directory handle support).
+  - [x] Added `respond_file_content` and `respond_dir` (with `_resolve_dir_path` traversal/backslash/NUL/prefix protection, `index.html` resolution, `dir` handle forwarding, and regular-file enforcement in `respond_handle`).
 - [ ] **Convenience responders & chunked streaming**:
   - Add `respond_plain`, `respond_html`, `respond_json`.
   - Add chunked response streaming (`send_chunk` / chunked `io.Writer` integrated with `res.sends` tracking).
@@ -105,5 +105,6 @@
   - **Enforce `GET` method in `_prepare_upgrade`**: Reject non-`GET` requests (such as `HEAD` routed via `Router`'s `.Head -> .Get` fallback or `route_all`) per RFC 6455 §4.2.1.
 - [ ] **Testing, docs & package relocation**:
   - Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
+  - Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
   - Rewrite usage examples and overview into `doc.odin`.
   - Move `core/http2` into `core/net/http`.

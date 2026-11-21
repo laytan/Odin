@@ -710,17 +710,43 @@ File_Case_Result :: struct {
 	has_content_type: bool,
 	content_type_buf: [128]byte,
 	content_type_len: int,
+	location_buf:     [128]byte,
+	location_len:     int,
 	response:         Curl_Response,
 }
 
+curl_capture_location_header :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+	context = runtime.default_context()
+
+	real_size := int(size) * int(nmemb)
+	line := strings.trim_space(string(contents[:real_size]))
+	if colon := strings.index_byte(line, ':'); colon > 0 {
+		if strings.equal_fold(line[:colon], "location") {
+			res := (^File_Case_Result)(userp)
+			val := strings.trim_space(line[colon+1:])
+			res.location_len = copy(res.location_buf[:], val)
+		}
+	}
+
+	return c.size_t(real_size)
+}
+
 File_Test_Context :: struct {
-	server:       ^http.Server,
-	endpoint_err: net.Socket_Info_Error,
-	handle_ok:    bool,
-	readme:       File_Case_Result,
-	override:     File_Case_Result,
-	license:      File_Case_Result,
-	via_file:     File_Case_Result,
+	server:            ^http.Server,
+	endpoint_err:      net.Socket_Info_Error,
+	handle_ok:         bool,
+	readme:            File_Case_Result,
+	override:          File_Case_Result,
+	license:           File_Case_Result,
+	via_file:          File_Case_Result,
+	content:           File_Case_Result,
+	dir_file:          File_Case_Result,
+	dir_escape:        File_Case_Result,
+	dir_index:         File_Case_Result,
+	dir_path:          File_Case_Result,
+	dir_root_redirect: File_Case_Result,
+	dir_sub_redirect:  File_Case_Result,
+	dir_encoded_slash: File_Case_Result,
 }
 
 @(test)
@@ -738,6 +764,24 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 	})
 	http.route_get(&r, "/license", proc(ctx: ^http.Ctx) {
 		http.respond_file_path(&ctx.res, "core/http/LICENSE")
+	})
+	http.route_get(&r, "/dir-only", proc(ctx: ^http.Ctx) {
+		http.respond_file_path(&ctx.res, "core/http2")
+	})
+	http.route_get(&r, "/content", proc(ctx: ^http.Ctx) {
+		http.respond_file_content(&ctx.res, "hello.json", transmute([]byte)string(`{"ok":true}`))
+	})
+	http.route_get(&r, "/static/*", proc(ctx: ^http.Ctx) {
+		http.respond_dir(&ctx.res, "core/http2", http.route_suffix(ctx))
+	})
+	http.route_get(&r, "/static", proc(ctx: ^http.Ctx) {
+		http.respond_dir(&ctx.res, "core/http2", http.route_suffix(ctx))
+	})
+	http.route_get(&r, "/old/*", proc(ctx: ^http.Ctx) {
+		http.respond_dir(&ctx.res, "core/http", http.route_suffix(ctx))
+	})
+	http.route_get(&r, "/old", proc(ctx: ^http.Ctx) {
+		http.respond_dir(&ctx.res, "core/http", http.route_suffix(ctx))
 	})
 	http.route_get(&r, "/file", proc(ctx: ^http.Ctx) {
 		f, err := os.open("core/http2/README.md")
@@ -776,6 +820,14 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 	defer delete(ctx.override.response.body)
 	defer delete(ctx.license.response.body)
 	defer delete(ctx.via_file.response.body)
+	defer delete(ctx.content.response.body)
+	defer delete(ctx.dir_file.response.body)
+	defer delete(ctx.dir_escape.response.body)
+	defer delete(ctx.dir_index.response.body)
+	defer delete(ctx.dir_path.response.body)
+	defer delete(ctx.dir_root_redirect.response.body)
+	defer delete(ctx.dir_sub_redirect.response.body)
+	defer delete(ctx.dir_encoded_slash.response.body)
 
 	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
 		ctx := (^File_Test_Context)(data)
@@ -798,8 +850,11 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
 			res.setopt_ok =
 				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .PATH_AS_IS, c.long(1)) == .E_OK &&
 				curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
-				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK
+				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK &&
+				curl.easy_setopt(handle, .HEADERFUNCTION, curl_capture_location_header) == .E_OK &&
+				curl.easy_setopt(handle, .HEADERDATA, res) == .E_OK
 			if !res.setopt_ok {
 				return
 			}
@@ -814,10 +869,18 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 			}
 		}
 
-		do_get(handle, endpoint.port, "/readme",   &ctx.readme)
-		do_get(handle, endpoint.port, "/override", &ctx.override)
-		do_get(handle, endpoint.port, "/license",  &ctx.license)
-		do_get(handle, endpoint.port, "/file",     &ctx.via_file)
+		do_get(handle, endpoint.port, "/readme",                      &ctx.readme)
+		do_get(handle, endpoint.port, "/override",                    &ctx.override)
+		do_get(handle, endpoint.port, "/license",                     &ctx.license)
+		do_get(handle, endpoint.port, "/file",                        &ctx.via_file)
+		do_get(handle, endpoint.port, "/content",                     &ctx.content)
+		do_get(handle, endpoint.port, "/static/README.md",            &ctx.dir_file)
+		do_get(handle, endpoint.port, "/static/%2e%2e/http/LICENSE",  &ctx.dir_escape)
+		do_get(handle, endpoint.port, "/static/",                     &ctx.dir_index)
+		do_get(handle, endpoint.port, "/dir-only",                    &ctx.dir_path)
+		do_get(handle, endpoint.port, "/static?v=1",                  &ctx.dir_root_redirect)
+		do_get(handle, endpoint.port, "/old/dns",                     &ctx.dir_sub_redirect)
+		do_get(handle, endpoint.port, "/static/sub%2fREADME.md",      &ctx.dir_encoded_slash)
 	})
 
 	http._serve(&server)
@@ -828,12 +891,12 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
 	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
 
-	check_case :: proc(t: ^testing.T, name: string, res: ^File_Case_Result, expect_has_ct: bool, expect_ct: string, expect_prefix: string) {
+	check_case :: proc(t: ^testing.T, name: string, res: ^File_Case_Result, expect_status: c.long, expect_has_ct: bool, expect_ct: string, expect_prefix: string) {
 		testing.expectf(t, res.setopt_ok, "%s: setopt failed", name)
 		testing.expectf(t, res.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(res.perform_err))
 		testing.expect_value(t, res.getinfo_err, curl.code.E_OK)
 		testing.expect_value(t, res.ct_err, curl.code.E_OK)
-		testing.expect_value(t, res.response.status, c.long(200))
+		testing.expect_value(t, res.response.status, expect_status)
 		testing.expect_value(t, res.has_content_type, expect_has_ct)
 		if expect_has_ct {
 			testing.expect_value(t, string(res.content_type_buf[:res.content_type_len]), expect_ct)
@@ -841,9 +904,19 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 		testing.expectf(t, strings.has_prefix(string(res.response.body[:]), expect_prefix), "%s: unexpected file body prefix", name)
 	}
 
-	check_case(t, "readme",   &ctx.readme,   true,  "text/markdown",      "# core/http2")
-	check_case(t, "override", &ctx.override, true,  "application/custom", "# core/http2")
-	check_case(t, "license",  &ctx.license,  false, "",                   "")
-	check_case(t, "via_file", &ctx.via_file, true,  "text/markdown",      "# core/http2")
+	check_case(t, "readme",            &ctx.readme,            200, true,  "text/markdown",      "# core/http2")
+	check_case(t, "override",          &ctx.override,          200, true,  "application/custom", "# core/http2")
+	check_case(t, "license",           &ctx.license,           200, false, "",                   "")
+	check_case(t, "via_file",          &ctx.via_file,          200, true,  "text/markdown",      "# core/http2")
+	check_case(t, "content",           &ctx.content,           200, true,  "application/json",   `{"ok":true}`)
+	check_case(t, "dir_file",          &ctx.dir_file,          200, true,  "text/markdown",      "# core/http2")
+	check_case(t, "dir_escape",        &ctx.dir_escape,        404, false, "",                   "")
+	check_case(t, "dir_index",         &ctx.dir_index,         404, false, "",                   "")
+	check_case(t, "dir_path",          &ctx.dir_path,          404, false, "",                   "")
+	check_case(t, "dir_root_redirect", &ctx.dir_root_redirect, 307, false, "",                   "")
+	check_case(t, "dir_sub_redirect",  &ctx.dir_sub_redirect,  307, false, "",                   "")
+	check_case(t, "dir_encoded_slash", &ctx.dir_encoded_slash, 404, false, "",                   "")
+	testing.expect_value(t, string(ctx.dir_root_redirect.location_buf[:ctx.dir_root_redirect.location_len]), "/static/?v=1")
+	testing.expect_value(t, string(ctx.dir_sub_redirect.location_buf[:ctx.dir_sub_redirect.location_len]),   "/old/dns/")
 	testing.expect(t, len(ctx.license.response.body) > 0, "expected non-empty LICENSE file body")
 }

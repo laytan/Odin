@@ -98,7 +98,7 @@ requestline_parse :: proc(s: string) -> (line: Requestline, err: Requestline_Err
 	line.target = s[:next_space]
 	if len(line.target) == 0 { return line, .Invalid_Target }
 	for b in transmute([]byte)line.target {
-		if b <= 0x20 || b >= 0x7f { return line, .Invalid_Target }
+		if b <= 0x20 || b >= 0x7f || b == '#' { return line, .Invalid_Target }
 	}
 	s = s[len(line.target)+1:]
 

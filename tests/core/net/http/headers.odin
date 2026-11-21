@@ -169,8 +169,13 @@ test_requestline_and_header_parse_validation :: proc(t: ^testing.T) {
 		testing.expect_value(t, rl.target, "/")
 		testing.expect_value(t, rl.version, http.Version{1, 0})
 	}
+	{
+		rl, err := http.requestline_parse("GET /a%23b HTTP/1.1")
+		testing.expect_value(t, err, http.Requestline_Error.None)
+		testing.expect_value(t, rl.target, "/a%23b")
+	}
 
-	// Reject malformed request-targets (empty, whitespace, bare CR/LF, NUL, CTL, DEL).
+	// Reject malformed request-targets (empty, whitespace, bare CR/LF, NUL, CTL, DEL, raw '#').
 	bad_targets := []string{
 		"GET  HTTP/1.1",
 		"GET /a\rb HTTP/1.1",
@@ -179,6 +184,7 @@ test_requestline_and_header_parse_validation :: proc(t: ^testing.T) {
 		"GET /a\tb HTTP/1.1",
 		"GET /a\x07b HTTP/1.1",
 		"GET /a\x7fb HTTP/1.1",
+		"GET /a#b HTTP/1.1",
 	}
 	for raw in bad_targets {
 		_, err := http.requestline_parse(raw)
@@ -367,5 +373,109 @@ test_mime_from_extension_and_content_type :: proc(t: ^testing.T) {
 	for input in unknown {
 		_, ok := http.mime_from_extension(input)
 		testing.expectf(t, !ok, "expected mime_from_extension(%q) to return false", input)
+	}
+}
+
+@(test)
+test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	// 1. Valid path resolutions.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		tx_alloc := http.transaction_allocator(c)
+
+		Valid_Case :: struct {
+			target:   string,
+			path:     string,
+			expected: string,
+			redirect: bool,
+		}
+		valid := []Valid_Case{
+			{"public",   "/js/app.js",       "public/js/app.js",       false},
+			{"./public", "/js/app.js",       "public/js/app.js",       false},
+			{"public",   "/hello world.txt", "public/hello world.txt", false},
+			{"public",   "",                 "",                       true},
+			{"public",   "/",                "public/index.html",      false},
+			{"public",   "/sub/",            "public/sub/index.html",  false},
+			{"public",   "/about.html",      "public/about.html",      false},
+			{".",        "/README.md",       "README.md",              false},
+			{"",         "/sub/file.txt",    "sub/file.txt",           false},
+		}
+		for tc in valid {
+			resolved, redirect, ok := http._resolve_dir_path(tc.target, tc.path, tx_alloc)
+			testing.expectf(t, ok, "expected _resolve_dir_path(%q, %q) to succeed", tc.target, tc.path)
+			testing.expect_value(t, redirect, tc.redirect)
+			testing.expect_value(t, resolved, tc.expected)
+		}
+
+		// 2. Rejected traversal / malformed paths.
+		invalid := [][2]string{
+			{"public", "/../secret"},
+			{"public", "/a/../b.txt"},
+			{"public", "/sub/."},
+			{"public", "/sub/a/.."},
+			{"public", "/a/../../secret"},
+			{"public", "//a.txt"},
+			{"public", "/sub//"},
+			{"public", "/a\\b"},
+			{"public", "/a\x00.txt"},
+			{"public", "/a\n.txt"},
+			{"public", "/a\x7f.txt"},
+			{"public", "/C:/win"},
+			{"public", "no-leading-slash"},
+		}
+		for tc in invalid {
+			resolved, _, ok := http._resolve_dir_path(tc[0], tc[1], tx_alloc)
+			testing.expectf(t, !ok, "expected _resolve_dir_path(%q, %q) to fail, got %q", tc[0], tc[1], resolved)
+		}
+	}
+
+	// 3. respond_file_content sets Content-Type from extension when unset.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{"ok":true}`))
+		ct, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, has_ct)
+		testing.expect_value(t, ct, "application/json")
+	}
+
+	// 4. respond_file_content preserves existing Content-Type.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.set_header(&c.res, "Content-Type", "application/vnd.custom+json")
+		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{}`))
+		ct, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, has_ct)
+		testing.expect_value(t, ct, "application/vnd.custom+json")
+	}
+
+	// 5. respond_file_content omits Content-Type when extension is unknown.
+	{
+		c := push_test_connection(t, &env)
+		defer http.connection_destroy(c)
+		c.res.status       = .OK
+		c.res.state        = .Handling
+		c.res.progress.max = 0
+		c.res.sends        = 1
+
+		http.respond_file_content(&c.res, "LICENSE", transmute([]byte)string("MIT"))
+		_, has_ct := http.headers_get(c.res.headers, "content-type")
+		testing.expect(t, !has_ct)
 	}
 }
