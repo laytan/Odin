@@ -42,7 +42,7 @@
 - [x] **Thread-safe arena backing & bucket reuse (`arena.odin`, `server.odin`)**: `virtual.Arena` already locks internally on `virtual.arena_alloc`; initialized `s.temp_allocator_backing` before `_setup_threads(s)` in `_setup` (and destroy it on thread setup failure), rounded newly allocated blocks up to `1 << (uint(bucket) + SHIFT)` for `bucket < BUCKETS-1` so blocks match `_bucket_to_put`, and fixed the inverted `len(arena.data) >= size` check + `arena.prev` preservation in `BUCKETS-1`.
 - [x] **Keep-alive scanner preservation & arena cleanup (`server.odin`, `scanner.odin`, `arena.odin`)**:
   - Updated `scanner_reset` to copy any unread bytes (`buf[read_head:write_head]`) into a fresh block, destroy old `transaction_arena` blocks via `transaction_allocator_destroy(c)`, and account for carried-over bytes in `c.req.progress`; updated `_scanner_free_all` and `scanner_reset` to set `new_arena.last`.
-  - Updated `_serve_connection` and `connection_destroy` to destroy `temp_arena` via `temp_allocator_destroy(c)` and added `_server_thread_free_arenas_destroy` (plus unpoisoning newly allocated backing slices) so `_destroy` leaves no poisoned blocks across server lifetimes under `-sanitize:address`.
+  - Updated `_serve_connection` and `_connection_destroy` to destroy `temp_arena` via `temp_allocator_destroy(c)` and added `_server_thread_free_arenas_destroy` (plus unpoisoning newly allocated backing slices) so `_destroy` leaves no poisoned blocks across server lifetimes under `-sanitize:address`.
 - [x] **Remove unused quota fields on `Connection.temp` (`server.odin`)**: Removed the `temp` wrapper and unused `headers_quota`, `headers_progression`, `body_quota`, and `body_progression` fields from `Connection`.
 - [x] **Linear probing deletion in `Headers` (`headers.odin`, `server.odin`, `scanner.odin`)**: Updated `headers_delete` / `_headers_delete_with_hash` to take `^Headers`, enforce readonly assertions, decrement `m.len`, remove all matching entries for `key`, and perform backward-shift deletion so probe chains remain intact; updated callers in `server.odin` and `scanner.odin`.
 - [x] **Fix inverted trailer allowlist & remove heap init (`scanner.odin`)**: Replaced the thread-local heap `allowed_trailers` `Headers` map and `init_allowed_trailers` with a zero-allocation `@(private="file", rodata) FORBIDDEN_TRAILERS` table and updated `header_allowed_trailer` to return `false` on a case-insensitive `_headers_eq` match and `true` otherwise.
@@ -75,11 +75,11 @@
 
 - [x] **Connection upgrade / hijack API (WebSockets, etc.) (`server.odin`, `respond.odin`, `scanner.odin`, `arena.odin`, `core/websocket/server.odin`)**:
   - Added optional `on_sent: Send_Callback = nil` to `send_response_heading`/`send_heading`, made `on_send` bind `context.temp_allocator`, guard `sent > 0`, and check `.Sent`/`.Error` before invoking `on_sent` (allowing safe in-callback detach/destroy), made `connection_close` wait for `res.sends > 0`, and marked `101 Switching Protocols` as non-keep-alive in `_check_send_done`.
-  - Updated `scanner_pump` to bind `context.temp_allocator`, guard re-entrant destroy/detach via `_pump_destroyed`, split allocator-switch reallocation from in-place resize, and guard `a == nil` in `_arena_block_resize_in_place`.
-  - Added `connection_detach(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` sharing `_connection_release` with `connection_destroy`, and updated `core/websocket/server.odin` onto `send_heading`, `request_set_quota`/`response_set_quota`, `response_defer`, and `connection_close`.
+  - Updated `scanner_pump` to bind `context.temp_allocator`, guard re-entrant destroy/detach via `_Destroy_Flag`, split allocator-switch reallocation from in-place resize, and guard `a == nil` in `_arena_block_resize_in_place`.
+  - Added `connection_detach(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` sharing `_connection_release` with `_connection_destroy`, and updated `core/websocket/server.odin` onto `send_heading`, `request_set_quota`/`response_set_quota`, `response_defer`, and `connection_close`.
 - [x] **Graceful server shutdown (`server.odin`)**:
-  - Added `Server_Options.shutdown_timeout` (defaulting to `DEFAULT_SHUTDOWN_TIMEOUT`, `10 * time.Second`; `< 0` disables timeout) and updated `response_must_close` to return `true` when `s.shutting_down` is set.
-  - Updated `_server_thread_shutdown` to cancel `curr_accept` and `curr_date`, immediately destroy idle connections (`_connection_is_idle`), tick the event loop until active connections drain or `shutdown_timeout` expires, destroy any remaining connections, and flush pending operations before releasing the event loop.
+  - Updated `response_must_close` to return `true` when `s.shutting_down` is set.
+  - Updated `_server_thread_shutdown` to cancel `curr_accept` and `curr_date`, immediately destroy idle connections (`_connection_is_idle`), tick the event loop until active connections drain, and flush pending operations before releasing the event loop.
 - [x] **Per-thread teardown callback (`server.odin`)**: Added `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
 - [x] **Response `Set-Cookie` support**:
   - Ported `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` to `http.odin` and added `set_cookie(res: ^Response, c: Cookie)` in `respond.odin` (formatting attributes onto the transaction arena and appending via `headers_add(&res.headers, "Set-Cookie", ...)`), removing the stale `// TODO: cookies` comment in `server.odin`.
@@ -96,7 +96,7 @@
   - Updated `_on_accept` to check `shutting_down`, immediately re-arm `thread.curr_accept` on transient accept errors (`.Aborted`, `.Interrupted`, `.Would_Block`, `.Timeout`), back off via `nbio.timeout_poly` (`ACCEPT_RETRY_DELAY :: 50ms` stored in `thread.curr_accept`) on `.Insufficient_Resources` / `.Network_Unreachable` / `.Unknown`, and stop only on permanent errors (`.Invalid_Argument`, `.Unsupported_Socket`, `.Not_Listening`).
   - Closed `op.accept.client` via `nbio.close` if `xar.push(&thread.connections, ...)` fails, fixed the accept error log format string, and removed the stale `// TODO` comments.
 - [x] **Skip graceful close drain on dead-socket send errors (`server.odin`)**:
-  - Added `_send_error_skip_graceful_close` (returning `true` for dead-socket `nbio.TCP_Send_Error` variants `.Connection_Closed`, `.Not_Connected`, `.Network_Unreachable`, `.Host_Unreachable`, `.Timeout`, `.Invalid_Argument`) and updated `on_send` / `_check_send_done` to call `connection_destroy(c)` immediately once `res.sends == 0` instead of waiting on `connection_close`'s `500ms` drain; removed the stale `// TODO` comment in `on_send`.
+  - Added `_send_error_skip_graceful_close` (returning `true` for dead-socket `nbio.TCP_Send_Error` variants `.Connection_Closed`, `.Not_Connected`, `.Network_Unreachable`, `.Host_Unreachable`, `.Timeout`, `.Invalid_Argument`) and updated `on_send` / `_check_send_done` to call `_connection_destroy(c)` immediately once `res.sends == 0` instead of waiting on `connection_close`'s `500ms` drain; removed the stale `// TODO` comment in `on_send`.
 - [x] **Field visibility & stale inline `TODO` cleanup (`server.odin`)**:
   - Renamed internal `Ctx` and `Response` fields with `_` prefixes (`_vars` with `@(private) _Context_Var`, `_buf`, `_deferred`, `_last_send`, `_sends`, `_state`), promoted `send_heading` directly over `send_response_heading`, updated callers/tests/`core/websocket`, and removed stale inline `// TODO` comments in `server.odin`.
 - [x] **`core/websocket` polish (`core/websocket/server.odin`)**:
@@ -106,5 +106,17 @@
 - [ ] **Testing, docs & package relocation**:
   - [ ] Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
   - [x] Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
-  - [ ] Rewrite usage examples and overview into `doc.odin`.
+  - [ ] Rewrite usage examples and overview into `doc.odin`, and document key lifetime contracts:
+    - Zero-copy async slice lifetimes (`respond_bytes`, `respond_plain`, `respond_html`, `send`, `send_chunk`, `set_header`, `respond_file_path` — do not pass stack buffers or prematurely freed `temp_allocator` memory).
+    - `respond_file` / `respond_handle` file descriptor lifetime (must remain open until `response_defer`, not closed via `defer os.close(f)`).
+    - `request_set_quota` / `response_set_quota` `^Quota` pointer lifetime (must outlive the transaction).
+    - Transaction-scoped lifetime of request/route/cookie/body slices across keep-alive requests (clone if retaining beyond the request).
   - [ ] Move `core/http2` into `core/net/http`.
+
+### Memory Management Follow-Ups (For Further Review)
+
+- [ ] **Arena pooling & backing strategy (`arena.odin`, `server.odin`)**: Review `1 GiB` initial `virtual.Arena` reserve, giant-block stealing across `bucket..<BUCKETS` in `_server_thread_get_free_arena`, and unshrinkable per-thread `free_arenas` retention after traffic spikes.
+- [ ] **Streaming `body()` memory usage (`scanner.odin`)**: Review scanning request bodies into `transaction_arena` (~2x geometric `s.buf` growth) vs `temp_arena` / reusable buffers for streaming uploads.
+- [ ] **Streaming response retention (`respond.odin`)**: Review `Chunked_Writer` and `send_chunk` retaining chunks/headers in `transaction_arena` until transaction end (plus `respond_json` doc accuracy and async backpressure).
+- [ ] **Cross-thread arena safety (`arena.odin`)**: Review thread-local `td.free_arenas` assumptions when `Arena` / `transaction_allocator` / `temp_allocator` / `arena_destroy` are touched from user worker threads.
+- [ ] **Header & router ergonomics (`server.odin`, `router.odin`)**: Review marking `res.headers` readonly after `write_response_heading`, explicit `Router` allocator (`router_init`), and nil-match guard in `route_params`.
