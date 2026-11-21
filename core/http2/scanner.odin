@@ -325,7 +325,9 @@ scanner_pump :: proc(s: ^Scanner) {
 			case .Timeout:
 				invalid_request(s.c, .Request_Timeout)
 			case .Not_Connected, .Connection_Closed:
-				connection_destroy(s.c)
+				s.c.scanner.scan = {}
+				s.c.res._state   = .Error
+				_check_send_done(s.c, skip_graceful = true)
 			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
 				fallthrough
 			case:
@@ -336,7 +338,9 @@ scanner_pump :: proc(s: ^Scanner) {
 
 		if op.recv.received == 0 {
 			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, s.c.socket)
-			connection_destroy(s.c)
+			s.c.scanner.scan = {}
+			s.c.res._state   = .Error
+			_check_send_done(s.c, skip_graceful = true)
 			return
 		}
 

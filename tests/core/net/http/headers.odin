@@ -472,7 +472,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 	// 3. respond_file_content sets Content-Type from extension when unset.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -487,7 +487,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 	// 4. respond_file_content preserves existing Content-Type.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -503,7 +503,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 	// 5. respond_file_content omits Content-Type when extension is unknown.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -524,7 +524,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 	// 1. respond_plain sets Content-Type: text/plain and Content-Length.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -540,7 +540,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 	// 2. respond_html sets Content-Type: text/html and preserves pre-set Content-Type.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -554,7 +554,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 	}
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -574,7 +574,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		}
 
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.req.line.method  = .Head
 		c.res.status       = .OK
 		c.res._state        = .Handling
@@ -592,7 +592,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 	// 4. respond_json returns error cleanly before touching headers or response buffer.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0
@@ -620,7 +620,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 	//    buffers writes below chunk_size, and returns .Closed after io.destroy.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
 		c.res.progress.max = 0

@@ -562,7 +562,7 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 		address              = nbio.IP4_Loopback,
 		port                 = 18084,
 		thread_count         = 1,
-		shutdown_timeout     = 200 * time.Millisecond,
+		request_quota        = http.Quota{max_size = 64 * mem.Kilobyte, min = 200 * time.Millisecond, max = 250 * time.Millisecond},
 		handler              = http.router(&r),
 		thread_initializer = proc() {
 			_tls_test_buf = make([]byte, 16)
@@ -691,17 +691,27 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(ctx.slow_res.body[:]), "slow-ok")
 	testing.expect(t, ctx.slow_saw_conn_close, "expected in-flight response during shutdown to include Connection: close")
 
-	// 3. Stalled active connection keeps shutdown waiting until shutdown_timeout expires, without hanging.
+	// 3. Stalled active connection keeps shutdown waiting until its request_quota expires with 408.
 	shutdown_elapsed := time.diff(ctx.shutdown_started_at, serve_finished_at)
-	testing.expect(t, shutdown_elapsed >= 150 * time.Millisecond, "expected shutdown to wait for shutdown_timeout on stalled active connection")
-	testing.expect(t, shutdown_elapsed < 2 * time.Second, "expected shutdown not to hang past shutdown_timeout")
+	testing.expect(t, shutdown_elapsed >= 100 * time.Millisecond, "expected shutdown to wait for request_quota on stalled active connection")
+	testing.expect(t, shutdown_elapsed < 2 * time.Second, "expected shutdown not to hang past request_quota timeout")
 
-	// 4. Both idle and stalled connections were closed by the server.
+	// 4. Idle connection closes immediately; stalled connection receives 408 Request Timeout and closes.
 	eof_buf: [16]byte
 	idle_n, idle_recv_err := net.recv_tcp(ctx.idle_sock, eof_buf[:])
 	testing.expect(t, idle_n == 0 || idle_recv_err != nil, "expected idle socket to be closed by server shutdown")
-	stalled_n, stalled_recv_err := net.recv_tcp(ctx.stalled_sock, eof_buf[:])
-	testing.expect(t, stalled_n == 0 || stalled_recv_err != nil, "expected stalled socket to be closed after shutdown_timeout")
+
+	_ = net.set_option(ctx.stalled_sock, .Receive_Timeout, 2 * time.Second)
+	stalled_buf: [512]byte
+	stalled_total := 0
+	for stalled_total < len(stalled_buf) {
+		n, err := net.recv_tcp(ctx.stalled_sock, stalled_buf[stalled_total:])
+		if n <= 0 || err != nil {
+			break
+		}
+		stalled_total += n
+	}
+	testing.expect(t, strings.has_prefix(string(stalled_buf[:stalled_total]), "HTTP/1.1 408 "), "expected stalled socket to receive 408 Request Timeout before closing")
 
 	// 5. thread_initializer ran before request handling and thread_deinitializer cleaned up on shutdown.
 	testing.expect(t, srv_state.handler_saw_tls, "expected handler to see thread_initializer state")
@@ -1492,4 +1502,182 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		testing.expect(t, !timed_out, "timed out waiting for graceful connection_close drain to finish")
 		testing.expect_value(t, active_count(&thread), 0)
 	}
+}
+
+@(test)
+test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	if acq_err := nbio.acquire_thread_event_loop(); !testing.expect_value(t, acq_err, nil) {
+		return
+	}
+	defer nbio.release_thread_event_loop()
+
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18094})
+	if !testing.expect_value(t, listen_err, nil) {
+		return
+	}
+	defer {
+		closed: bool
+		nbio.close_poly(listen_sock, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	endpoint, endpoint_err := nbio.bound_endpoint(listen_sock)
+	if !testing.expect_value(t, endpoint_err, nil) {
+		return
+	}
+
+	s := http.make_server({})
+	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
+		return
+	}
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	xar.init(&thread.connections, context.allocator)
+	prev_td := http.td
+	http.td = &thread
+	defer {
+		nbio.tick(timeout = 0)
+		http.td = prev_td
+		http._server_thread_free_arenas_destroy(&thread)
+		xar.freelist_destroy(&thread.connections)
+	}
+
+	Accept_State :: struct {
+		done:   bool,
+		err:    nbio.Accept_Error,
+		client: nbio.TCP_Socket,
+	}
+	Dial_State :: struct {
+		done: bool,
+		err:  nbio.Network_Error,
+		sock: nbio.TCP_Socket,
+	}
+	a_st: Accept_State
+	d_st: Dial_State
+
+	nbio.accept_poly(listen_sock, &a_st, proc(op: ^nbio.Operation, st: ^Accept_State) {
+		st.err    = op.accept.err
+		st.client = op.accept.client
+		st.done   = true
+	})
+	nbio.dial_poly(endpoint, &d_st, proc(op: ^nbio.Operation, st: ^Dial_State) {
+		st.err  = op.dial.err
+		st.sock = op.dial.socket
+		st.done = true
+	})
+	for !a_st.done || !d_st.done {
+		nbio.tick()
+	}
+	if !testing.expect_value(t, a_st.err, nil) || !testing.expect_value(t, d_st.err, nil) {
+		return
+	}
+	peer := d_st.sock
+	peer_closed := false
+	defer if !peer_closed {
+		closed: bool
+		nbio.close_poly(peer, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	c, push_err := xar.push(&thread.connections, http.Connection{socket = a_st.client})
+	if !testing.expect_value(t, push_err, nil) {
+		return
+	}
+	c.transaction_arena = http.get_arena(c)
+	c.temp_arena        = http.get_arena(c)
+	tx_alloc := http.transaction_allocator(c)
+	c._vars.allocator         = tx_alloc
+	c.req.headers.allocator  = tx_alloc
+	c.res.headers.allocator  = tx_alloc
+	c.res._buf.allocator      = tx_alloc
+	c.res._deferred.allocator = tx_alloc
+	c.scanner.c              = c
+	c.scanner.allocator      = &c.transaction_arena
+	c.req.line               = {method = .Get, target = "/", version = {1, 1}}
+	c.req.has_consumed_body  = true
+	c.req.quota              = &s.opts.request_quota
+	c.res.quota              = &s.opts.response_quota
+	http.progression_init(&c.req.progress, http.UNLIMITED_QUOTA)
+	http.progression_init(&c.res.progress, http.UNLIMITED_QUOTA)
+	c.res.status = .OK
+	c.res._state = .Handling
+
+	Flags :: struct {
+		sent_ran:  bool,
+		defer_ran: bool,
+	}
+	flags: Flags
+	http.context_add(&c.ctx, &flags)
+	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+		f := http.context_get(ctx, ^Flags)^
+		f.defer_ran = true
+	})
+
+	payload, payload_err := make([]byte, 8 * mem.Megabyte, tx_alloc)
+	if !testing.expect_value(t, payload_err, nil) {
+		return
+	}
+
+	http.send(&c.res, {payload}, proc(c: ^http.Connection, err: http.Send_Error) {
+		f := http.context_get(&c.ctx, ^Flags)^
+		f.sent_ran = true
+	})
+	http.scan_bytes(&c.scanner, 64, proc(c: ^http.Connection, data: []byte) {})
+
+	testing.expect_value(t, c.res._sends, 1)
+	testing.expect(t, c.curr_recv != nil, "expected active Recv op to be tracked")
+
+	// Flush submissions once so both the large Send and the Recv are in flight, then send TCP FIN from peer
+	// (`nbio.shutdown(.Send)` keeps peer's recv side open so the 8 MiB send stays blocked while `scanner_on_recv` sees EOF).
+	nbio.tick(timeout = 10 * time.Millisecond)
+
+	active_count :: proc(thread: ^http.Server_Thread) -> int {
+		count := 0
+		iter := xar.freelist_iterator(&thread.connections)
+		for _, _ in xar.freelist_iterate_by_ptr(&iter) {
+			count += 1
+		}
+		return count
+	}
+
+	nbio.shutdown(peer, .Send)
+
+	fin_timeout := false
+	fin_guard := nbio.timeout_poly(2 * time.Second, &fin_timeout, proc(_: ^nbio.Operation, timed_out: ^bool) {
+		timed_out^ = true
+	})
+	for !fin_timeout && active_count(&thread) > 0 && c.curr_recv != nil {
+		nbio.tick()
+	}
+	if !fin_timeout {
+		nbio.remove(fin_guard)
+	}
+	testing.expect(t, !fin_timeout, "timed out waiting for scanner_on_recv to receive peer FIN")
+	testing.expect_value(t, active_count(&thread), 1)
+	testing.expect(t, c.res._state == .Error, "expected state to transition to .Error on disconnect during send")
+	testing.expect(t, !flags.defer_ran, "expected connection_destroy/response_defer to wait for in-flight send")
+
+	// Now close peer so the blocked send finishes/errors and completes teardown.
+	closed: bool
+	nbio.close_poly(peer, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+	nbio.run_until(&closed)
+	peer_closed = true
+
+	timed_out := false
+	guard := nbio.timeout_poly(2 * time.Second, &timed_out, proc(_: ^nbio.Operation, timed_out: ^bool) {
+		timed_out^ = true
+	})
+	for !timed_out && active_count(&thread) > 0 {
+		nbio.tick()
+	}
+	if !timed_out {
+		nbio.remove(guard)
+	}
+	testing.expect(t, !timed_out, "timed out waiting for connection teardown after send completion")
+	testing.expect_value(t, active_count(&thread), 0)
+	testing.expect(t, flags.sent_ran, "expected on_sent callback to run cleanly before teardown")
+	testing.expect(t, flags.defer_ran, "expected response_defer to run once on final teardown")
 }

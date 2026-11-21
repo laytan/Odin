@@ -80,6 +80,13 @@ push_test_connection :: proc(
 	return c
 }
 
+destroy_test_connection :: proc(c: ^http.Connection) {
+	// Mock unit tests set c.res._sends > 0 without an active nbio send op to prevent
+	// _check_send_done from destroying the connection before assertions run.
+	c.res._sends = 0
+	http.connection_destroy(c)
+}
+
 active_connection_count :: proc(thread: ^http.Server_Thread) -> (count: int) {
 	iter := xar.freelist_iterator(&thread.connections)
 	for _, _ in xar.freelist_iterate_by_ptr(&iter) {
@@ -152,7 +159,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 	// 2. 0-byte send error via on_send transitions to .Error without tripping progression_update assert.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 
 		chk := http.context_add(&c.ctx, Upgrade_Check{})
 		c.res._state = .Sending
@@ -177,7 +184,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 	// 3. respond() on a 101 response transitions to .Sent while keeping status == .Switching_Protocols.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 
 		c.res.status = .Switching_Protocols
 		c.res._state  = .Sending
@@ -201,7 +208,7 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 	//    and keeps connection alive while sends > 0.
 	{
 		c := push_test_connection(t, &env, payload = "abcdef")
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 
 		st := http.context_add(&c.ctx, Close_State{})
 		c.res._state = .Sending
@@ -241,7 +248,7 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 	// 2. invalid_request in .Sending state marks .Error without writing an HTTP response heading.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 
 		c.res._state = .Sending
 		c.res._sends = 1
@@ -323,7 +330,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 	//    and subsequent capacity < MULTIPLIER on temp_arena after free_all emptied s.buf.
 	{
 		c := push_test_connection(t, &env, payload = "hi")
-		defer http.connection_destroy(c)
+		defer destroy_test_connection(c)
 
 		c.res._state        = .Sending
 		c.res._sends        = 1
