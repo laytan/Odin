@@ -940,8 +940,6 @@ write_response_heading :: proc(res: ^Response) {
 		append(&res.buf, "\r\n")
 	}
 
-	// TODO: cookies
-
 	append(&res.buf, "\r\n")
 
 	// A server MUST NOT send a Content-Length header field in any response

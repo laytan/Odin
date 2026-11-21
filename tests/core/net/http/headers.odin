@@ -3,6 +3,7 @@ package test_core_net_http
 import "core:fmt"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import http "core:http2"
 
@@ -247,4 +248,69 @@ test_requestline_and_header_parse_validation :: proc(t: ^testing.T) {
 		_, _, ok := http.header_parse(raw)
 		testing.expectf(t, !ok, "expected header_parse(%q) to fail", raw)
 	}
+}
+
+@(test)
+test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	c := push_test_connection(t, &env)
+	defer http.connection_destroy(c)
+
+	c.req.line.version      = {1, 1}
+	c.req.has_consumed_body = true
+	c.res.status            = .OK
+
+	expires, ok := time.datetime_to_time(2026, 11, 21, 15, 30, 0)
+	testing.expect(t, ok, "expected valid datetime")
+
+	http.set_cookie(&c.res, {
+		name  = "session",
+		value = "abc123",
+	})
+	http.set_cookie(&c.res, {
+		name         = "prefs",
+		value        = "dark\r\nmode",
+		domain       = "example.com",
+		path         = "/app",
+		expires_gmt  = expires,
+		max_age_secs = 3600,
+		same_site    = .Lax,
+		secure       = true,
+		partitioned  = true,
+		http_only    = true,
+	})
+	http.set_cookie(&c.res, {
+		name      = "strict_tok",
+		value     = "s",
+		same_site = .Strict,
+	})
+	http.set_cookie(&c.res, {
+		name      = "cross_tok",
+		value     = "n",
+		same_site = .None,
+		secure    = true,
+	})
+
+	values := make([dynamic]string, context.allocator)
+	defer delete(values)
+	iter := http.headers_get_all_iterator(&c.res.headers, "set-cookie")
+	for v in http.headers_get_all_iter(&iter) {
+		append(&values, v)
+	}
+
+	testing.expect_value(t, len(values), 4)
+	testing.expect_value(t, values[0], "session=abc123")
+	testing.expect_value(t, values[1], "prefs=dark\r\nmode; Domain=example.com; Expires=Sat, 21 Nov 2026 15:30:00 GMT; Max-Age=3600; Path=/app; SameSite=Lax; Secure; Partitioned; HttpOnly")
+	testing.expect_value(t, values[2], "strict_tok=s; SameSite=Strict")
+	testing.expect_value(t, values[3], "cross_tok=n; SameSite=None; Secure")
+
+	http.write_response_heading(&c.res)
+	heading := string(c.res.buf[:])
+	testing.expect(t, strings.contains(heading, "Set-Cookie: session=abc123\r\n"), "expected first Set-Cookie header line")
+	testing.expect(t, strings.contains(heading, "Set-Cookie: prefs=dark  mode; Domain=example.com; Expires=Sat, 21 Nov 2026 15:30:00 GMT; Max-Age=3600; Path=/app; SameSite=Lax; Secure; Partitioned; HttpOnly\r\n"), "expected escaped second Set-Cookie header line")
+	testing.expect(t, strings.contains(heading, "Set-Cookie: strict_tok=s; SameSite=Strict\r\n"), "expected strict Set-Cookie header line")
+	testing.expect(t, strings.contains(heading, "Set-Cookie: cross_tok=n; SameSite=None; Secure\r\n"), "expected none Set-Cookie header line")
 }

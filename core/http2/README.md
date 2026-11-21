@@ -81,8 +81,8 @@
   - Added `Server_Options.shutdown_timeout` (defaulting to `DEFAULT_SHUTDOWN_TIMEOUT`, `10 * time.Second`; `< 0` disables timeout) and updated `response_must_close` to return `true` when `s.shutting_down` is set.
   - Updated `_server_thread_shutdown` to cancel `curr_accept` and `curr_date`, immediately destroy idle connections (`_connection_is_idle`), tick the event loop until active connections drain or `shutdown_timeout` expires, destroy any remaining connections, and flush pending operations before releasing the event loop.
 - [x] **Per-thread teardown callback (`server.odin`)**: Added `Server_Options.thread_deinitializer: proc()` invoked on each server thread in `_server_thread_shutdown` to mirror `thread_initializer` and clean up thread-local resources.
-- [ ] **Response `Set-Cookie` support**:
-  - Port `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` and add `set_cookie(res: ^Response, cookie: Cookie)` (serializing into `res.headers` via `headers_add(&res.headers, "Set-Cookie", ...)`).
+- [x] **Response `Set-Cookie` support**:
+  - Ported `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` to `http.odin` and added `set_cookie(res: ^Response, c: Cookie)` in `respond.odin` (formatting attributes onto the transaction arena and appending via `headers_add(&res.headers, "Set-Cookie", ...)`), removing the stale `// TODO: cookies` comment in `server.odin`.
 - [ ] **MIME / `Content-Type` & static file/directory serving**:
   - Port `Mime_Type` and extension helpers (`mime_from_extension`, `mime_to_content_type`).
   - Automatically set `Content-Type` in `respond_file` and `respond_file_path` when not already set.

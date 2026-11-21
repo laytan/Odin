@@ -138,6 +138,56 @@ get_header :: proc(req: ^Request, key: string) -> (string, bool) {
 	return headers_get(req.headers, key)
 }
 
+set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) {
+	b := strings.builder_make(0, 64, transaction_allocator(connection_of_response(res)))
+	strings.write_string(&b, c.name)
+	strings.write_byte(&b, '=')
+	strings.write_string(&b, c.value)
+
+	if c.domain != "" {
+		strings.write_string(&b, "; Domain=")
+		strings.write_string(&b, c.domain)
+	}
+
+	if c.expires_gmt != {} {
+		strings.write_string(&b, "; Expires=")
+		date_buf: [DATE_LENGTH]byte
+		date_write(date_buf[:], c.expires_gmt)
+		strings.write_bytes(&b, date_buf[:])
+	}
+
+	if a, ok := c.max_age_secs.(int); ok {
+		strings.write_string(&b, "; Max-Age=")
+		strings.write_int(&b, a)
+	}
+
+	if c.path != "" {
+		strings.write_string(&b, "; Path=")
+		strings.write_string(&b, c.path)
+	}
+
+	switch c.same_site {
+	case .None:        strings.write_string(&b, "; SameSite=None")
+	case .Lax:         strings.write_string(&b, "; SameSite=Lax")
+	case .Strict:      strings.write_string(&b, "; SameSite=Strict")
+	case .Unspecified:
+	}
+
+	if c.secure {
+		strings.write_string(&b, "; Secure")
+	}
+
+	if c.partitioned {
+		strings.write_string(&b, "; Partitioned")
+	}
+
+	if c.http_only {
+		strings.write_string(&b, "; HttpOnly")
+	}
+
+	headers_add(&res.headers, "Set-Cookie", strings.to_string(b), loc)
+}
+
 // TODO: prob want some configuration for the range handling, if it should be done at all, how to handle if-range
 // custom etag maybe
 

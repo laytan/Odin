@@ -358,9 +358,9 @@ Body_Request :: struct {
 }
 
 body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
-	c := connection_of_request(req)
-	assert(context_get(&c.ctx, Body_Request) == nil, "body already consumed", loc)
-	context_add(&c.ctx, Body_Request{cb = cb})
+	ctx := context_of_request(req)
+	assert(context_get(&ctx, Body_Request) == nil, "body already consumed", loc)
+	context_add(&ctx, Body_Request{cb = cb})
 
 	if req.has_consumed_body {
 		_body_cb(req, nil, is_partial=false)

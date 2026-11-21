@@ -402,6 +402,26 @@ request_of_response :: proc(res: ^Response) -> ^Request {
 	return &connection_of_response(res).req
 }
 
+Cookie_Same_Site :: enum u8 {
+	Unspecified,
+	None,
+	Strict,
+	Lax,
+}
+
+Cookie :: struct {
+	domain:       string,
+	path:         string,
+	expires_gmt:  time.Time,
+	name:         string,
+	value:        string,
+	max_age_secs: Maybe(int),
+	same_site:    Cookie_Same_Site,
+	http_only:    bool,
+	partitioned:  bool,
+	secure:       bool,
+}
+
 /*
 Retrieves the cookie with the given `key` out of the request's `Cookie` header.
 
