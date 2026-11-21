@@ -130,6 +130,39 @@ test_headers_delete_removes_all_multi_value_entries :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_headers_has_token :: proc(t: ^testing.T) {
+	// Empty Headers{}.
+	empty: http.Headers
+	testing.expect(t, !http.headers_has_token(&empty, "connection", "close"))
+
+	h := http._headers_make(context.allocator)
+	defer http.headers_destroy(h)
+
+	// Single exact match (case-insensitive header name and token value).
+	testing.expect_value(t, http.headers_set(&h, "Connection", "CLOSE"), nil)
+	testing.expect(t, http.headers_has_token(&h, "connection", "close"))
+	testing.expect(t, !http.headers_has_token(&h, "connection", "close2"))
+	testing.expect(t, !http.headers_has_token(&h, "connection", "myclose"))
+	testing.expect(t, !http.headers_has_token(&h, "connection", ""))
+
+	// Multi-token comma-separated list with spaces and tabs.
+	testing.expect_value(t, http.headers_set(&h, "Connection", "keep-alive, \t Upgrade "), nil)
+	testing.expect(t, http.headers_has_token(&h, "connection", "keep-alive"))
+	testing.expect(t, http.headers_has_token(&h, "connection", "upgrade"))
+	testing.expect(t, !http.headers_has_token(&h, "connection", "up"))
+	testing.expect(t, !http.headers_has_token(&h, "connection", "close"))
+
+	// Repeated header entries.
+	h2 := http._headers_make(context.allocator)
+	defer http.headers_destroy(h2)
+	testing.expect_value(t, http.headers_add(&h2, "Connection", "keep-alive"), nil)
+	testing.expect_value(t, http.headers_add(&h2, "connection", "Upgrade"), nil)
+	testing.expect(t, http.headers_has_token(&h2, "Connection", "keep-alive"))
+	testing.expect(t, http.headers_has_token(&h2, "Connection", "upgrade"))
+	testing.expect(t, !http.headers_has_token(&h2, "Connection", "close"))
+}
+
+@(test)
 test_headers_valid_key :: proc(t: ^testing.T) {
 	expected, ok := strings.ascii_set_make("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 	testing.expect(t, ok, "expected ASCII token set construction to succeed")

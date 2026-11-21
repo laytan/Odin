@@ -1058,11 +1058,7 @@ _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 }
 
 response_has_close :: proc(res: ^Response) -> bool {
-	if connection, ok := headers_get(res.headers, "connection"); ok && _headers_eq(connection, "close") {
-		return true
-	}
-
-	return false
+	return headers_has_token(&res.headers, "connection", "close")
 }
 
 // Determines if the connection needs to be closed after sending the response.
@@ -1072,7 +1068,7 @@ response_must_close :: proc(c: ^Connection) -> bool {
 	}
 
 	// If the request we are responding to indicates it is closing the connection, close our side too.
-	if connection, ok := headers_get(c.req.headers, "connection"); ok && _headers_eq(connection, "close") {
+	if headers_has_token(&c.req.headers, "connection", "close") {
 		return true
 	}
 

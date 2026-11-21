@@ -128,6 +128,33 @@ headers_has :: proc(m: Headers, key: string) -> bool {
 	return has
 }
 
+/*
+Returns true if any header entry for `key` contains `token` as a comma-separated
+HTTP list element (ASCII case-insensitive, ignoring optional surrounding whitespace).
+*/
+headers_has_token :: proc(h: ^Headers, key, token: string) -> bool {
+	if len(token) == 0 || h.len == 0 {
+		return false
+	}
+	iter := headers_get_all_iterator(h, key)
+	for value in headers_get_all_iter(&iter) {
+		v := value
+		for part in strings.split_iterator(&v, ",") {
+			p := part
+			for len(p) > 0 && (p[0] == ' ' || p[0] == '\t') {
+				p = p[1:]
+			}
+			for len(p) > 0 && (p[len(p)-1] == ' ' || p[len(p)-1] == '\t') {
+				p = p[:len(p)-1]
+			}
+			if _headers_eq(p, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 headers_entry :: proc(m: ^Headers, key: string) -> (key_ptr, val_ptr: ^string, just_inserted: bool, err: mem.Allocator_Error) {
 	if m.len >= m.threshold {
 		_headers_grow(m) or_return
