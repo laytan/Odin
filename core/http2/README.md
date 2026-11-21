@@ -95,8 +95,8 @@
 - [x] **Accept error recovery & allocation-failure socket cleanup (`server.odin`)**:
   - Updated `_on_accept` to check `shutting_down`, immediately re-arm `thread.curr_accept` on transient accept errors (`.Aborted`, `.Interrupted`, `.Would_Block`, `.Timeout`), back off via `nbio.timeout_poly` (`ACCEPT_RETRY_DELAY :: 50ms` stored in `thread.curr_accept`) on `.Insufficient_Resources` / `.Network_Unreachable` / `.Unknown`, and stop only on permanent errors (`.Invalid_Argument`, `.Unsupported_Socket`, `.Not_Listening`).
   - Closed `op.accept.client` via `nbio.close` if `xar.push(&thread.connections, ...)` fails, fixed the accept error log format string, and removed the stale `// TODO` comments.
-- [ ] **Skip graceful close drain on dead-socket send errors (`server.odin`)**:
-  - In `on_send` / `_check_send_done`, destroy the connection immediately via `connection_destroy(c)` when a send fails due to a closed/reset/broken connection instead of running `connection_close(c)`'s `nbio.shutdown` and `500ms` `CONN_CLOSE_DELAY` drain.
+- [x] **Skip graceful close drain on dead-socket send errors (`server.odin`)**:
+  - Added `_send_error_skip_graceful_close` (returning `true` for dead-socket `nbio.TCP_Send_Error` variants `.Connection_Closed`, `.Not_Connected`, `.Network_Unreachable`, `.Host_Unreachable`, `.Timeout`, `.Invalid_Argument`) and updated `on_send` / `_check_send_done` to call `connection_destroy(c)` immediately once `res.sends == 0` instead of waiting on `connection_close`'s `500ms` drain; removed the stale `// TODO` comment in `on_send`.
 - [ ] **Field visibility & stale inline `TODO` cleanup (`server.odin`)**:
   - Resolve `// TODO: prive` markers on internal `Ctx` and `Response` fields and remove stale inline `TODO` comments for already-completed items (`quota option on server`, `max length`, `send quota too`).
 - [ ] **`core/websocket` polish (`core/websocket/server.odin`)**:

@@ -9,6 +9,8 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:io"
 import "core:log"
+import "core:mem"
+import "core:mem/virtual"
 import "core:net"
 import "core:nbio"
 import "core:os"
@@ -1293,5 +1295,201 @@ test_http2_accept_error_recovery_and_oom_cleanup :: proc(t: ^testing.T) {
 			nbio.tick()
 		}
 		testing.expect(t, recv_st.received == 0 && recv_st.err != nbio.Recv_Error(nbio.TCP_Recv_Error.Timeout), "expected peer socket to observe closed accepted connection")
+	}
+}
+
+@(test)
+test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	if acq_err := nbio.acquire_thread_event_loop(); !testing.expect_value(t, acq_err, nil) {
+		return
+	}
+	defer nbio.release_thread_event_loop()
+
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18088})
+	if !testing.expect_value(t, listen_err, nil) {
+		return
+	}
+	defer {
+		closed: bool
+		nbio.close_poly(listen_sock, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	endpoint, endpoint_err := nbio.bound_endpoint(listen_sock)
+	if !testing.expect_value(t, endpoint_err, nil) {
+		return
+	}
+
+	s := http.make_server({})
+	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
+		return
+	}
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	xar.init(&thread.connections, context.allocator)
+	prev_td := http.td
+	http.td = &thread
+	defer {
+		nbio.tick(timeout = 0)
+		http.td = prev_td
+		http._server_thread_free_arenas_destroy(&thread)
+		xar.freelist_destroy(&thread.connections)
+	}
+
+	make_tcp_pair :: proc(t: ^testing.T, listen_sock: nbio.TCP_Socket, endpoint: nbio.Endpoint) -> (accepted, peer: nbio.TCP_Socket, ok: bool) {
+		Accept_State :: struct {
+			done:   bool,
+			err:    nbio.Accept_Error,
+			client: nbio.TCP_Socket,
+		}
+		Dial_State :: struct {
+			done: bool,
+			err:  nbio.Network_Error,
+			sock: nbio.TCP_Socket,
+		}
+		a_st: Accept_State
+		d_st: Dial_State
+
+		nbio.accept_poly(listen_sock, &a_st, proc(op: ^nbio.Operation, st: ^Accept_State) {
+			st.err    = op.accept.err
+			st.client = op.accept.client
+			st.done   = true
+		})
+		nbio.dial_poly(endpoint, &d_st, proc(op: ^nbio.Operation, st: ^Dial_State) {
+			st.err  = op.dial.err
+			st.sock = op.dial.socket
+			st.done = true
+		})
+		for !a_st.done || !d_st.done {
+			nbio.tick()
+		}
+		if !testing.expect_value(t, a_st.err, nil) || !testing.expect_value(t, d_st.err, nil) {
+			return
+		}
+		return a_st.client, d_st.sock, true
+	}
+
+	close_socket :: proc(sock: nbio.TCP_Socket) {
+		closed: bool
+		nbio.close_poly(sock, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	push_conn :: proc(t: ^testing.T, thread: ^http.Server_Thread, sock: nbio.TCP_Socket) -> ^http.Connection {
+		c, push_err := xar.push(&thread.connections, http.Connection{socket = sock})
+		testing.expect_value(t, push_err, nil)
+		c.transaction_arena = http.get_arena(c)
+		c.temp_arena        = http.get_arena(c)
+		tx_alloc := http.transaction_allocator(c)
+		c.vars.allocator         = tx_alloc
+		c.req.headers.allocator  = tx_alloc
+		c.res.headers.allocator  = tx_alloc
+		c.res.buf.allocator      = tx_alloc
+		c.res.deferred.allocator = tx_alloc
+		c.scanner.c              = c
+		c.scanner.allocator      = &c.transaction_arena
+		return c
+	}
+
+	active_count :: proc(thread: ^http.Server_Thread) -> int {
+		count := 0
+		iter := xar.freelist_iterator(&thread.connections)
+		for _, _ in xar.freelist_iterate_by_ptr(&iter) {
+			count += 1
+		}
+		return count
+	}
+
+	// 1. Dead-socket TCP_Send_Error (.Connection_Closed) skips 500ms drain and destroys immediately.
+	{
+		accepted, peer, ok := make_tcp_pair(t, listen_sock, endpoint)
+		if !ok { return }
+		defer close_socket(peer)
+
+		c := push_conn(t, &thread, accepted)
+		c.res.state = .Sending
+		c.res.sends = 1
+
+		Defer_Flag :: distinct ^bool
+		defer_ran := false
+		http.context_add(&c.ctx, Defer_Flag(&defer_ran))
+		http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+			flag := http.context_get(ctx, Defer_Flag)^
+			(^bool)(flag)^ = true
+		})
+
+		op := nbio.Operation{
+			type = .Send,
+			send = {err = nbio.TCP_Send_Error.Connection_Closed},
+		}
+		http.on_send(&op, c, nil)
+
+		testing.expect_value(t, active_count(&thread), 0)
+		testing.expect(t, defer_ran, "expected response_defer to run during immediate connection_destroy")
+	}
+
+	// 2. Multiple in-flight sends wait for sends == 0 before destroying immediately.
+	{
+		accepted, peer, ok := make_tcp_pair(t, listen_sock, endpoint)
+		if !ok { return }
+		defer close_socket(peer)
+
+		c := push_conn(t, &thread, accepted)
+		c.res.state = .Sending
+		c.res.sends = 2
+
+		op := nbio.Operation{
+			type = .Send,
+			send = {err = nbio.TCP_Send_Error.Connection_Closed},
+		}
+		http.on_send(&op, c, nil)
+		testing.expect_value(t, active_count(&thread), 1)
+		testing.expect_value(t, c.res.sends, 1)
+		testing.expect(t, c.res.state == .Error, "expected state to transition to .Error")
+
+		http.on_send(&op, c, nil)
+		testing.expect_value(t, active_count(&thread), 0)
+	}
+
+	// 3. FS_Error on Send_File (socket still usable) preserves graceful connection_close drain.
+	{
+		accepted, peer, ok := make_tcp_pair(t, listen_sock, endpoint)
+		if !ok { return }
+		peer_closed := false
+		defer if !peer_closed {
+			close_socket(peer)
+		}
+
+		c := push_conn(t, &thread, accepted)
+		c.res.state = .Sending
+		c.res.sends = 1
+
+		op := nbio.Operation{
+			type     = .Send_File,
+			sendfile = {err = nbio.FS_Error.EOF},
+		}
+		http.on_send(&op, c, nil)
+
+		testing.expect_value(t, active_count(&thread), 1)
+		testing.expect(t, c.curr_recv != nil, "expected connection_close to arm drain recv on non-dead-socket error")
+
+		close_socket(peer)
+		peer_closed = true
+
+		timed_out := false
+		guard := nbio.timeout_poly(2 * time.Second, &timed_out, proc(_: ^nbio.Operation, timed_out: ^bool) {
+			timed_out^ = true
+		})
+		for !timed_out && active_count(&thread) > 0 {
+			nbio.tick()
+		}
+		if !timed_out {
+			nbio.remove(guard)
+		}
+		testing.expect(t, !timed_out, "timed out waiting for graceful connection_close drain to finish")
+		testing.expect_value(t, active_count(&thread), 0)
 	}
 }

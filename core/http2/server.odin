@@ -991,6 +991,20 @@ Send_Error :: nbio.Send_File_Error
 
 Send_Callback :: proc(c: ^Connection, err: Send_Error)
 
+@(private="file")
+_send_error_skip_graceful_close :: proc(err: Send_Error) -> bool {
+	tcp_err, is_tcp := err.(nbio.TCP_Send_Error)
+	if !is_tcp {
+		return false
+	}
+
+	#partial switch tcp_err {
+	case .Connection_Closed, .Not_Connected, .Network_Unreachable, .Host_Unreachable, .Timeout, .Invalid_Argument:
+		return true
+	}
+	return false
+}
+
 on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	context.temp_allocator = temp_allocator(c)
 
@@ -1022,29 +1036,30 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 
 	if err != nil {
 		log.warnf("http[t=%v][c=%v]: msg=\"send error\", err=%v", td.id, c.socket, err)
-
-		// TODO: some of these errors don't need a graceful shutdown
-	}
-
-	if err != nil {
 		c.res.state = .Error
 	}
 
 	c.res.sends -= 1
 	c.res.sent  += sent
 
-	should_check := c.res.state == .Sent || c.res.state == .Error
+	should_check  := c.res.state == .Sent || c.res.state == .Error
+	skip_graceful := _send_error_skip_graceful_close(err)
 
 	if on_sent != nil { on_sent(c, err) }
 
 	if should_check {
-		_check_send_done(c)
+		_check_send_done(c, skip_graceful)
 	}
 }
 
-_check_send_done :: proc(c: ^Connection) {
+_check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 	assert(c.res.sends >= 0)
 	if (c.res.state != .Sent && c.res.state != .Error) || c.res.sends > 0 {
+		return
+	}
+
+	if c.res.state == .Error && skip_graceful {
+		connection_destroy(c)
 		return
 	}
 
