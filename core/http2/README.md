@@ -97,8 +97,8 @@
   - Closed `op.accept.client` via `nbio.close` if `xar.push(&thread.connections, ...)` fails, fixed the accept error log format string, and removed the stale `// TODO` comments.
 - [x] **Skip graceful close drain on dead-socket send errors (`server.odin`)**:
   - Added `_send_error_skip_graceful_close` (returning `true` for dead-socket `nbio.TCP_Send_Error` variants `.Connection_Closed`, `.Not_Connected`, `.Network_Unreachable`, `.Host_Unreachable`, `.Timeout`, `.Invalid_Argument`) and updated `on_send` / `_check_send_done` to call `connection_destroy(c)` immediately once `res.sends == 0` instead of waiting on `connection_close`'s `500ms` drain; removed the stale `// TODO` comment in `on_send`.
-- [ ] **Field visibility & stale inline `TODO` cleanup (`server.odin`)**:
-  - Resolve `// TODO: prive` markers on internal `Ctx` and `Response` fields and remove stale inline `TODO` comments for already-completed items (`quota option on server`, `max length`, `send quota too`).
+- [x] **Field visibility & stale inline `TODO` cleanup (`server.odin`)**:
+  - Renamed internal `Ctx` and `Response` fields with `_` prefixes (`_vars` with `@(private) _Context_Var`, `_buf`, `_deferred`, `_last_send`, `_sends`, `_state`), promoted `send_heading` directly over `send_response_heading`, updated callers/tests/`core/websocket`, and removed stale inline `// TODO` comments in `server.odin`.
 - [ ] **`core/websocket` polish (`core/websocket/server.odin`)**:
   - **Bound per-send header memory on long-lived connections**: Avoid growing `c.transaction_arena` on every `_send_multi` (`Outgoing_Frame_Header`) over the lifetime of an upgraded connection (e.g. recycle via a per-connection freelist or free on `http.send`'s `on_sent` callback).
   - **Recycle `ws.arena` on `Ping`/`Pong` control frames**: Destroy/recycle the frame arena after `Pong` is received or after the echoed `Pong` send completes for `Ping`, instead of holding it until the next data/close frame.

@@ -84,7 +84,7 @@ test_scanner_reset_preserves_pipelined_bytes :: proc(t: ^testing.T) {
 	}
 	c.transaction_arena.c = &c
 	c.temp_arena.c = &c
-	c.vars.allocator = http.transaction_allocator(&c)
+	c._vars.allocator = http.transaction_allocator(&c)
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
 
@@ -119,7 +119,7 @@ test_scanner_reset_preserves_pipelined_bytes :: proc(t: ^testing.T) {
 	http.scanner_reset(&c.scanner, &c)
 	http.temp_allocator_destroy(&c)
 	c.ctx = {}
-	c.vars.allocator = http.transaction_allocator(&c)
+	c._vars.allocator = http.transaction_allocator(&c)
 
 	testing.expect(t, c.transaction_arena.tail != nil, "expected preserved scanner block in transaction_arena")
 	testing.expect(t, c.transaction_arena.tail.prev == nil, "expected previous transaction blocks to be freed")
@@ -211,7 +211,7 @@ test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
 	defer http.transaction_allocator_destroy(&c)
 
 	tx_alloc := http.transaction_allocator(&c)
-	c.vars.allocator = tx_alloc
+	c._vars.allocator = tx_alloc
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
@@ -285,7 +285,7 @@ test_scan_temp_line_uses_temp_arena :: proc(t: ^testing.T) {
 	defer http.transaction_allocator_destroy(&c)
 
 	tx_alloc := http.transaction_allocator(&c)
-	c.vars.allocator = tx_alloc
+	c._vars.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
 
@@ -343,7 +343,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	defer http.transaction_allocator_destroy(&c)
 
 	tx_alloc := http.transaction_allocator(&c)
-	c.vars.allocator = tx_alloc
+	c._vars.allocator = tx_alloc
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
@@ -450,7 +450,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	defer http.temp_allocator_destroy(&empty_c)
 	defer http.transaction_allocator_destroy(&empty_c)
 
-	empty_c.vars.allocator = http.transaction_allocator(&empty_c)
+	empty_c._vars.allocator = http.transaction_allocator(&empty_c)
 	http.context_add(&empty_c.ctx, http.Body_Parser_State{})
 
 	empty_bps: http.Body_Parser_Stream
@@ -489,16 +489,16 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		c.temp_arena.c = c
 
 		tx_alloc := http.transaction_allocator(c)
-		c.vars.allocator = tx_alloc
+		c._vars.allocator = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator = tx_alloc
+		c.res._buf.allocator = tx_alloc
 		c.scanner.c = c
 		c.scanner.allocator = &c.transaction_arena
 
 		// Prevent invalid_request -> respond -> _do_send from calling nbio without an event loop.
 		c.res.progress.max = 0
-		c.res.sends = 1
+		c.res._sends = 1
 		c.req.progress.max = req_max
 
 		if len(payload) > 0 {
@@ -522,7 +522,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.URI_Too_Long)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 
 	// 2. Exhausted request quota after request-line during header scanning -> 431 Request Header Fields Too Large.
@@ -533,7 +533,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 
 	// 3. Header count exceeding max_headers (default 128) -> 431 Request Header Fields Too Large.
@@ -558,7 +558,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 		testing.expect_value(t, http.headers_len(c.req.headers), s.opts.max_headers)
 	}
 
@@ -568,14 +568,14 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		setup_conn(t, &c, "", 10 * mem.Megabyte)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "10485761"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 
 	// 4b. Exhausted body quota during body scanning -> 413 Payload Too Large.
@@ -584,14 +584,14 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		setup_conn(t, &c, "5\r\nhe", 0)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 }
 
@@ -744,15 +744,15 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 		defer http.transaction_allocator_destroy(&c)
 
 		tx_alloc := http.transaction_allocator(&c)
-		c.vars.allocator = tx_alloc
+		c._vars.allocator = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator = tx_alloc
+		c.res._buf.allocator = tx_alloc
 		c.scanner.c = &c
 		c.scanner.allocator = &c.transaction_arena
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.res.progress.max = 0
-		c.res.sends = 1
+		c.res._sends = 1
 
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
@@ -767,7 +767,7 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 }
 
@@ -800,8 +800,8 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 
 	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
 		http.write_response_heading(&c.res)
-		c.res.state = .Sending
-		c.res.sends = pending_sends
+		c.res._state = .Sending
+		c.res._sends = pending_sends
 		http.respond(&c.res)
 	}
 
@@ -821,7 +821,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 			case .Unconsumed:
 				state.must_close_1 = http.response_must_close(c)
 				finish_test_response(c, pending_sends = 1)
-				state.res1_had_close = strings.contains(string(c.res.buf[:]), "Connection: close\r\n")
+				state.res1_had_close = strings.contains(string(c.res._buf[:]), "Connection: close\r\n")
 
 			case .Consumed_Keepalive:
 				state.finish = finish_test_response
@@ -988,7 +988,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected partial chunked respond to require closing")
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial chunked respond")
-		testing.expect(t, strings.contains(string(env.c.res.buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+		testing.expect(t, strings.contains(string(env.c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
 	}
 
 	{
@@ -1005,7 +1005,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected partial Content-Length respond to require closing")
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial Content-Length respond")
-		testing.expect(t, strings.contains(string(env.c.res.buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+		testing.expect(t, strings.contains(string(env.c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
 	}
 }
 
@@ -1022,10 +1022,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		c.temp_arena.c = c
 
 		tx_alloc := http.transaction_allocator(c)
-		c.vars.allocator = tx_alloc
+		c._vars.allocator = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator = tx_alloc
+		c.res._buf.allocator = tx_alloc
 		c.scanner.c = c
 		c.scanner.allocator = &c.transaction_arena
 
@@ -1033,7 +1033,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		c.req.progress.timeout = -1
 		// Prevent send_continue/respond -> _do_send from calling nbio without an event loop.
 		c.res.progress.max = 0
-		c.res.sends = 1
+		c.res._sends = 1
 
 		if len(payload) > 0 {
 			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
@@ -1061,12 +1061,12 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
 				st := (^Reject_State)(h.user_data)
 				st.handled = true
-				st.sends_seen = ctx.res.sends
+				st.sends_seen = ctx.res._sends
 				st.sent_seen = ctx.res.sent
 				ctx.res.status = .Unauthorized
 				http.write_response_heading(&ctx.res)
-				ctx.res.state = .Sending
-				ctx.res.sends = 1
+				ctx.res._state = .Sending
+				ctx.res._sends = 1
 				http.respond(&ctx.res)
 			},
 		}
@@ -1092,7 +1092,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect(t, state.handled, "expected handler to be invoked")
 		testing.expect_value(t, state.sends_seen, 0)
 		testing.expect_value(t, state.sent_seen, 0)
-		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 401 Unauthorized\r\n"), "expected 401 status line")
+		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 401 Unauthorized\r\n"), "expected 401 status line")
 	}
 
 	s := http.make_server({})
@@ -1112,7 +1112,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
@@ -1121,8 +1121,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
-		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
 	}
 
 	// 3. Content-Length: 0 -> finishes immediately and does not send 100 Continue.
@@ -1136,7 +1136,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		c.req.has_consumed_body = true
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
@@ -1152,8 +1152,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		})
 		testing.expect_value(t, zs.calls, 1)
 		testing.expect(t, !zs.is_partial, "expected 0-byte body to finish immediately")
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
-		testing.expect_value(t, c.res.sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Handling)
+		testing.expect_value(t, c.res._sends, 1)
 	}
 
 	// 4. Buffered body bytes already in scanner -> reads body without sending 100 Continue.
@@ -1168,7 +1168,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "hello", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
@@ -1187,8 +1187,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		})
 		testing.expect(t, bs.finished, "expected buffered body to finish")
 		testing.expect_value(t, string(bs.got[:bs.got_len]), "hello")
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
-		testing.expect_value(t, c.res.sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Handling)
+		testing.expect_value(t, c.res._sends, 1)
 	}
 
 	// 5. HTTP/1.0 with Expect: 100-continue -> does not send 100 Continue and schedules scan.
@@ -1197,7 +1197,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 0}
 		c.scanner.is_pumping = true
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
@@ -1206,8 +1206,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Handling)
-		testing.expect_value(t, c.res.sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Handling)
+		testing.expect_value(t, c.res._sends, 1)
 		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
 	}
 
@@ -1217,7 +1217,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
@@ -1225,9 +1225,9 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.res.status, http.Status{})
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect_value(t, len(c.res._buf), 0)
 	}
 
 	// 7. HTTP/1.1 chunked body(): sends 100 Continue when quota available, rejects 413 without 100 Continue when max == 0.
@@ -1236,7 +1236,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-Continue"), nil)
@@ -1244,16 +1244,16 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.res.status, http.Status{})
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect_value(t, len(c.res._buf), 0)
 	}
 	{
 		c: http.Connection
 		setup_conn(t, &thread, &c, "", 0)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.req.line.version = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
@@ -1262,8 +1262,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
-		testing.expect(t, strings.has_prefix(string(c.res.buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
 	}
 
 	// 8. Already sending response -> does not send 100 Continue.
@@ -1272,7 +1272,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		setup_conn(t, &thread, &c, "", 100)
 		defer cleanup_conn(&c)
 
-		c.res.state = .Sending
+		c.res._state = .Sending
 		c.req.line.version = {1, 1}
 		c.scanner.is_pumping = true
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
@@ -1281,8 +1281,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Sending)
-		testing.expect_value(t, c.res.sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
+		testing.expect_value(t, c.res._sends, 1)
 		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
 	}
 }

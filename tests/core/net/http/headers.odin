@@ -316,7 +316,7 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 	testing.expect_value(t, values[3], "cross_tok=n; SameSite=None; Secure")
 
 	http.write_response_heading(&c.res)
-	heading := string(c.res.buf[:])
+	heading := string(c.res._buf[:])
 	testing.expect(t, strings.contains(heading, "Set-Cookie: session=abc123\r\n"), "expected first Set-Cookie header line")
 	testing.expect(t, strings.contains(heading, "Set-Cookie: prefs=dark  mode; Domain=example.com; Expires=Sat, 21 Nov 2026 15:30:00 GMT; Max-Age=3600; Path=/app; SameSite=Lax; Secure; Partitioned; HttpOnly\r\n"), "expected escaped second Set-Cookie header line")
 	testing.expect(t, strings.contains(heading, "Set-Cookie: strict_tok=s; SameSite=Strict\r\n"), "expected strict Set-Cookie header line")
@@ -441,9 +441,9 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{"ok":true}`))
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
@@ -456,9 +456,9 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.set_header(&c.res, "Content-Type", "application/vnd.custom+json")
 		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{}`))
@@ -472,9 +472,9 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.respond_file_content(&c.res, "LICENSE", transmute([]byte)string("MIT"))
 		_, has_ct := http.headers_get(c.res.headers, "content-type")
@@ -493,15 +493,15 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.respond_plain(&c.res, "hello world")
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "text/plain")
-		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 11\r\n"), "expected Content-Length: 11")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Content-Length: 11\r\n"), "expected Content-Length: 11")
 	}
 
 	// 2. respond_html sets Content-Type: text/html and preserves pre-set Content-Type.
@@ -509,23 +509,23 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.respond_html(&c.res, "<p>hi</p>")
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "text/html")
-		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 9\r\n"), "expected Content-Length: 9")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Content-Length: 9\r\n"), "expected Content-Length: 9")
 	}
 	{
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		http.set_header(&c.res, "Content-Type", "application/xhtml+xml")
 		http.respond_html(&c.res, "<p>hi</p>")
@@ -544,16 +544,16 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		defer http.connection_destroy(c)
 		c.req.line.method  = .Head
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		err := http.respond_json(&c.res, Payload{name = "odin", n = 42})
 		testing.expect_value(t, err, nil)
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "application/json")
-		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 22\r\n"), "expected Content-Length: 22")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Content-Length: 22\r\n"), "expected Content-Length: 22")
 	}
 
 	// 4. respond_json returns error cleanly before touching headers or response buffer.
@@ -561,15 +561,15 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		bad := proc() {}
 		err := http.respond_json(&c.res, bad)
 		testing.expect_value(t, err, json.Marshal_Error(json.Marshal_Data_Error.Unsupported_Type))
-		testing.expect(t, c.res.state == .Handling, "expected state to remain .Handling on marshal error")
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect(t, c.res._state == .Handling, "expected state to remain .Handling on marshal error")
+		testing.expect_value(t, len(c.res._buf), 0)
 		_, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, !has_ct)
 	}
@@ -589,9 +589,9 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 		c.res.status       = .OK
-		c.res.state        = .Handling
+		c.res._state        = .Handling
 		c.res.progress.max = 0
-		c.res.sends        = 1
+		c.res._sends        = 1
 
 		cw: http.Chunked_Writer
 		w := http.chunked_writer_init(&cw, &c.res, chunk_size = 8)
@@ -599,22 +599,22 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		te, has_te := http.headers_get(c.res.headers, "transfer-encoding")
 		testing.expect(t, has_te)
 		testing.expect_value(t, te, "chunked")
-		testing.expect(t, c.res.state == .Handling, "expected headers not to flush on init")
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect(t, c.res._state == .Handling, "expected headers not to flush on init")
+		testing.expect_value(t, len(c.res._buf), 0)
 
 		n, werr := io.write_string(w, "hi!")
 		testing.expect_value(t, werr, io.Error.None)
 		testing.expect_value(t, n, 3)
 		testing.expect_value(t, string(cw.buf[:]), "hi!")
-		testing.expect(t, c.res.state == .Handling, "expected buffered write not to flush headers")
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect(t, c.res._state == .Handling, "expected buffered write not to flush headers")
+		testing.expect_value(t, len(c.res._buf), 0)
 
 		// Destroy flushes remaining buffered bytes and marks the writer closed.
 		derr := io.destroy(w)
 		testing.expect_value(t, derr, io.Error.None)
 		testing.expect(t, cw.ended)
-		testing.expect(t, strings.contains(string(c.res.buf[:]), "Transfer-Encoding: chunked\r\n"), "expected Transfer-Encoding: chunked")
-		testing.expect(t, !strings.contains(string(c.res.buf[:]), "Content-Length:"), "unexpected Content-Length in chunked response")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Transfer-Encoding: chunked\r\n"), "expected Transfer-Encoding: chunked")
+		testing.expect(t, !strings.contains(string(c.res._buf[:]), "Content-Length:"), "unexpected Content-Length in chunked response")
 
 		n2, werr2 := io.write_string(w, "after")
 		testing.expect_value(t, werr2, io.Error.Closed)

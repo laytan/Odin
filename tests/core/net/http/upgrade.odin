@@ -59,11 +59,11 @@ push_test_connection :: proc(
 	c.scanner.allocator   = &c.transaction_arena
 
 	tx_alloc := http.transaction_allocator(c)
-	c.vars.allocator         = tx_alloc
+	c._vars.allocator         = tx_alloc
 	c.req.headers.allocator  = tx_alloc
 	c.res.headers.allocator  = tx_alloc
-	c.res.buf.allocator      = tx_alloc
-	c.res.deferred.allocator = tx_alloc
+	c.res._buf.allocator      = tx_alloc
+	c.res._deferred.allocator = tx_alloc
 
 	c.req.quota = &env.s.opts.request_quota
 	http.progression_init(&c.req.progress, c.req.quota^)
@@ -115,17 +115,17 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.res.headers, "Connection", "upgrade"), nil)
 
 		http.write_response_heading(&c.res)
-		heading := string(c.res.buf[:])
+		heading := string(c.res._buf[:])
 		testing.expect(t, strings.has_prefix(heading, "HTTP/1.1 101 Switching Protocols\r\n"), "expected 101 status line")
 		testing.expect(t, !strings.contains(heading, "Content-Length:"), "expected no Content-Length on 101 heading")
 		testing.expect(t, !strings.contains(heading, "Connection: close"), "expected no Connection: close on 101 heading")
 
-		c.res.state = .Sending
-		c.res.sends = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 
 		op := nbio.Operation{
 			type = .Send,
-			send = {sent = len(c.res.buf)},
+			send = {sent = len(c.res._buf)},
 		}
 		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
 			chk := http.context_get(&c.ctx, Upgrade_Check)
@@ -140,8 +140,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		testing.expect(t, chk.on_sent_called, "expected on_sent callback after 101 flush")
 		testing.expect_value(t, chk.last_err, nil)
 		testing.expect(t, chk.temp_alloc_matched, "expected temp_allocator bound inside on_sent")
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Sending)
-		testing.expect_value(t, c.res.sends, 0)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
+		testing.expect_value(t, c.res._sends, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 1)
 		testing.expect_value(t, c.req.progress.max, -1)
 		testing.expect_value(t, c.req.progress.timeout, time.Duration(-1))
@@ -155,8 +155,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		defer http.connection_destroy(c)
 
 		chk := http.context_add(&c.ctx, Upgrade_Check{})
-		c.res.state = .Sending
-		c.res.sends = 2
+		c.res._state = .Sending
+		c.res._sends = 2
 
 		op := nbio.Operation{
 			type = .Send,
@@ -170,8 +170,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 
 		testing.expect(t, chk.on_sent_called, "expected on_sent callback on error")
 		testing.expect_value(t, chk.last_err, http.Send_Error(nbio.TCP_Send_Error.Connection_Closed))
-		testing.expect_value(t, c.res.sends, 1)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
 
 	// 3. respond() on a 101 response transitions to .Sent while keeping status == .Switching_Protocols.
@@ -180,10 +180,10 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		defer http.connection_destroy(c)
 
 		c.res.status = .Switching_Protocols
-		c.res.state  = .Sending
-		c.res.sends  = 1
+		c.res._state  = .Sending
+		c.res._sends  = 1
 		http.respond(&c.res)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Sent)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Sent)
 	}
 }
 
@@ -204,8 +204,8 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		defer http.connection_destroy(c)
 
 		st := http.context_add(&c.ctx, Close_State{})
-		c.res.state = .Sending
-		c.res.sends = 2
+		c.res._state = .Sending
+		c.res._sends = 2
 		c.scanner.scan = {
 			split     = http.split_n(16),
 			allocator = &c.temp_arena,
@@ -214,7 +214,7 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		testing.expect(t, c.scanner.scan.callback != nil, "expected pending scan before close")
 
 		http.connection_close(c)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect(t, c.scanner.scan.callback == nil, "expected scanner scan cleared on connection_close")
 		testing.expect_value(t, active_connection_count(&env.thread), 1)
 
@@ -223,8 +223,8 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		payload := transmute([]byte)string("ignored")
 		http.send(&c.res, {payload})
 		http.respond(&c.res)
-		testing.expect_value(t, c.res.sends, 2)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._sends, 2)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 
 		// First of two pending sends finishes: connection remains alive until sends hits 0.
 		op1 := nbio.Operation{type = .Send, send = {sent = 8}}
@@ -233,8 +233,8 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 			st.calls += 1
 		})
 		testing.expect_value(t, st.calls, 1)
-		testing.expect_value(t, c.res.sends, 1)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._sends, 1)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, active_connection_count(&env.thread), 1)
 	}
 
@@ -243,11 +243,11 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env)
 		defer http.connection_destroy(c)
 
-		c.res.state = .Sending
-		c.res.sends = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 		http.invalid_request(c, .Request_Timeout)
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
-		testing.expect_value(t, len(c.res.buf), 0)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		testing.expect_value(t, len(c.res._buf), 0)
 	}
 }
 
@@ -270,7 +270,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env, payload = "AAAA" + "BBBB" + "CCCC")
 		defer http.connection_destroy(c)
 
-		c.res.state = .Sending
+		c.res._state = .Sending
 		st := http.context_add(&c.ctx, Frame_Loop_State{t = t})
 
 		scan_next_frame :: proc(c: ^http.Connection) {
@@ -325,17 +325,17 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env, payload = "hi")
 		defer http.connection_destroy(c)
 
-		c.res.state        = .Sending
-		c.res.sends        = 1
+		c.res._state        = .Sending
+		c.res._sends        = 1
 		c.req.progress.max = 0
 
 		http.scan_temp_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.scanner.allocator, &c.temp_arena)
 		testing.expect(t, len(c.scanner.buf) >= http.MULTIPLIER, "expected scanner buffer allocated in temp_arena")
 		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hi")
 
-		c.res.state        = .Sending
+		c.res._state        = .Sending
 		c.req.progress.max = -1
 		http.scan_temp_bytes(&c.scanner, 2, proc(c: ^http.Connection, data: []byte) {
 			free_all(context.temp_allocator)
@@ -345,14 +345,14 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 
 		c.req.progress.max = 0
 		http.scan_temp_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
-		testing.expect_value(t, c.res.state, type_of(c.res.state).Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect(t, len(c.scanner.buf) >= http.MULTIPLIER, "expected fresh scanner buffer allocated")
 	}
 
 	// 3. Destroying connection from inside Scan_Cb during scanner_pump is ASAN-safe (_pump_destroyed).
 	{
 		c := push_test_connection(t, &env, payload = "bye!")
-		c.res.state = .Sending
+		c.res._state = .Sending
 
 		http.scan_temp_bytes(&c.scanner, 4, proc(c: ^http.Connection, data: []byte) {
 			http.connection_destroy(c)
@@ -421,8 +421,8 @@ test_connection_detach :: proc(t: ^testing.T) {
 		st := Detach_State{t = t}
 		http.context_add(&c.ctx, &st)
 
-		c.res.state = .Sending
-		c.res.sends = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 
 		op := nbio.Operation{type = .Send, send = {sent = 16}}
 		http.on_send(&op, c, proc(c: ^http.Connection, send_err: http.Send_Error) {
@@ -440,7 +440,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 	}
 	{
 		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(45), payload = "HDR!TAIL")
-		c.res.state = .Sending
+		c.res._state = .Sending
 		st := Detach_State{t = t}
 		http.context_add(&c.ctx, &st)
 

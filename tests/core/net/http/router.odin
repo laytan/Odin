@@ -20,16 +20,16 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		c.temp_arena.c = c
 
 		tx_alloc := http.transaction_allocator(c)
-		c.vars.allocator = tx_alloc
+		c._vars.allocator = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator = tx_alloc
+		c.res._buf.allocator = tx_alloc
 		c.scanner.c = c
 		c.scanner.allocator = &c.transaction_arena
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.res.progress.max = 0
-		c.res.sends = 1
+		c.res._sends = 1
 
 		if len(payload) > 0 {
 			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
@@ -62,9 +62,9 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st.wants_body = http.wants_body(&ctx.req)
 
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.write_response_heading(&ctx.res)
-				ctx.res.state = .Sending
+				ctx.res._state = .Sending
 				http.respond(&ctx.res)
 			},
 		}
@@ -127,7 +127,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st.param_len = copy(st.param_buf[:], id)
 
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.respond_bytes(&ctx.res, transmute([]byte)string("hello"))
 			},
 		})
@@ -137,7 +137,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st := (^Fallback_State)(h.user_data)
 				st.all_called = true
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.respond(&ctx.res)
 			},
 		})
@@ -154,7 +154,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		testing.expect_value(t, state.method, http.Method.Head)
 		testing.expect(t, !state.wants_body, "expected wants_body to be false for HEAD")
 		testing.expect_value(t, string(state.param_buf[:state.param_len]), "42")
-		testing.expect(t, strings.contains(string(c.res.buf[:]), "Content-Length: 5\r\n"), "expected Content-Length: 5 header")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Content-Length: 5\r\n"), "expected Content-Length: 5 header")
 	}
 
 	// 3. Explicit route_head takes precedence over route_get for HEAD requests.
@@ -177,7 +177,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st.head_called = true
 				st.head_method = ctx.req.line.method
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.respond(&ctx.res)
 			},
 		})
@@ -188,7 +188,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st.get_called = true
 				st.get_method = ctx.req.line.method
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.respond(&ctx.res)
 			},
 		})
@@ -236,7 +236,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 				st.called = true
 				st.method = ctx.req.line.method
 				ctx.res.progress.max = 0
-				ctx.res.sends = 1
+				ctx.res._sends = 1
 				http.respond(&ctx.res)
 			},
 		})
@@ -316,15 +316,15 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 		}
 
 		tx_alloc := http.transaction_allocator(&c)
-		c.vars.allocator        = tx_alloc
+		c._vars.allocator        = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator     = tx_alloc
+		c.res._buf.allocator     = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		c.res.state             = .Handling
+		c.res._state             = .Handling
 		c.res.progress.max      = 0
-		c.res.sends             = 1
+		c.res._sends             = 1
 		c.req.line = {
 			method  = .Get,
 			target  = raw_target,

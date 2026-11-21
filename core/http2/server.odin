@@ -190,20 +190,19 @@ temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
 }
 
 Ctx :: struct {
-	req:  Request,
-	res:  Response,
-	// TODO: prive
-	vars: [dynamic]Context_Var,
+	req:   Request,
+	res:   Response,
+	_vars: [dynamic]_Context_Var,
 }
 
-Context_Var :: struct {
+_Context_Var :: struct {
 	id:  typeid,
 	val: rawptr,
 }
 
 context_add :: proc(ctx: ^Ctx, var: $T) -> ^T {
 	val := new_clone(var, transaction_allocator(ctx))
-	append(&ctx.vars, Context_Var{
+	append(&ctx._vars, _Context_Var{
 		id  = T,
 		val = val,
 	})
@@ -211,7 +210,7 @@ context_add :: proc(ctx: ^Ctx, var: $T) -> ^T {
 }
 
 context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
-	#reverse for var in ctx.vars {
+	#reverse for var in ctx._vars {
 		if var.id == T {
 			return (^T)(var.val)
 		}
@@ -233,18 +232,13 @@ Response :: struct {
 	progress: Progression,
 	status:   Status,
 	headers:  Headers,
+	sent:     int,
 
-	// TODO: prive
-	buf: [dynamic]byte,
-	// TODO: prive
-	deferred: [dynamic]proc(ctx: ^Ctx),
-
-	// TODO: prive
-	last_send: time.Time,
-	sends: int,
-	sent:  int,
-	// TODO: prive
-	state: enum {
+	_buf:       [dynamic]byte,
+	_deferred:  [dynamic]proc(ctx: ^Ctx),
+	_last_send: time.Time,
+	_sends:     int,
+	_state:     enum {
 		None,
 		Handling,
 		Sending,  // send or send_file is called at least once (and heading is sent).
@@ -268,14 +262,8 @@ response_set_quota :: proc(res: ^Response, quota: ^Quota) {
 }
 
 response_defer :: proc(ctx: ^Ctx, deffered: proc(^Ctx)) {
-	append(&ctx.res.deferred, deffered)
+	append(&ctx.res._deferred, deffered)
 }
-
-// TODO: quota option on server. Transaction could hold only the 2 mutating durations to save space.
-
-// TODO: max length
-
-// TODO: send quota too
 
 @(thread_local)
 td: ^Server_Thread
@@ -352,11 +340,11 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 }
 
 _is_scanning_request_line :: proc(c: ^Connection) -> bool {
-	return c.res.state == .None && c.req.line.version == {}
+	return c.res._state == .None && c.req.line.version == {}
 }
 
 _is_scanning_headers :: proc(c: ^Connection) -> bool {
-	return c.res.state == .None && c.req.line.version != {}
+	return c.res._state == .None && c.req.line.version != {}
 }
 
 _connection_is_idle :: proc(c: ^Connection) -> bool {
@@ -483,13 +471,6 @@ _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
 		return
 	}
 
-	// TODO: initialize with server's configs
-
-	// Scanner.
-	// Scanner per transaction.
-	// Re-use scanners?
-	// Scan entire header?
-
 	_serve_connection(c)
 }
 
@@ -500,11 +481,11 @@ CONN_CLOSE_DELAY :: time.Millisecond * 500
 // Sends a FIN, receives for at most CONN_CLOSE_DELAY (making sure the client gets our close / waiting for it to close too).
 // Ultimately destroying the connection.
 connection_close :: proc(c: ^Connection) {
-	c.res.state    = .Error
+	c.res._state    = .Error
 	c.scanner.scan = {}
 	nbio.remove(c.curr_recv)
 	c.curr_recv = nil
-	if c.res.sends > 0 {
+	if c.res._sends > 0 {
 		return
 	}
 	if c.socket == {} {
@@ -545,11 +526,11 @@ _connection_release :: proc(c: ^Connection) {
 		c.scanner._pump_destroyed^ = true
 	}
 
-	#reverse for deferred in c.res.deferred {
+	#reverse for deferred in c.res._deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
 		deferred(&c.ctx)
 	}
-	clear(&c.res.deferred)
+	clear(&c.res._deferred)
 
 	temp_allocator_destroy(c)
 	transaction_allocator_destroy(c)
@@ -576,7 +557,7 @@ connection_destroy :: proc(c: ^Connection) {
 // Removes the connection from the server pool without closing the socket, returning the underlying
 // socket and a copy of any unread bytes still buffered in the scanner.
 connection_detach :: proc(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error) {
-	assert(c.res.sends == 0, "cannot detach connection while sends are in flight")
+	assert(c.res._sends == 0, "cannot detach connection while sends are in flight")
 	assert(allocator.data != &c.temp_arena && allocator.data != &c.transaction_arena, "cannot allocate detached buffer from connection's arena")
 
 	unread := c.scanner.buf[c.scanner.read_head:c.scanner.write_head]
@@ -596,8 +577,8 @@ connection_detach :: proc(c: ^Connection, allocator := context.allocator) -> (so
 
 invalid_request :: proc(c: ^Connection, status: Status) {
 	c.scanner.scan = {}
-	if c.res.state != .None && c.res.state != .Handling {
-		c.res.state = .Error
+	if c.res._state != .None && c.res._state != .Handling {
+		c.res._state = .Error
 		_check_send_done(c)
 		return
 	}
@@ -628,9 +609,9 @@ _serve_connection :: proc(c: ^Connection) {
 
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
-	c.vars.allocator         = allocator
-	c.res.buf.allocator      = allocator
-	c.res.deferred.allocator = allocator
+	c._vars.allocator         = allocator
+	c.res._buf.allocator      = allocator
+	c.res._deferred.allocator = allocator
 
 	scan_line(&c.scanner, on_rline1)
 }
@@ -714,7 +695,7 @@ on_headers :: proc(c: ^Connection) {
 		return
 	}
 
-	c.res.state = .Handling
+	c.res._state = .Handling
 	c.req.quota = &td.s.opts.body_quota
 	progression_reset(&c.req.progress, c.req.quota^)
 	_headers_set_readonly(&c.req.headers)
@@ -726,7 +707,7 @@ on_headers :: proc(c: ^Connection) {
 		respond(&c.res)
 	} else {
 		context.temp_allocator = temp_allocator(c)
-		c.ctx.vars.allocator   = transaction_allocator(c)
+		c.ctx._vars.allocator   = transaction_allocator(c)
 		c.res.status = .OK
 		assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
 		td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
@@ -905,14 +886,11 @@ header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_
 
 // PERF: we could read the next request after "consume body" is done already, while response is still being sent
 
-// TODO
-send_heading :: send_response_heading
-
 write_response_heading :: proc(res: ^Response) {
-	// if len(res.buf) > 0 {
+	// if len(res._buf) > 0 {
 	// 	return
 	// }
-	assert(len(res.buf) == 0)
+	assert(len(res._buf) == 0)
 
 	c := connection_of_response(res)
 
@@ -921,54 +899,54 @@ write_response_heading :: proc(res: ^Response) {
 	// PERF: to avoid resizes and reallocs of the buffer.
 	// We could keep a list of buffers instead.
 
-	w := buf_writer(&res.buf)
+	w := buf_writer(&res._buf)
 
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
 	reserve_size    := MIN + (AVG_HEADER_SIZE * headers_len(res.headers))
-	reserve(&res.buf, reserve_size)
+	reserve(&res._buf, reserve_size)
 
-	append(&res.buf, "HTTP/1.1 ")
+	append(&res._buf, "HTTP/1.1 ")
 
 	status := status_string(res.status)
 	if len(status) > 0 {
-		append(&res.buf, status)
+		append(&res._buf, status)
 	} else {
 		_, err := io.write_int(w, int(res.status))
 		assert(err == nil) // TODO
-		append(&res.buf, " \r\n")
+		append(&res._buf, " \r\n")
 	}
 
 	// Per RFC 9910 6.6.1 a Date header must be added in 2xx, 3xx, 4xx responses.
 	if !headers_has(res.headers, "date") {
-		append(&res.buf, "Date: ")
-		append(&res.buf, ..td.date[:])
-		append(&res.buf, "\r\n")
+		append(&res._buf, "Date: ")
+		append(&res._buf, ..td.date[:])
+		append(&res._buf, "\r\n")
 	}
 
 	if response_needs_content_length(c) {
 		if !headers_has(res.headers, "content-length") && !headers_has(res.headers, "transfer-encoding") {
-			append(&res.buf, "Content-Length: 0\r\n")
+			append(&res._buf, "Content-Length: 0\r\n")
 		}
 	}
 
 	if response_must_close(c) && !headers_has(res.headers, "connection") {
-		append(&res.buf, "Connection: close\r\n")
+		append(&res._buf, "Connection: close\r\n")
 	}
 
 	for i := 0; header, value in headers_iter(&res.headers, &i) {
 		headers_valid_key(header) or_continue
-		append(&res.buf, header)
-		append(&res.buf, ": ")
+		append(&res._buf, header)
+		append(&res._buf, ": ")
 
 		for value := value; part in header_value_iterator(&value) {
-			append(&res.buf, part)
+			append(&res._buf, part)
 		}
 
-		append(&res.buf, "\r\n")
+		append(&res._buf, "\r\n")
 	}
 
-	append(&res.buf, "\r\n")
+	append(&res._buf, "\r\n")
 
 	// A server MUST NOT send a Content-Length header field in any response
 	// with a status code of 1xx (Informational) or 204 (No Content).  A
@@ -1031,18 +1009,18 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	}
 
 	if sent > 0 {
-		progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res.last_send))
+		progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res._last_send))
 	}
 
 	if err != nil {
 		log.warnf("http[t=%v][c=%v]: msg=\"send error\", err=%v", td.id, c.socket, err)
-		c.res.state = .Error
+		c.res._state = .Error
 	}
 
-	c.res.sends -= 1
+	c.res._sends -= 1
 	c.res.sent  += sent
 
-	should_check  := c.res.state == .Sent || c.res.state == .Error
+	should_check  := c.res._state == .Sent || c.res._state == .Error
 	skip_graceful := _send_error_skip_graceful_close(err)
 
 	if on_sent != nil { on_sent(c, err) }
@@ -1053,28 +1031,28 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 }
 
 _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
-	assert(c.res.sends >= 0)
-	if (c.res.state != .Sent && c.res.state != .Error) || c.res.sends > 0 {
+	assert(c.res._sends >= 0)
+	if (c.res._state != .Sent && c.res._state != .Error) || c.res._sends > 0 {
 		return
 	}
 
-	if c.res.state == .Error && skip_graceful {
+	if c.res._state == .Error && skip_graceful {
 		connection_destroy(c)
 		return
 	}
 
-	if c.res.state == .Error || c.res.status == .Switching_Protocols || response_must_close(c) || response_has_close(&c.res) {
+	if c.res._state == .Error || c.res.status == .Switching_Protocols || response_must_close(c) || response_has_close(&c.res) {
 		connection_close(c)
 		return
 	}
 
 	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
 
-	#reverse for deferred in c.res.deferred {
+	#reverse for deferred in c.res._deferred {
 		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
 		deferred(&c.ctx)
 	}
-	clear(&c.res.deferred)
+	clear(&c.res._deferred)
 
 	_serve_connection(c)
 }

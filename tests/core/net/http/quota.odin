@@ -207,16 +207,16 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		c.temp_arena.c = c
 
 		tx_alloc := http.transaction_allocator(c)
-		c.vars.allocator = tx_alloc
+		c._vars.allocator = tx_alloc
 		c.req.headers.allocator = tx_alloc
 		c.res.headers.allocator = tx_alloc
-		c.res.buf.allocator = tx_alloc
+		c.res._buf.allocator = tx_alloc
 		c.scanner.c = c
 		c.scanner.allocator = &c.transaction_arena
 
-		c.res.state = .Handling
+		c.res._state = .Handling
 		c.res.progress.max = 0
-		c.res.sends = 1
+		c.res._sends = 1
 
 		c.req.quota = quota
 		http.progression_reset(&c.req.progress, quota^)
@@ -286,6 +286,6 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.req.quota, &req_tight)
 		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
-		testing.expect(t, c.res.state == .Error)
+		testing.expect(t, c.res._state == .Error)
 	}
 }

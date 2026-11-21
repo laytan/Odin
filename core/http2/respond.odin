@@ -257,11 +257,11 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 	c := connection_of_response(res)
 	log.debugf("http[t=%v][c=%v]: offset=%v, nbytes=%v", td.id, c.socket, offset, nbytes)
 
-	switch res.state {
+	switch res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		send_response_heading(res)
+		send_heading(res)
 	case .Sending:
 	case .Sent:
 		panic("response has been sent already")
@@ -273,7 +273,7 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 		max := c.res.progress.max
 		timeout := c.res.progress.timeout
 		if max == 0 || timeout == 0 {
-			res.state = .Error
+			res._state = .Error
 			_check_send_done(c)
 			return
 		}
@@ -286,26 +286,26 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 			timeout = nbio.NO_TIMEOUT
 		}
 
-		res.sends += 1
-		res.last_send = now()
+		res._sends += 1
+		res._last_send = now()
 		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes, timeout=timeout)
 	}
 }
 
 send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	c := connection_of_response(res)
-	switch res.state {
+	switch res._state {
 	case .Error:
 		return
 	case .None, .Handling:
 		write_response_heading(res)
-		res.state = .Sending
+		res._state = .Sending
 		if !wants_body(&c.req) || len(bufs) == 0 {
-			_do_send(res, {res.buf[:]}, on_sent)
+			_do_send(res, {res._buf[:]}, on_sent)
 			return
 		}
 		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
-		new_bufs[0] = res.buf[:]
+		new_bufs[0] = res._buf[:]
 		copy(new_bufs[1:], bufs)
 		_do_send(res, new_bufs, on_sent)
 	case .Sending:
@@ -330,7 +330,7 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 	max := c.res.progress.max
 	timeout := c.res.progress.timeout
 	if max == 0 || timeout == 0 {
-		res.state = .Error
+		res._state = .Error
 		_check_send_done(c)
 		return
 	}
@@ -343,8 +343,8 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 		timeout = nbio.NO_TIMEOUT
 	}
 
-	res.sends += 1
-	res.last_send = now()
+	res._sends += 1
+	res._last_send = now()
 	nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
 
 	constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
@@ -385,7 +385,7 @@ _begin_chunked :: proc(res: ^Response) -> ^_Chunked_State {
 		return state
 	}
 
-	assert(res.state == .None || res.state == .Handling, "cannot begin chunked response after headers have been sent")
+	assert(res._state == .None || res._state == .Handling, "cannot begin chunked response after headers have been sent")
 	assert(!headers_has(res.headers, "content-length"), "cannot use chunked encoding with Content-Length header")
 
 	if !headers_has(res.headers, "transfer-encoding") {
@@ -414,22 +414,22 @@ respond :: proc(res: ^Response) {
 	c := connection_of_response(res)
 	is_chunked := context_get(context_of_response(res), _Chunked_State) != nil
 
-	switch res.state {
+	switch res._state {
 	case .Error:
 		return
 	case .None, .Handling:
 		if is_chunked && wants_body(&c.req) && _response_allows_body(c) {
 			send(res, {transmute([]byte)string("0\r\n\r\n")})
 		} else {
-			send_response_heading(res)
+			send_heading(res)
 		}
-		if res.state == .Error {
+		if res._state == .Error {
 			return
 		}
 	case .Sending:
 		if is_chunked && wants_body(&c.req) && _response_allows_body(c) {
 			send(res, {transmute([]byte)string("0\r\n\r\n")})
-			if res.state == .Error {
+			if res._state == .Error {
 				return
 			}
 		}
@@ -439,14 +439,14 @@ respond :: proc(res: ^Response) {
 		unreachable()
 	}
 
-	res.state = .Sent
+	res._state = .Sent
 	_check_send_done(c)
 }
 
 respond_bytes :: proc(res: ^Response, bytes: []byte) {
 	c := connection_of_response(res)
 
-	switch res.state {
+	switch res._state {
 	case .Error:
 		return
 	case .None, .Handling:
@@ -454,9 +454,9 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 		if len(bytes) > 0 {
 			send(res, {bytes})
 		} else {
-			send_response_heading(res)
+			send_heading(res)
 		}
-		if res.state == .Error {
+		if res._state == .Error {
 			return
 		}
 	case .Sent, .Sending:
@@ -465,7 +465,7 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 		unreachable()
 	}
 
-	res.state = .Sent
+	res._state = .Sent
 	_check_send_done(c)
 }
 
@@ -494,7 +494,7 @@ respond_json :: proc(res: ^Response, v: any, opt: json.Marshal_Options = {}, loc
 }
 
 send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
-	if res.state == .Error {
+	if res._state == .Error {
 		return
 	}
 
@@ -516,7 +516,7 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 	}
 
 	hdr: []byte
-	if res.sends == 0 {
+	if res._sends == 0 {
 		hdr = _write_chunk_header(state.hdr[:], total)
 	} else {
 		tmp: [20]byte
@@ -524,7 +524,7 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 		alloc_err: runtime.Allocator_Error
 		hdr, alloc_err = make([]byte, len(raw), transaction_allocator(c))
 		if alloc_err != nil {
-			res.state = .Error
+			res._state = .Error
 			_check_send_done(c)
 			return
 		}
@@ -591,7 +591,7 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 
 			#partial switch mode {
 			case .Write:
-				if cw.ended || cw.res.state == .Error {
+				if cw.ended || cw.res._state == .Error {
 					return 0, .Closed
 				}
 				if len(p) == 0 {
@@ -606,7 +606,7 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 				} else {
 					if len(cw.buf) > 0 && len(cw.buf) + len(p) > cw.chunk_size {
 						flush_buf(cw)
-						if cw.res.state == .Error {
+						if cw.res._state == .Error {
 							return 0, .Closed
 						}
 					}
@@ -630,28 +630,28 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 					}
 				}
 
-				if cw.res.state == .Error {
+				if cw.res._state == .Error {
 					return 0, .Closed
 				}
 				return i64(len(p)), nil
 
 			case .Flush:
-				if cw.ended || cw.res.state == .Error {
+				if cw.ended || cw.res._state == .Error {
 					return 0, .Closed
 				}
 				if len(cw.buf) > 0 {
 					flush_buf(cw)
-				} else if cw.res.state == .None || cw.res.state == .Handling {
+				} else if cw.res._state == .None || cw.res._state == .Handling {
 					send_chunk(cw.res, nil)
 				}
-				if cw.res.state == .Error {
+				if cw.res._state == .Error {
 					return 0, .Closed
 				}
 				return 0, nil
 
 			case .Destroy:
 				if !cw.ended {
-					if len(cw.buf) > 0 && cw.res.state != .Error {
+					if len(cw.buf) > 0 && cw.res._state != .Error {
 						flush_buf(cw)
 					}
 					cw.ended = true
@@ -660,15 +660,15 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 
 			case .Close:
 				if !cw.ended {
-					if len(cw.buf) > 0 && cw.res.state != .Error {
+					if len(cw.buf) > 0 && cw.res._state != .Error {
 						flush_buf(cw)
 					}
 					cw.ended = true
 				}
-				if cw.res.state != .Sent && cw.res.state != .Error {
+				if cw.res._state != .Sent && cw.res._state != .Error {
 					respond(cw.res)
 				}
-				if cw.res.state == .Error {
+				if cw.res._state == .Error {
 					return 0, .Closed
 				}
 				return 0, nil
@@ -682,11 +682,11 @@ chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := D
 	}
 }
 
-send_response_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
+send_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
 	write_response_heading(res)
 
-	res.state = .Sending
-	_do_send(res, {res.buf[:]}, on_sent)
+	res._state = .Sending
+	_do_send(res, {res._buf[:]}, on_sent)
 }
 
 @(private="file")

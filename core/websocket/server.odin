@@ -322,7 +322,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 	if s.on_open != nil {
 		s.on_open(s, c)
 	}
-	if c.res.state != .Sending {
+	if c.res._state != .Sending {
 		return
 	}
 
@@ -570,7 +570,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 	}
 
 	handle_next_frame :: proc(c: ^http.Connection, ws: ^Connection) {
-		if c.res.state != .Sending {
+		if c.res._state != .Sending {
 			return
 		}
 		if ws.s.idle_timeout > 0 {

@@ -456,7 +456,7 @@ _body_chunked :: proc(req: ^Request) {
 		body_req.curr_size -= len(data)
 
 		_body_cb(&c.req, data, is_partial=true)
-		if c.res.state == .Sent || c.res.state == .Error || c.scanner.scan.callback != nil {
+		if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
 			return
 		}
 
@@ -547,7 +547,7 @@ _body_length :: proc(req: ^Request) {
 		body_req.curr_size -= len(data)
 		if body_req.curr_size > 0 {
 			_body_cb(&c.req, data, is_partial=true)
-			if c.res.state == .Sent || c.res.state == .Error || c.scanner.scan.callback != nil {
+			if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
 				return
 			}
 			scan_at_most(&c.scanner, body_req.curr_size, on_body)
@@ -559,7 +559,7 @@ _body_length :: proc(req: ^Request) {
 }
 
 _maybe_send_continue :: proc(c: ^Connection) -> bool {
-	if c.res.state != .Handling {
+	if c.res._state != .Handling {
 		return true
 	}
 	if c.req.line.version != {1, 1} {
@@ -574,7 +574,7 @@ _maybe_send_continue :: proc(c: ^Connection) -> bool {
 	if expect, ok := headers_get(c.req.headers, "expect"); ok && _headers_eq(expect, "100-continue") {
 		CONTINUE_RESPONSE :: "HTTP/1.1 100 Continue\r\n\r\n"
 		_do_send(&c.res, {transmute([]byte)string(CONTINUE_RESPONSE)}, nil)
-		return c.res.state != .Error
+		return c.res._state != .Error
 	}
 	return true
 }

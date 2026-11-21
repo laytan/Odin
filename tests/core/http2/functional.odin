@@ -1384,11 +1384,11 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		c.transaction_arena = http.get_arena(c)
 		c.temp_arena        = http.get_arena(c)
 		tx_alloc := http.transaction_allocator(c)
-		c.vars.allocator         = tx_alloc
+		c._vars.allocator         = tx_alloc
 		c.req.headers.allocator  = tx_alloc
 		c.res.headers.allocator  = tx_alloc
-		c.res.buf.allocator      = tx_alloc
-		c.res.deferred.allocator = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
 		c.scanner.c              = c
 		c.scanner.allocator      = &c.transaction_arena
 		return c
@@ -1410,8 +1410,8 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		defer close_socket(peer)
 
 		c := push_conn(t, &thread, accepted)
-		c.res.state = .Sending
-		c.res.sends = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 
 		Defer_Flag :: distinct ^bool
 		defer_ran := false
@@ -1438,8 +1438,8 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		defer close_socket(peer)
 
 		c := push_conn(t, &thread, accepted)
-		c.res.state = .Sending
-		c.res.sends = 2
+		c.res._state = .Sending
+		c.res._sends = 2
 
 		op := nbio.Operation{
 			type = .Send,
@@ -1447,8 +1447,8 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		}
 		http.on_send(&op, c, nil)
 		testing.expect_value(t, active_count(&thread), 1)
-		testing.expect_value(t, c.res.sends, 1)
-		testing.expect(t, c.res.state == .Error, "expected state to transition to .Error")
+		testing.expect_value(t, c.res._sends, 1)
+		testing.expect(t, c.res._state == .Error, "expected state to transition to .Error")
 
 		http.on_send(&op, c, nil)
 		testing.expect_value(t, active_count(&thread), 0)
@@ -1464,8 +1464,8 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 		}
 
 		c := push_conn(t, &thread, accepted)
-		c.res.state = .Sending
-		c.res.sends = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 
 		op := nbio.Operation{
 			type     = .Send_File,
