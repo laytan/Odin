@@ -4,9 +4,11 @@ package tests_http2
 import "base:runtime"
 
 import c "core:c/libc"
+import "core:container/xar"
 import "core:encoding/json"
 import "core:fmt"
 import "core:io"
+import "core:log"
 import "core:net"
 import "core:nbio"
 import "core:os"
@@ -1128,4 +1130,168 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 	check(t, "writer_empty",      &ctx.writer_empty,      200, false, "",                     "")
 	check(t, "writer_head",       &ctx.writer_head,       200, true,  "application/x-ndjson", "")
 	check(t, "after_keepalive",   &ctx.after_keepalive,   200, true,  "text/plain",           "hello plain")
+}
+
+@(test)
+test_http2_accept_error_recovery_and_oom_cleanup :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	if acq_err := nbio.acquire_thread_event_loop(); !testing.expect_value(t, acq_err, nil) {
+		return
+	}
+	defer nbio.release_thread_event_loop()
+
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18087})
+	if !testing.expect_value(t, listen_err, nil) {
+		return
+	}
+	defer {
+		closed: bool
+		nbio.close_poly(listen_sock, &closed, proc(op: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	s := http.make_server({})
+	thread := http.Server_Thread{s = &s, id = 1}
+	s.socket = listen_sock
+
+	// 1. Transient error (.Aborted) immediately re-arms .Accept.
+	{
+		op: nbio.Operation
+		op.accept.err = .Aborted
+		http._on_accept(&op, &thread)
+		testing.expect(t, thread.curr_accept != nil && thread.curr_accept.type == .Accept, "expected .Aborted to immediately re-arm accept")
+		if thread.curr_accept != nil {
+			nbio.remove(thread.curr_accept)
+			thread.curr_accept = nil
+		}
+		nbio.tick(timeout = 0)
+	}
+
+	// 2. Resource error (.Insufficient_Resources) schedules backoff timeout in curr_accept and then re-arms .Accept.
+	{
+		op: nbio.Operation
+		op.accept.err = .Insufficient_Resources
+		http._on_accept(&op, &thread)
+		testing.expect(t, thread.curr_accept != nil && thread.curr_accept.type == .Timeout, "expected .Insufficient_Resources to schedule backoff timer")
+
+		timed_out := false
+		guard := nbio.timeout_poly(2 * time.Second, &timed_out, proc(_: ^nbio.Operation, timed_out: ^bool) {
+			timed_out^ = true
+		})
+		for !timed_out && (thread.curr_accept == nil || thread.curr_accept.type != .Accept) {
+			nbio.tick()
+		}
+		if !timed_out {
+			nbio.remove(guard)
+		}
+		testing.expect(t, !timed_out, "timed out waiting for accept backoff timer to re-arm accept")
+		testing.expect(t, thread.curr_accept != nil && thread.curr_accept.type == .Accept, "expected backoff timer callback to re-arm accept")
+		if thread.curr_accept != nil {
+			nbio.remove(thread.curr_accept)
+			thread.curr_accept = nil
+		}
+		nbio.tick(timeout = 0)
+	}
+
+	// 3. Permanent error (.Not_Listening) stops the accept loop cleanly.
+	{
+		op: nbio.Operation
+		op.accept.err = .Not_Listening
+		prev_logger := context.logger
+		context.logger = log.nil_logger()
+		http._on_accept(&op, &thread)
+		context.logger = prev_logger
+		testing.expect(t, thread.curr_accept == nil, "expected fatal accept error not to re-arm accept")
+	}
+
+	// 4. xar.push OOM closes accepted client socket (peer sees EOF) while keeping accept loop armed.
+	{
+		endpoint, endpoint_err := nbio.bound_endpoint(listen_sock)
+		if !testing.expect_value(t, endpoint_err, nil) {
+			return
+		}
+
+		Accept_State :: struct {
+			done:   bool,
+			err:    nbio.Accept_Error,
+			client: nbio.TCP_Socket,
+			ep:     nbio.Endpoint,
+		}
+		Dial_State :: struct {
+			done: bool,
+			err:  nbio.Network_Error,
+			sock: nbio.TCP_Socket,
+		}
+		accept_st: Accept_State
+		dial_st: Dial_State
+
+		nbio.accept_poly(listen_sock, &accept_st, proc(op: ^nbio.Operation, st: ^Accept_State) {
+			st.err    = op.accept.err
+			st.client = op.accept.client
+			st.ep     = op.accept.client_endpoint
+			st.done   = true
+		})
+		nbio.dial_poly(endpoint, &dial_st, proc(op: ^nbio.Operation, st: ^Dial_State) {
+			st.err  = op.dial.err
+			st.sock = op.dial.socket
+			st.done = true
+		})
+		for !accept_st.done || !dial_st.done {
+			nbio.tick()
+		}
+		if !testing.expect_value(t, accept_st.err, nil) || !testing.expect_value(t, dial_st.err, nil) {
+			return
+		}
+		defer {
+			closed: bool
+			nbio.close_poly(dial_st.sock, &closed, proc(op: ^nbio.Operation, closed: ^bool) { closed^ = true })
+			nbio.run_until(&closed)
+		}
+
+		oom_alloc := runtime.Allocator{
+			procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> (data: []byte, err: runtime.Allocator_Error) {
+				if mode == .Free || mode == .Free_All {
+					return nil, nil
+				}
+				return nil, .Out_Of_Memory
+			},
+		}
+		oom_thread := http.Server_Thread{s = &s, id = 2}
+		xar.init(&oom_thread.connections, oom_alloc)
+		defer xar.freelist_destroy(&oom_thread.connections)
+
+		fake_op: nbio.Operation
+		fake_op.accept.client          = accept_st.client
+		fake_op.accept.client_endpoint = accept_st.ep
+
+		prev_logger := context.logger
+		context.logger = log.nil_logger()
+		http._on_accept(&fake_op, &oom_thread)
+		context.logger = prev_logger
+
+		testing.expect(t, oom_thread.curr_accept != nil && oom_thread.curr_accept.type == .Accept, "expected OOM on xar.push to keep accept armed")
+		if oom_thread.curr_accept != nil {
+			nbio.remove(oom_thread.curr_accept)
+			oom_thread.curr_accept = nil
+		}
+
+		// Peer socket should immediately observe EOF/closed because _on_accept closed accept_st.client.
+		Recv_State :: struct {
+			done:     bool,
+			received: int,
+			err:      nbio.Recv_Error,
+		}
+		recv_st: Recv_State
+		buf: [16]byte
+		nbio.recv_poly(dial_st.sock, {buf[:]}, &recv_st, proc(op: ^nbio.Operation, st: ^Recv_State) {
+			st.received = op.recv.received
+			st.err      = op.recv.err
+			st.done     = true
+		}, timeout = time.Second)
+		for !recv_st.done {
+			nbio.tick()
+		}
+		testing.expect(t, recv_st.received == 0 && recv_st.err != nbio.Recv_Error(nbio.TCP_Recv_Error.Timeout), "expected peer socket to observe closed accepted connection")
+	}
 }

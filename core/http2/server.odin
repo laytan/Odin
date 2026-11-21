@@ -432,11 +432,40 @@ server_shutdown :: proc(s: ^Server) {
 	}
 }
 
+ACCEPT_RETRY_DELAY :: 50 * time.Millisecond
+
 _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
 	thread.curr_accept = nil
+
+	if sync.atomic_load(&thread.s.shutting_down) {
+		if op.accept.err == nil && op.accept.client != {} {
+			nbio.close(op.accept.client)
+		}
+		return
+	}
+
 	if op.accept.err != nil {
-		log.errorf("http[t=%v]: accept_err=", thread.id, op.accept.err)
-		// TODO: handle, try again later.
+		switch op.accept.err {
+		case .None:
+			unreachable()
+		case .Aborted, .Interrupted, .Would_Block:
+			log.debugf("http[t=%v]: msg=\"transient accept error, retrying\", err=%v", thread.id, op.accept.err)
+			thread.curr_accept = nbio.accept_poly(thread.s.socket, thread, _on_accept)
+		case .Timeout:
+			log.warnf("http[t=%v]: msg=\"accept timed out, retrying\", err=%v", thread.id, op.accept.err)
+			thread.curr_accept = nbio.accept_poly(thread.s.socket, thread, _on_accept)
+		case .Insufficient_Resources, .Network_Unreachable, .Unknown:
+			log.warnf("http[t=%v]: msg=\"accept error, backing off\", err=%v, retry_in=%v", thread.id, op.accept.err, ACCEPT_RETRY_DELAY)
+			thread.curr_accept = nbio.timeout_poly(ACCEPT_RETRY_DELAY, thread, proc(_: ^nbio.Operation, thread: ^Server_Thread) {
+				thread.curr_accept = nil
+				if sync.atomic_load(&thread.s.shutting_down) {
+					return
+				}
+				thread.curr_accept = nbio.accept_poly(thread.s.socket, thread, _on_accept)
+			})
+		case .Invalid_Argument, .Unsupported_Socket, .Not_Listening:
+			log.errorf("http[t=%v]: msg=\"fatal accept error, stopping accept loop\", err=%v", thread.id, op.accept.err)
+		}
 		return
 	}
 
@@ -449,8 +478,8 @@ _on_accept :: proc(op: ^nbio.Operation, thread: ^Server_Thread) {
 		remote = op.accept.client_endpoint,
 	})
 	if err != nil {
-		log.error(err)
-		// TODO: handle, try again later.
+		log.errorf("http[t=%v][c=%v]: msg=\"failed to push connection\", err=%v", thread.id, op.accept.client, err)
+		nbio.close(op.accept.client)
 		return
 	}
 
