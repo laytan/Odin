@@ -445,16 +445,18 @@ respond_handle :: proc(res: ^Response, file: nbio.Handle) {
 }
 
 respond_file :: proc(res: ^Response, file: ^os.File) -> nbio.Association_Error {
-	// TODO: set content type
 	handle := nbio.associate_handle(os.fd(file)) or_return
+	if !headers_has(res.headers, "content-type") {
+		if mime, ok := mime_from_extension(os.name(file)); ok {
+			set_header(res, "Content-Type", mime_to_content_type(mime))
+		}
+	}
 	respond_handle(res, handle)
 	return nil
 }
 
 respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 	nbio.open_poly(file, res, on_open, dir=dir)
-
-	// TODO: set content type
 
 	on_open :: proc(op: ^nbio.Operation, res: ^Response) {
 		if op.open.err != nil {
@@ -463,6 +465,12 @@ respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 			res.status = .Not_Found
 			respond(res)
 			return
+		}
+
+		if !headers_has(res.headers, "content-type") {
+			if mime, ok := mime_from_extension(op.open.path); ok {
+				set_header(res, "Content-Type", mime_to_content_type(mime))
+			}
 		}
 
 		// TODO: Should respond_file_path take ctx?

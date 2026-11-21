@@ -84,9 +84,9 @@
 - [x] **Response `Set-Cookie` support**:
   - Ported `Cookie` and `Cookie_Same_Site` from `core/http/cookie.odin` to `http.odin` and added `set_cookie(res: ^Response, c: Cookie)` in `respond.odin` (formatting attributes onto the transaction arena and appending via `headers_add(&res.headers, "Set-Cookie", ...)`), removing the stale `// TODO: cookies` comment in `server.odin`.
 - [ ] **MIME / `Content-Type` & static file/directory serving**:
-  - Port `Mime_Type` and extension helpers (`mime_from_extension`, `mime_to_content_type`).
-  - Automatically set `Content-Type` in `respond_file` and `respond_file_path` when not already set.
-  - Add `respond_file_content` and safe `respond_dir` (with path-traversal protection and `nbio` directory handle support).
+  - [x] Ported `Mime_Type`, `mime_from_extension` (returning `(Mime_Type, bool)` so unknown extensions omit `Content-Type`), and `mime_to_content_type` into `http.odin`.
+  - [x] Automatically set `Content-Type` in `respond_file` and `respond_file_path` when not already set and extension is recognized.
+  - [ ] Add `respond_file_content` and safe `respond_dir` (with path-traversal protection and `nbio` directory handle support).
 - [ ] **Convenience responders & chunked streaming**:
   - Add `respond_plain`, `respond_html`, `respond_json`.
   - Add chunked response streaming (`send_chunk` / chunked `io.Writer` integrated with `res.sends` tracking).

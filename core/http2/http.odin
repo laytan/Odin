@@ -5,6 +5,7 @@ import "base:intrinsics"
 
 import "core:io"
 import "core:net"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
@@ -634,5 +635,76 @@ buf_writer :: proc(buf: ^[dynamic]byte) -> io.Writer {
 			}
 		},
 	}
+}
+
+Mime_Type :: enum {
+	Plain,
+
+	Css,
+	Csv,
+	Gif,
+	Html,
+	Ico,
+	Jpeg,
+	Js,
+	Json,
+	Png,
+	Svg,
+	Url_Encoded,
+	Xml,
+	Zip,
+	Wasm,
+	Md,
+}
+
+mime_from_extension :: proc(s: string) -> (Mime_Type, bool) #optional_ok {
+	_, ext := os.split_filename(s)
+	if ext == "" {
+		ext = strings.trim_prefix(s, ".")
+	}
+	switch ext {
+	case "txt":         return .Plain, true
+	case "html", "htm": return .Html,  true
+	case "js", "mjs":   return .Js,    true
+	case "css":         return .Css,   true
+	case "csv":         return .Csv,   true
+	case "xml":         return .Xml,   true
+	case "zip":         return .Zip,   true
+	case "json":        return .Json,  true
+	case "ico":         return .Ico,   true
+	case "gif":         return .Gif,   true
+	case "jpeg", "jpg": return .Jpeg,  true
+	case "png":         return .Png,   true
+	case "svg":         return .Svg,   true
+	case "wasm":        return .Wasm,  true
+	case "md":          return .Md,    true
+	case:               return nil,    false
+	}
+}
+
+@(private="file", rodata)
+_mime_to_content_type := [Mime_Type]string{
+	.Plain       = "text/plain",
+
+	.Css         = "text/css",
+	.Csv         = "text/csv",
+	.Gif         = "image/gif",
+	.Html        = "text/html",
+	.Ico         = "application/vnd.microsoft.ico",
+	.Jpeg        = "image/jpeg",
+	.Js          = "application/javascript",
+	.Json        = "application/json",
+	.Png         = "image/png",
+	.Svg         = "image/svg+xml",
+	.Url_Encoded = "application/x-www-form-urlencoded",
+	.Xml         = "text/xml",
+	.Zip         = "application/zip",
+	.Wasm        = "application/wasm",
+	.Md          = "text/markdown",
+}
+
+mime_to_content_type :: proc(m: Mime_Type) -> string #no_bounds_check {
+	assert(m >= min(Mime_Type) && m <= max(Mime_Type))
+	return _mime_to_content_type[m]
 }
 

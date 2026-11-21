@@ -314,3 +314,58 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 	testing.expect(t, strings.contains(heading, "Set-Cookie: strict_tok=s; SameSite=Strict\r\n"), "expected strict Set-Cookie header line")
 	testing.expect(t, strings.contains(heading, "Set-Cookie: cross_tok=n; SameSite=None; Secure\r\n"), "expected none Set-Cookie header line")
 }
+
+@(test)
+test_mime_from_extension_and_content_type :: proc(t: ^testing.T) {
+	Known_Case :: struct {
+		input:        string,
+		mime:         http.Mime_Type,
+		content_type: string,
+	}
+
+	known := []Known_Case{
+		{"notes.txt",        .Plain,       "text/plain"},
+		{"dir/index.html",   .Html,        "text/html"},
+		{"dir/page.htm",     .Html,        "text/html"},
+		{"app.js",           .Js,          "application/javascript"},
+		{"mod.mjs",          .Js,          "application/javascript"},
+		{"style.css",        .Css,         "text/css"},
+		{"data.csv",         .Csv,         "text/csv"},
+		{"feed.xml",         .Xml,         "text/xml"},
+		{"archive.zip",      .Zip,         "application/zip"},
+		{"api.json",         .Json,        "application/json"},
+		{"favicon.ico",      .Ico,         "application/vnd.microsoft.ico"},
+		{"anim.gif",         .Gif,         "image/gif"},
+		{"photo.jpeg",       .Jpeg,        "image/jpeg"},
+		{"photo.jpg",        .Jpeg,        "image/jpeg"},
+		{"img.png",          .Png,         "image/png"},
+		{"icon.svg",         .Svg,         "image/svg+xml"},
+		{"main.wasm",        .Wasm,        "application/wasm"},
+		{"README.md",        .Md,          "text/markdown"},
+		{"html",             .Html,        "text/html"},
+		{".html",            .Html,        "text/html"},
+	}
+
+	for tc in known {
+		mime, ok := http.mime_from_extension(tc.input)
+		testing.expectf(t, ok, "expected mime_from_extension(%q) to succeed", tc.input)
+		testing.expect_value(t, mime, tc.mime)
+		testing.expect_value(t, http.mime_to_content_type(mime), tc.content_type)
+	}
+
+	testing.expect_value(t, http.mime_to_content_type(.Url_Encoded), "application/x-www-form-urlencoded")
+
+	unknown := []string{
+		"",
+		"LICENSE",
+		"dir/Makefile",
+		"dir/html",
+		".gitignore",
+		"file.bin",
+		"archive.tar.gz",
+	}
+	for input in unknown {
+		_, ok := http.mime_from_extension(input)
+		testing.expectf(t, !ok, "expected mime_from_extension(%q) to return false", input)
+	}
+}

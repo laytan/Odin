@@ -7,6 +7,7 @@ import c "core:c/libc"
 import "core:fmt"
 import "core:net"
 import "core:nbio"
+import "core:os"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -699,4 +700,150 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	// 5. thread_initializer ran before request handling and thread_deinitializer cleaned up on shutdown.
 	testing.expect(t, srv_state.handler_saw_tls, "expected handler to see thread_initializer state")
 	testing.expect(t, _tls_test_buf == nil, "expected thread_deinitializer to clean up thread-local state")
+}
+
+File_Case_Result :: struct {
+	setopt_ok:        bool,
+	perform_err:      curl.code,
+	getinfo_err:      curl.code,
+	ct_err:           curl.code,
+	has_content_type: bool,
+	content_type_buf: [128]byte,
+	content_type_len: int,
+	response:         Curl_Response,
+}
+
+File_Test_Context :: struct {
+	server:       ^http.Server,
+	endpoint_err: net.Socket_Info_Error,
+	handle_ok:    bool,
+	readme:       File_Case_Result,
+	override:     File_Case_Result,
+	license:      File_Case_Result,
+	via_file:     File_Case_Result,
+}
+
+@(test)
+test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	r: http.Router
+	defer http.router_destroy(r)
+	http.route_get(&r, "/readme", proc(ctx: ^http.Ctx) {
+		http.respond_file_path(&ctx.res, "core/http2/README.md")
+	})
+	http.route_get(&r, "/override", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "Content-Type", "application/custom")
+		http.respond_file_path(&ctx.res, "core/http2/README.md")
+	})
+	http.route_get(&r, "/license", proc(ctx: ^http.Ctx) {
+		http.respond_file_path(&ctx.res, "core/http/LICENSE")
+	})
+	http.route_get(&r, "/file", proc(ctx: ^http.Ctx) {
+		f, err := os.open("core/http2/README.md")
+		if err != nil {
+			ctx.res.status = .Internal_Server_Error
+			http.respond(&ctx.res)
+			return
+		}
+		File_Handle :: distinct ^os.File
+		http.context_add(ctx, File_Handle(f))
+		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+			fp := http.context_get(ctx, File_Handle)^
+			os.close((^os.File)(fp))
+		})
+		if assoc_err := http.respond_file(&ctx.res, f); assoc_err != nil {
+			ctx.res.status = .Internal_Server_Error
+			http.respond(&ctx.res)
+		}
+	})
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = 18085,
+		thread_count = 1,
+		handler      = http.router(&r),
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	ctx := File_Test_Context{server = &server}
+	defer delete(ctx.readme.response.body)
+	defer delete(ctx.override.response.body)
+	defer delete(ctx.license.response.body)
+	defer delete(ctx.via_file.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^File_Test_Context)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		do_get :: proc(handle: ^curl.CURL, port: int, path: string, res: ^File_Case_Result) {
+			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
+			res.setopt_ok =
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK
+			if !res.setopt_ok {
+				return
+			}
+
+			res.perform_err = curl.easy_perform(handle)
+			res.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.response.status)
+			ct: cstring
+			res.ct_err = curl.easy_getinfo(handle, .CONTENT_TYPE, &ct)
+			if ct != nil {
+				res.has_content_type = true
+				res.content_type_len = copy(res.content_type_buf[:], string(ct))
+			}
+		}
+
+		do_get(handle, endpoint.port, "/readme",   &ctx.readme)
+		do_get(handle, endpoint.port, "/override", &ctx.override)
+		do_get(handle, endpoint.port, "/license",  &ctx.license)
+		do_get(handle, endpoint.port, "/file",     &ctx.via_file)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+
+	check_case :: proc(t: ^testing.T, name: string, res: ^File_Case_Result, expect_has_ct: bool, expect_ct: string, expect_prefix: string) {
+		testing.expectf(t, res.setopt_ok, "%s: setopt failed", name)
+		testing.expectf(t, res.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(res.perform_err))
+		testing.expect_value(t, res.getinfo_err, curl.code.E_OK)
+		testing.expect_value(t, res.ct_err, curl.code.E_OK)
+		testing.expect_value(t, res.response.status, c.long(200))
+		testing.expect_value(t, res.has_content_type, expect_has_ct)
+		if expect_has_ct {
+			testing.expect_value(t, string(res.content_type_buf[:res.content_type_len]), expect_ct)
+		}
+		testing.expectf(t, strings.has_prefix(string(res.response.body[:]), expect_prefix), "%s: unexpected file body prefix", name)
+	}
+
+	check_case(t, "readme",   &ctx.readme,   true,  "text/markdown",      "# core/http2")
+	check_case(t, "override", &ctx.override, true,  "application/custom", "# core/http2")
+	check_case(t, "license",  &ctx.license,  false, "",                   "")
+	check_case(t, "via_file", &ctx.via_file, true,  "text/markdown",      "# core/http2")
+	testing.expect(t, len(ctx.license.response.body) > 0, "expected non-empty LICENSE file body")
 }
