@@ -86,7 +86,7 @@ destroy_test_connection :: proc(c: ^http.Connection) {
 	// Mock unit tests set c.res._sends > 0 without an active nbio send op to prevent
 	// _check_send_done from destroying the connection before assertions run.
 	c.res._sends = 0
-	http.connection_destroy(c)
+	http._connection_destroy(c)
 }
 
 active_connection_count :: proc(thread: ^http.Server_Thread) -> (count: int) {
@@ -114,7 +114,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 	//    on_send in .Sending runs on_sent with temp_allocator and empty Quota{} clears limits.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer http._connection_destroy(c)
 
 		chk := http.context_add(&c.ctx, Upgrade_Check{})
 		c.req.line.version      = {1, 1}
@@ -277,7 +277,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 	//    free_all(context.temp_allocator); memory usage remains flat after warmup.
 	{
 		c := push_test_connection(t, &env, payload = "AAAA" + "BBBB" + "CCCC")
-		defer http.connection_destroy(c)
+		defer http._connection_destroy(c)
 
 		c.res._state = .Sending
 		st := http.context_add(&c.ctx, Frame_Loop_State{t = t})
@@ -358,13 +358,13 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		testing.expect(t, len(c.scanner.buf) >= http.MULTIPLIER, "expected fresh scanner buffer allocated")
 	}
 
-	// 3. Destroying connection from inside Scan_Cb during scanner_pump is ASAN-safe (_pump_destroyed).
+	// 3. Destroying connection from inside Scan_Cb during scanner_pump is ASAN-safe (_destroy_flag).
 	{
 		c := push_test_connection(t, &env, payload = "bye!")
 		c.res._state = .Sending
 
 		http.scan_temp_bytes(&c.scanner, 4, proc(c: ^http.Connection, data: []byte) {
-			http.connection_destroy(c)
+			http._connection_destroy(c)
 		})
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
@@ -497,17 +497,17 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		assert(c.temp_arena.tail != nil)
 	}
 
-	// 1. connection_destroy binds context.temp_allocator = temp_allocator(c) for defers and reclaims blocks.
+	// 1. _connection_destroy binds context.temp_allocator = temp_allocator(c) for defers and reclaims blocks.
 	{
 		c := push_test_connection(t, &env)
 		chk: Defer_Check
 		http.context_add(&c.ctx, &chk)
 		http.response_defer(&c.ctx, run_check_defer)
 
-		http.connection_destroy(c)
+		http._connection_destroy(c)
 
-		testing.expect(t, chk.ran, "expected response_defer to run on connection_destroy")
-		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside connection_destroy defer")
+		testing.expect(t, chk.ran, "expected response_defer to run on _connection_destroy")
+		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside _connection_destroy defer")
 		testing.expect_value(t, outer_arena.offset, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 		testing.expect(t, env.thread.free_arenas[0] != nil, "expected arena blocks returned to thread freelist")
@@ -540,7 +540,7 @@ test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
 	defer destroy_upgrade_env(&env)
 
 	c := push_test_connection(t, &env)
-	defer http.connection_destroy(c)
+	defer http._connection_destroy(c)
 
 	dummy_recv: nbio.Operation
 	defer c.curr_recv = nil
@@ -740,4 +740,222 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		context.logger = prev_logger
 		testing.expect_value(t, active_connection_count(&thread), 0)
 	}
+}
+
+@(test)
+test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
+	Cb_State :: struct {
+		called:      bool,
+		scan_called: bool,
+		got_err:     http.Send_Error,
+		detached_fd: nbio.TCP_Socket,
+		buffered:    []byte,
+		got_bytes:   [4]byte,
+	}
+
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	// 1. on_sent calls _connection_destroy(c) when err != nil; no double-destroy or UAF.
+	{
+		c := push_test_connection(t, &env)
+		st: Cb_State
+		http.context_add(&c.ctx, &st)
+		c.res._state = .Sending
+		c.res._sends = 1
+
+		op := nbio.Operation{
+			type = .Send,
+			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
+		}
+		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
+			st := http.context_get(&c.ctx, ^Cb_State)^
+			st.called  = true
+			st.got_err = err
+			http._connection_destroy(c)
+		})
+
+		testing.expect(t, st.called, "expected on_sent callback to run on send error")
+		testing.expect_value(t, st.got_err, http.Send_Error(nbio.TCP_Send_Error.Connection_Closed))
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+	}
+
+	// 2. on_sent calls connection_detach(c) when err != nil; clones unread bytes and skips _check_send_done.
+	{
+		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(88), payload = "leftover")
+		st: Cb_State
+		http.context_add(&c.ctx, &st)
+		c.res._state = .Sending
+		c.res._sends = 1
+
+		op := nbio.Operation{
+			type = .Send,
+			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
+		}
+		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
+			st := http.context_get(&c.ctx, ^Cb_State)^
+			st.called  = true
+			st.got_err = err
+			derr: runtime.Allocator_Error
+			st.detached_fd, st.buffered, derr = http.connection_detach(c, context.allocator)
+			assert(derr == nil)
+		})
+		defer delete(st.buffered)
+
+		testing.expect(t, st.called, "expected on_sent callback to run on send error")
+		testing.expect_value(t, st.got_err, http.Send_Error(nbio.TCP_Send_Error.Connection_Closed))
+		testing.expect_value(t, st.detached_fd, nbio.TCP_Socket(88))
+		testing.expect_value(t, string(st.buffered), "leftover")
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+	}
+
+	// 3. Nested on_send (err != nil) -> on_sent -> scan_temp_bytes -> Scan_Cb -> _connection_destroy(c).
+	{
+		c := push_test_connection(t, &env, payload = "ABCD")
+		st: Cb_State
+		http.context_add(&c.ctx, &st)
+		c.res._state = .Sending
+		c.res._sends = 1
+
+		op := nbio.Operation{
+			type = .Send,
+			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
+		}
+		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
+			st := http.context_get(&c.ctx, ^Cb_State)^
+			st.called  = true
+			st.got_err = err
+			http.scan_temp_bytes(&c.scanner, 4, proc(c: ^http.Connection, data: []byte) {
+				st := http.context_get(&c.ctx, ^Cb_State)^
+				st.scan_called = true
+				copy(st.got_bytes[:], data)
+				http._connection_destroy(c)
+			})
+		})
+
+		testing.expect(t, st.called, "expected outer on_sent callback to run")
+		testing.expect(t, st.scan_called, "expected nested scan_temp_bytes callback to run")
+		testing.expect_value(t, st.got_err, http.Send_Error(nbio.TCP_Send_Error.Connection_Closed))
+		testing.expect_value(t, string(st.got_bytes[:]), "ABCD")
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+	}
+}
+
+@(test)
+test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
+	Body_Detach_State :: struct {
+		called:      bool,
+		is_partial:  bool,
+		got_chunk:   [16]byte,
+		got_len:     int,
+		detached_fd: nbio.TCP_Socket,
+		buffered:    []byte,
+		detach_err:  runtime.Allocator_Error,
+	}
+
+	Body_Case :: struct {
+		name:    string,
+		hdr_key: string,
+		hdr_val: string,
+		payload: string,
+		socket:  nbio.TCP_Socket,
+	}
+
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	cases := []Body_Case{
+		{"content-length", "Content-Length", "10", "hello", nbio.TCP_Socket(91)},
+		{"chunked", "Transfer-Encoding", "chunked", "a\r\nhello", nbio.TCP_Socket(92)},
+	}
+
+	for tc in cases {
+		c := push_test_connection(t, &env, socket = tc.socket, payload = tc.payload)
+		c.req.line              = {method = .Post, target = "/upload", version = {1, 1}}
+		c.res._state            = .Handling
+		c.req.has_consumed_body = false
+		c.req.quota             = &env.s.opts.body_quota
+		http.progression_init(&c.req.progress, c.req.quota^)
+		testing.expect_value(t, http.headers_set(&c.req.headers, tc.hdr_key, tc.hdr_val), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		st: Body_Detach_State
+		http.context_add(&c.ctx, &st)
+
+		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+			c  := http.connection_of_request(req)
+			st := http.context_get(&c.ctx, ^Body_Detach_State)^
+			st.called     = true
+			st.is_partial = is_partial
+			st.got_len    = copy(st.got_chunk[:], data)
+			st.detached_fd, st.buffered, st.detach_err = http.connection_detach(c, context.allocator)
+		})
+		defer delete(st.buffered)
+
+		testing.expectf(t, st.called, "%s: expected partial Body_Cb to run", tc.name)
+		testing.expectf(t, st.is_partial, "%s: expected is_partial == true", tc.name)
+		testing.expect_value(t, string(st.got_chunk[:st.got_len]), "hello")
+		testing.expect_value(t, st.detach_err, nil)
+		testing.expect_value(t, st.detached_fd, tc.socket)
+		testing.expect(t, st.buffered == nil, "expected no unread bytes left after partial chunk")
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
+	}
+}
+
+@(test)
+test_keepalive_deferred_lifo_and_next_request :: proc(t: ^testing.T) {
+	Defer_Keepalive_State :: struct {
+		order:        [dynamic]int,
+		temp_matched: bool,
+	}
+
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	c := push_test_connection(t, &env, payload = "next")
+	defer http._connection_destroy(c)
+
+	c.req.line              = {method = .Get, target = "/", version = {1, 1}}
+	c.req.has_consumed_body = true
+	c.res._state            = .Sent
+	c.res._sends            = 0
+	// Keep scanner pumping so _serve_connection's scan_line doesn't arm an nbio.recv on the mock socket.
+	c.scanner.is_pumping    = true
+
+	st := Defer_Keepalive_State{
+		order = make([dynamic]int, context.allocator),
+	}
+	defer delete(st.order)
+	http.context_add(&c.ctx, &st)
+
+	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+		st := http.context_get(ctx, ^Defer_Keepalive_State)^
+		append(&st.order, 1)
+	})
+	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+		st := http.context_get(ctx, ^Defer_Keepalive_State)^
+		c  := http.connection_of_context(ctx)
+		st.temp_matched = context.temp_allocator.data == http.temp_allocator(c).data
+		append(&st.order, 2)
+		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+			st := http.context_get(ctx, ^Defer_Keepalive_State)^
+			append(&st.order, 3)
+		})
+	})
+
+	http._check_send_done(c)
+
+	testing.expect(t, st.temp_matched, "expected temp_allocator(c) bound during keep-alive response_defer")
+	testing.expect_value(t, len(st.order), 3)
+	if len(st.order) == 3 {
+		testing.expect_value(t, st.order[0], 2)
+		testing.expect_value(t, st.order[1], 3)
+		testing.expect_value(t, st.order[2], 1)
+	}
+	testing.expect_value(t, len(c.res._deferred), 0)
+	testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "next")
+	testing.expect_value(t, active_connection_count(&env.thread), 1)
 }

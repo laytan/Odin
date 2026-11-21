@@ -1888,7 +1888,6 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 		http._serve(&s2)
 		thread.join(client_thread)
 		thread.destroy(client_thread)
-		thread.join(s2.threads[1].thread)
 		http._destroy(&s2)
 
 		testing.expect_value(t, client2.endpoint_err, nil)
@@ -1980,7 +1979,7 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	}
 	c_destroyed := false
 	defer if !c_destroyed {
-		http.connection_destroy(c)
+		http._connection_destroy(c)
 	}
 
 	c.transaction_arena = http.get_arena(c)
@@ -2064,7 +2063,7 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	testing.expect(t, frame_state.called, "expected scan_temp_bytes callback to receive peer data")
 	testing.expect_value(t, string(frame_state.got[:frame_state.got_len]), "abcdefgh")
 
-	http.connection_destroy(c)
+	http._connection_destroy(c)
 	c_destroyed = true
 
 	active_count :: proc(thread: ^http.Server_Thread) -> int {
@@ -2076,4 +2075,143 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 		return count
 	}
 	testing.expect_value(t, active_count(&thread), 0)
+}
+
+@(test)
+test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	if acq_err := nbio.acquire_thread_event_loop(); !testing.expect_value(t, acq_err, nil) {
+		return
+	}
+	defer nbio.release_thread_event_loop()
+
+	// 1. _setup bind failure on a fresh thread closes any socket state and releases thread event loop.
+	{
+		holder, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 0})
+		if !testing.expect_value(t, listen_err, nil) {
+			return
+		}
+		defer {
+			closed: bool
+			nbio.close_poly(holder, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+			nbio.run_until(&closed)
+		}
+
+		ep, ep_err := nbio.bound_endpoint(holder)
+		if !testing.expect_value(t, ep_err, nil) {
+			return
+		}
+
+		Bind_Result :: struct {
+			port:                    int,
+			setup_err:               http.Server_Error,
+			socket_cleared:          bool,
+			threads_nil:             bool,
+			loop_nil:                bool,
+			loop_nil_after_destroy:  bool,
+		}
+		res := Bind_Result{port = ep.port}
+
+		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+			res := (^Bind_Result)(data)
+			s := http.make_server(http.Server_Options{
+				address      = nbio.IP4_Loopback,
+				port         = res.port,
+				thread_count = 1,
+			})
+			res.setup_err      = http._setup(&s)
+			res.socket_cleared = s.socket == {}
+			res.threads_nil    = s.threads == nil
+			res.loop_nil       = nbio.current_thread_event_loop() == nil
+			http._destroy(&s)
+			res.loop_nil_after_destroy = nbio.current_thread_event_loop() == nil
+		})
+		testing.expect(t, worker != nil, "expected helper thread created")
+		thread.destroy(worker)
+
+		testing.expect(t, res.setup_err != nil, "expected _setup to fail when port is already in use")
+		testing.expect(t, res.socket_cleared, "expected s.socket cleared on _setup bind failure")
+		testing.expect(t, res.threads_nil, "expected s.threads nil on _setup bind failure")
+		testing.expect(t, res.loop_nil, "expected thread event loop released on _setup bind failure")
+		testing.expect(t, res.loop_nil_after_destroy, "expected _destroy after failed _setup to leave event loop released")
+	}
+
+	// 2. _setup OOM during _setup_threads closes s.socket, destroys temp_allocator_backing, and releases loop.
+	{
+		OOM_Result :: struct {
+			setup_err:      http.Server_Error,
+			socket_cleared: bool,
+			threads_nil:    bool,
+			backing_nil:    bool,
+			loop_nil:       bool,
+		}
+		res: OOM_Result
+
+		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+			res := (^OOM_Result)(data)
+			oom_alloc := runtime.Allocator{
+				procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> ([]byte, runtime.Allocator_Error) {
+					if mode == .Free || mode == .Free_All {
+						return nil, nil
+					}
+					return nil, .Out_Of_Memory
+				},
+			}
+			s := http.make_server(http.Server_Options{
+				address      = nbio.IP4_Loopback,
+				port         = 18096,
+				thread_count = 1,
+			}, oom_alloc)
+
+			res.setup_err      = http._setup(&s)
+			res.socket_cleared = s.socket == {}
+			res.threads_nil    = s.threads == nil
+			res.backing_nil    = s.temp_allocator_backing.curr_block == nil
+			res.loop_nil       = nbio.current_thread_event_loop() == nil
+		})
+		testing.expect(t, worker != nil, "expected helper thread created")
+		thread.destroy(worker)
+
+		testing.expect_value(t, res.setup_err, http.Server_Error(http.General_Error.Allocation_Failed))
+		testing.expect(t, res.socket_cleared, "expected s.socket closed and cleared on _setup_threads OOM")
+		testing.expect(t, res.threads_nil, "expected s.threads nil on _setup_threads OOM")
+		testing.expect(t, res.backing_nil, "expected temp_allocator_backing destroyed on _setup_threads OOM")
+		testing.expect(t, res.loop_nil, "expected thread event loop released on _setup_threads OOM")
+	}
+
+	// 3. Multi-threaded _setup followed by _destroy without _serve joins worker threads cleanly without deadlocking.
+	{
+		NoServe_Result :: struct {
+			setup_err:      http.Server_Error,
+			socket_cleared: bool,
+			threads_nil:    bool,
+			backing_nil:    bool,
+			loop_nil:       bool,
+		}
+		res: NoServe_Result
+
+		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+			res := (^NoServe_Result)(data)
+			s := http.make_server(http.Server_Options{
+				address      = nbio.IP4_Loopback,
+				port         = 18097,
+				thread_count = 2,
+			})
+			res.setup_err = http._setup(&s)
+			http._destroy(&s)
+			res.socket_cleared = s.socket == {}
+			res.threads_nil    = s.threads == nil
+			res.backing_nil    = s.temp_allocator_backing.curr_block == nil
+			res.loop_nil       = nbio.current_thread_event_loop() == nil
+		})
+		testing.expect(t, worker != nil, "expected helper thread created")
+		thread.destroy(worker)
+
+		testing.expect_value(t, res.setup_err, nil)
+		testing.expect(t, res.socket_cleared, "expected s.socket closed and cleared by _destroy")
+		testing.expect(t, res.threads_nil, "expected s.threads cleaned up and nil after _destroy")
+		testing.expect(t, res.backing_nil, "expected temp_allocator_backing destroyed after _destroy")
+		testing.expect(t, res.loop_nil, "expected event loop released cleanly")
+	}
 }

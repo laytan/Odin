@@ -32,8 +32,7 @@ Scanner :: struct {
 
 	scan:       Scan,
 
-	is_pumping:      bool,
-	_pump_destroyed: ^bool,
+	is_pumping: bool,
 
 	last_recv_start: time.Time,
 }
@@ -42,14 +41,12 @@ MULTIPLIER :: 512
 
 scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Error) {
 	is_pumping := s.is_pumping
-	pump_destroyed := s._pump_destroyed
 	to_copy := s.buf[s.read_head:s.write_head]
 	if len(to_copy) == 0 {
 		transaction_allocator_destroy(c)
 		s^ = {
-			c               = c,
-			is_pumping      = is_pumping,
-			_pump_destroyed = pump_destroyed,
+			c          = c,
+			is_pumping = is_pumping,
 		}
 		return nil
 	}
@@ -71,13 +68,12 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Er
 	c.transaction_arena.tail = new_arena
 
 	s^ = {
-		c               = c,
-		buf             = new_buf,
-		read_head       = 0,
-		write_head      = n,
-		allocator       = &c.transaction_arena,
-		is_pumping      = is_pumping,
-		_pump_destroyed = pump_destroyed,
+		c          = c,
+		buf        = new_buf,
+		read_head  = 0,
+		write_head = n,
+		allocator  = &c.transaction_arena,
+		is_pumping = is_pumping,
 	}
 	return nil
 }
@@ -264,16 +260,16 @@ split_line :: proc() -> Scan_Splitter {
 scanner_pump :: proc(s: ^Scanner) {
 	if s.is_pumping { return }
 
-	context.temp_allocator = temp_allocator(s.c)
+	c := s.c
+	context.temp_allocator = temp_allocator(c)
 	s.is_pumping = true
-	destroyed := false
-	s._pump_destroyed = &destroyed
-	defer if !destroyed {
-		s._pump_destroyed = nil
+	destroy_flag: _Destroy_Flag
+	_destroy_flag_push(c, &destroy_flag)
+	defer if !_destroy_flag_pop(c, &destroy_flag) {
 		s.is_pumping = false
 	}
 
-	for !destroyed && s.scan.callback != nil {
+	for !destroy_flag.destroyed && s.scan.callback != nil {
 		offset, n, advance, ok := s.scan.split.procedure(s.scan.split.user_data, s.buf[s.read_head:s.write_head])
 		if ok {
 			assert(advance >= n && n >= offset)
@@ -306,7 +302,7 @@ scanner_pump :: proc(s: ^Scanner) {
 			cb := s.scan.callback
 			s.scan = {}
 			cb(s.c, data)
-			if destroyed { return }
+			if destroy_flag.destroyed { return }
 		} else {
 			capacity := len(s.buf)-s.write_head
 			if s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
@@ -457,14 +453,23 @@ body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
 	}
 }
 
-_body_cb :: proc(req: ^Request, body: []byte, is_partial: bool) {
+_body_cb :: proc(req: ^Request, body: []byte, is_partial: bool) -> (destroyed: bool) {
 	if !is_partial {
 		req.has_consumed_body = true
 	}
 	c := connection_of_request(req)
 	body_req := context_get(&c.ctx, Body_Request)
 	assert(body_req != nil)
-	body_req.cb(req, body, is_partial)
+
+	if !is_partial {
+		body_req.cb(req, body, false)
+		return false
+	}
+
+	destroy_flag: _Destroy_Flag
+	_destroy_flag_push(c, &destroy_flag)
+	body_req.cb(req, body, true)
+	return _destroy_flag_pop(c, &destroy_flag)
 }
 
 /*
@@ -537,7 +542,9 @@ _body_chunked :: proc(req: ^Request) {
 		body_req := context_get(&c.ctx, Body_Request)
 		body_req.curr_size -= len(data)
 
-		_body_cb(&c.req, data, is_partial=true)
+		if _body_cb(&c.req, data, is_partial=true) {
+			return
+		}
 		if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
 			return
 		}
@@ -628,7 +635,9 @@ _body_length :: proc(req: ^Request) {
 		body_req := context_get(&c.ctx, Body_Request)
 		body_req.curr_size -= len(data)
 		if body_req.curr_size > 0 {
-			_body_cb(&c.req, data, is_partial=true)
+			if _body_cb(&c.req, data, is_partial=true) {
+				return
+			}
 			if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
 				return
 			}

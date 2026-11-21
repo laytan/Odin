@@ -299,7 +299,7 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 	defer destroy_upgrade_env(&env)
 
 	c := push_test_connection(t, &env)
-	defer http.connection_destroy(c)
+	defer http._connection_destroy(c)
 
 	c.req.line.version      = {1, 1}
 	c.req.has_consumed_body = true
@@ -421,7 +421,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 	// 1. Valid path resolutions.
 	{
 		c := push_test_connection(t, &env)
-		defer http.connection_destroy(c)
+		defer http._connection_destroy(c)
 		tx_alloc := http.transaction_allocator(c)
 
 		Valid_Case :: struct {

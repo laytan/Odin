@@ -28,6 +28,7 @@ Server :: struct {
 	running_threads: sync.Wait_Group,
 	shutting_down:   bool,
 	shutdown_mutex:  sync.Mutex,
+	_has_event_loop: bool,
 
 	temp_allocator_backing: virtual.Arena,
 }
@@ -56,6 +57,7 @@ DEFAULT_PORT        :: 8080
 DEFAULT_MAX_HEADERS :: 128
 
 General_Error :: enum i32 {
+	None,
 	Allocation_Failed,
 	Unsupported,
 }
@@ -148,11 +150,43 @@ Server_Thread :: struct {
 	free_arenas: [BUCKETS]^_Arena_Block,
 }
 
+/*
+Tracks whether a `Connection` is destroyed or detached while a user callback is on the call stack.
+
+Callbacks (`Scan_Cb`, `Body_Cb`, `Send_Callback`) may synchronously release `c` back to the thread's
+connection freelist (via `connection_detach` or an OOM path calling `_connection_destroy`). Because `c`
+itself is freed/reusable once released, callers that touch `c` after invoking a callback link a
+stack-allocated `_Destroy_Flag` onto `c._destroy_flag` before the call. If `_connection_release` runs
+at any nesting depth, it walks `c._destroy_flag` and marks every active stack frame's `destroyed = true`
+so outer frames can abort immediately on unwind without dereferencing `c`.
+*/
+@(private)
+_Destroy_Flag :: struct {
+	destroyed: bool,
+	prev:      ^_Destroy_Flag,
+}
+
+@(private)
+_destroy_flag_push :: #force_inline proc(c: ^Connection, flag: ^_Destroy_Flag) {
+	flag^ = {prev = c._destroy_flag}
+	c._destroy_flag = flag
+}
+
+@(private)
+_destroy_flag_pop :: #force_inline proc(c: ^Connection, flag: ^_Destroy_Flag) -> (destroyed: bool) {
+	if flag.destroyed {
+		return true
+	}
+	c._destroy_flag = flag.prev
+	return false
+}
+
 Connection :: struct {
 	socket:            nbio.TCP_Socket,
 	remote:            nbio.Endpoint,
 	scanner:           Scanner,
 	curr_recv:         ^nbio.Operation,
+	_destroy_flag:     ^_Destroy_Flag,
 	transaction_arena: Arena,
 	temp_arena:        Arena,
 	using ctx:         Ctx,
@@ -276,6 +310,9 @@ _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 
 	for &server_thread, i in s.threads[1:] {
 		server_thread.thread = thread.create_and_start_with_poly_data3(s, &server_thread, i+2, _server_thread, context)
+		if server_thread.thread == nil {
+			return .Out_Of_Memory
+		}
 	}
 
 	main_thread := &s.threads[0]
@@ -302,6 +339,7 @@ _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 		log.errorf("http[t=%v]: msg=\"server thread could not initialize nbio\", err=%v", id, err)
 		return
 	}
+	defer nbio.release_thread_event_loop()
 
 	_server_thread_serve(thread)
 }
@@ -319,6 +357,11 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 	sync.mutex_lock(&thread.s.shutdown_mutex)
 	thread.event_loop = nbio.current_thread_event_loop()
 	sync.mutex_unlock(&thread.s.shutdown_mutex)
+
+	if sync.atomic_load(&thread.s.shutting_down) {
+		_server_thread_shutdown(thread)
+		return
+	}
 
 	log.debugf("http[t=%v]: msg=\"serving\"", thread.id)
 
@@ -364,7 +407,7 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 	iter := xar.freelist_iterator(&thread.connections)
 	for c, _ in xar.freelist_iterate_by_ptr(&iter) {
 		if _connection_is_idle(c) {
-			connection_destroy(c)
+			_connection_destroy(c)
 		}
 	}
 
@@ -393,7 +436,6 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 
 	sync.mutex_lock(&thread.s.shutdown_mutex)
 	thread.event_loop = nil
-	nbio.release_thread_event_loop()
 	sync.mutex_unlock(&thread.s.shutdown_mutex)
 }
 
@@ -478,7 +520,7 @@ connection_close :: proc(c: ^Connection) {
 		return
 	}
 	if c.socket == {} {
-		connection_destroy(c)
+		_connection_destroy(c)
 		return
 	}
 
@@ -503,8 +545,31 @@ connection_close :: proc(c: ^Connection) {
 			}
 		}
 
-		connection_destroy(c)
+		_connection_destroy(c)
 	}
+}
+
+@(private="file")
+_connection_run_deferred :: proc(c: ^Connection) {
+	if len(c.res._deferred) == 0 {
+		return
+	}
+
+	prev_temp := context.temp_allocator
+	context.temp_allocator = temp_allocator(c)
+	defer context.temp_allocator = prev_temp
+
+	destroy_flag: _Destroy_Flag
+	_destroy_flag_push(c, &destroy_flag)
+
+	for len(c.res._deferred) > 0 {
+		deferred := pop(&c.res._deferred)
+		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
+		deferred(&c.ctx)
+		assert(!destroy_flag.destroyed, "cannot destroy or detach connection inside response_defer")
+	}
+
+	_destroy_flag_pop(c, &destroy_flag)
 }
 
 @(private="file")
@@ -512,20 +577,12 @@ _connection_release :: proc(c: ^Connection) {
 	nbio.remove(c.curr_recv)
 	c.curr_recv = nil
 	c.scanner.scan = {}
-	if c.scanner._pump_destroyed != nil {
-		c.scanner._pump_destroyed^ = true
+	for flag := c._destroy_flag; flag != nil; flag = flag.prev {
+		flag.destroyed = true
 	}
+	c._destroy_flag = nil
 
-	{
-		prev_temp := context.temp_allocator
-		context.temp_allocator = temp_allocator(c)
-		#reverse for deferred in c.res._deferred {
-			log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-			deferred(&c.ctx)
-		}
-		context.temp_allocator = prev_temp
-	}
-	clear(&c.res._deferred)
+	_connection_run_deferred(c)
 
 	temp_allocator_destroy(c)
 	transaction_allocator_destroy(c)
@@ -538,7 +595,7 @@ _connection_release :: proc(c: ^Connection) {
 	xar.release(&td.connections, idx)
 }
 
-connection_destroy :: proc(c: ^Connection) {
+_connection_destroy :: proc(c: ^Connection) {
 	assert(c.res._sends == 0, "cannot destroy connection while sends are in flight")
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
 	nbio.remove(c.curr_recv)
@@ -590,7 +647,7 @@ _serve_connection :: proc(c: ^Connection) {
 
 	if err := scanner_reset(&c.scanner, c); err != nil {
 		log.errorf("http[t=%v][c=%v]: msg=\"scanner_reset allocation error\", err=%v", td.id, c.socket, err)
-		connection_destroy(c)
+		_connection_destroy(c)
 		return
 	}
 	temp_allocator_destroy(c)
@@ -799,54 +856,73 @@ _serve :: proc(s: ^Server) {
 Assumes that the running operations have already been cleaned up.
 */
 _destroy :: proc(s: ^Server) {
-	nbio.acquire_thread_event_loop()
-	defer nbio.release_thread_event_loop()
-
-	if s.socket != {} {
-		closed: bool
-		nbio.close_poly(s.socket, &closed, proc(op: ^nbio.Operation, closed: ^bool) { closed^ = true })
-		nbio.run_until(&closed)
-	}
-
 	if s.threads != nil {
+		sync.atomic_store(&s.shutting_down, true)
+		sync.one_shot_event_signal(&s.serve)
 		for &t in s.threads[1:] {
-			thread.destroy(t.thread)
+			if t.thread != nil {
+				thread.destroy(t.thread)
+				t.thread = nil
+			}
 		}
 		for &t in s.threads {
 			xar.freelist_destroy(&t.connections)
 			_server_thread_free_arenas_destroy(&t)
 		}
+		if len(s.threads) > 0 && td == &s.threads[0] {
+			td = nil
+		}
 		delete(s.threads, s.allocator)
+		s.threads = nil
 	}
+
+	if s.socket != {} {
+		if err := nbio.acquire_thread_event_loop(); err == nil {
+			defer nbio.release_thread_event_loop()
+			closed: bool
+			nbio.close_poly(s.socket, &closed, proc(op: ^nbio.Operation, closed: ^bool) { closed^ = true })
+			nbio.run_until(&closed)
+		}
+		s.socket = {}
+	}
+
 	virtual.arena_destroy(&s.temp_allocator_backing)
+
+	if s._has_event_loop {
+		nbio.release_thread_event_loop()
+		s._has_event_loop = false
+	}
 }
 
 _DEFAULT_BLOCK_SIZE :: runtime.Gigabyte
 
-_setup :: proc(s: ^Server) -> Server_Error {
+_setup :: proc(s: ^Server) -> (err: Server_Error) {
 	if s.allocator.procedure == nil {
 		s.allocator = context.allocator
 	}
 	_server_options_apply_defaults(&s.opts)
 
 	_acquire_event_loop(s) or_return
+	s._has_event_loop = true
+	defer if err != nil {
+		_destroy(s)
+	}
 
 	if listen_err := _listen(s); listen_err != nil {
-		switch err in listen_err {
-		case nbio.Listen_Error:        return err
-		case nbio.Create_Socket_Error: return err
-		case nbio.Bind_Error:          return err
+		switch lerr in listen_err {
+		case nbio.Listen_Error:        return lerr
+		case nbio.Create_Socket_Error: return lerr
+		case nbio.Bind_Error:          return lerr
 		}
 	}
 
-	if err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); err != nil {
+	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); arena_err != nil {
 		return .Allocation_Failed
 	}
 
 	headers_init_hash_secret()
 
-	if err := _setup_threads(s); err != nil {
-		virtual.arena_destroy(&s.temp_allocator_backing)
+	if thread_err := _setup_threads(s); thread_err != nil {
 		return .Allocation_Failed
 	}
 
@@ -1033,11 +1109,22 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	should_check  := c.res._state == .Sent || c.res._state == .Error
 	skip_graceful := _send_error_skip_graceful_close(err)
 
-	if on_sent != nil { on_sent(c, err) }
-
-	if should_check {
-		_check_send_done(c, skip_graceful)
+	if !should_check {
+		if on_sent != nil { on_sent(c, err) }
+		return
 	}
+
+	if on_sent != nil {
+		destroy_flag: _Destroy_Flag
+		_destroy_flag_push(c, &destroy_flag)
+
+		on_sent(c, err)
+		if _destroy_flag_pop(c, &destroy_flag) {
+			return
+		}
+	}
+
+	_check_send_done(c, skip_graceful)
 }
 
 _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
@@ -1047,7 +1134,7 @@ _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 	}
 
 	if c.res._state == .Error && skip_graceful {
-		connection_destroy(c)
+		_connection_destroy(c)
 		return
 	}
 
@@ -1058,16 +1145,7 @@ _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 
 	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
 
-	{
-		prev_temp := context.temp_allocator
-		context.temp_allocator = temp_allocator(c)
-		#reverse for deferred in c.res._deferred {
-			log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-			deferred(&c.ctx)
-		}
-		context.temp_allocator = prev_temp
-	}
-	clear(&c.res._deferred)
+	_connection_run_deferred(c)
 
 	_serve_connection(c)
 }
