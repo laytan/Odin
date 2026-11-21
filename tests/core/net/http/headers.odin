@@ -3,6 +3,7 @@ package test_core_net_http
 import "core:encoding/json"
 import "core:fmt"
 import "core:io"
+import "core:mem"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -652,5 +653,93 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		n2, werr2 := io.write_string(w, "after")
 		testing.expect_value(t, werr2, io.Error.Closed)
 		testing.expect_value(t, n2, 0)
+	}
+}
+
+@(test)
+test_headers_allocator_errors_and_readonly :: proc(t: ^testing.T) {
+	// 1. Initial grow OOM propagates cleanly across headers_set, headers_add, and headers_entry.
+	{
+		tiny_buf: [1]byte
+		tiny_arena: mem.Arena
+		mem.arena_init(&tiny_arena, tiny_buf[:])
+		h := http._headers_make(mem.arena_allocator(&tiny_arena))
+
+		testing.expect_value(t, http.headers_set(&h, "Host", "example.com"), mem.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, http.headers_add(&h, "Host", "example.com"), mem.Allocator_Error.Out_Of_Memory)
+
+		kp, vp, ins, err := http.headers_entry(&h, "Host")
+		testing.expect_value(t, err, mem.Allocator_Error.Out_Of_Memory)
+		testing.expect(t, kp == nil && vp == nil && !ins, "expected nil entry outputs on OOM")
+		testing.expect_value(t, http.headers_len(h), 0)
+		testing.expect(t, h.spots == nil, "expected spots slice to remain nil on initial OOM")
+	}
+
+	// 2. Rehash grow OOM propagates and preserves all existing entries.
+	{
+		buf: [size_of(http.Header_Spot) * http.INITIAL_CAP + 64]byte
+		a: mem.Arena
+		mem.arena_init(&a, buf[:])
+		h := http._headers_make(mem.arena_allocator(&a))
+
+		keys := [11]string{
+			"X-H-0", "X-H-1", "X-H-2", "X-H-3", "X-H-4", "X-H-5",
+			"X-H-6", "X-H-7", "X-H-8", "X-H-9", "X-H-10",
+		}
+		for k in keys {
+			testing.expect_value(t, http.headers_add(&h, k, "v"), nil)
+		}
+		testing.expect_value(t, http.headers_len(h), 11)
+		testing.expect_value(t, h.threshold, 11)
+
+		testing.expect_value(t, http.headers_set(&h, "X-H-Overflow", "x"), mem.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, http.headers_add(&h, "X-H-Overflow", "x"), mem.Allocator_Error.Out_Of_Memory)
+
+		kp, vp, ins, err := http.headers_entry(&h, "X-H-Overflow")
+		testing.expect_value(t, err, mem.Allocator_Error.Out_Of_Memory)
+		testing.expect(t, kp == nil && vp == nil && !ins, "expected nil entry outputs on rehash OOM")
+		testing.expect_value(t, http.headers_len(h), 11)
+
+		for k in keys {
+			v, ok := http.headers_get(h, k)
+			testing.expect(t, ok, "expected existing key to remain present after rehash OOM")
+			testing.expect_value(t, v, "v")
+		}
+	}
+
+	// 3. Readonly toggling works idempotently on both empty and populated Headers.
+	{
+		empty: http.Headers
+		testing.expect(t, !http._HEADERS_ARE_READONLY(empty), "expected fresh Headers to be writable")
+
+		http._headers_set_readonly(&empty)
+		http._headers_set_readonly(&empty)
+		testing.expect(t, http._HEADERS_ARE_READONLY(empty), "expected empty Headers to be marked readonly")
+
+		http._headers_set_writable(&empty)
+		http._headers_set_writable(&empty)
+		testing.expect(t, !http._HEADERS_ARE_READONLY(empty), "expected empty Headers to be writable again")
+		testing.expect_value(t, empty.threshold, 0)
+
+		empty.allocator = context.allocator
+		defer http.headers_destroy(empty)
+		testing.expect_value(t, http.headers_set(&empty, "X-Ok", "1"), nil)
+		v_ok, has_ok := http.headers_get(empty, "x-ok")
+		testing.expect(t, has_ok && v_ok == "1", "expected writable empty Headers to accept inserts")
+
+		http._headers_set_readonly(&empty)
+		http._headers_set_readonly(&empty)
+		testing.expect(t, http._HEADERS_ARE_READONLY(empty), "expected populated Headers to be marked readonly")
+
+		http._headers_set_writable(&empty)
+		http._headers_set_writable(&empty)
+		testing.expect(t, !http._HEADERS_ARE_READONLY(empty), "expected populated Headers to be writable again")
+
+		kp, vp, ins, err := http.headers_entry(&empty, "X-Entry")
+		testing.expect_value(t, err, nil)
+		testing.expect(t, ins && kp^ == "X-Entry", "expected new entry key populated")
+		vp^ = "val"
+		v_ent, has_ent := http.headers_get(empty, "x-entry")
+		testing.expect(t, has_ent && v_ent == "val", "expected inserted entry value to be readable")
 	}
 }

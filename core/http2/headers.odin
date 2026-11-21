@@ -56,25 +56,21 @@ headers_iter :: proc(m: ^Headers, state: ^int) -> (string, string, bool) {
 headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
 	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 
-	_headers_set_with_hash(m, Header_Spot{
+	return _headers_set_with_hash(m, Header_Spot{
 		key   = key,
 		value = value,
 		hash  = _headers_hash_key(key),
 	})
-
-	return nil
 }
 
 headers_add :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
 	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
 
-	_headers_add_with_hash(m, Header_Spot{
+	return _headers_add_with_hash(m, Header_Spot{
 		key   = key,
 		value = value,
 		hash  = _headers_hash_key(key),
 	})
-
-	return nil
 }
 
 /*
@@ -155,7 +151,8 @@ headers_has_token :: proc(h: ^Headers, key, token: string) -> bool {
 	return false
 }
 
-headers_entry :: proc(m: ^Headers, key: string) -> (key_ptr, val_ptr: ^string, just_inserted: bool, err: mem.Allocator_Error) {
+headers_entry :: proc(m: ^Headers, key: string, loc := #caller_location) -> (key_ptr, val_ptr: ^string, just_inserted: bool, err: mem.Allocator_Error) {
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to modify a header on the server request or client response?", loc)
 	if m.len >= m.threshold {
 		_headers_grow(m) or_return
 	}
@@ -227,11 +224,19 @@ _HEADERS_ARE_READONLY :: proc(h: Headers) -> bool {
 }
 
 _headers_set_readonly :: proc(h: ^Headers) {
-	if h.threshold > 0 { h.threshold = -h.threshold }
+	if h.threshold > 0 {
+		h.threshold = -h.threshold
+	} else if h.threshold == 0 {
+		h.threshold = -1
+	}
 }
 
 _headers_set_writable :: proc(h: ^Headers) {
-	if h.threshold < 0 { h.threshold = -h.threshold }
+	if h.threshold == -1 && len(h.spots) == 0 {
+		h.threshold = 0
+	} else if h.threshold < 0 {
+		h.threshold = -h.threshold
+	}
 }
 
 _headers_set_with_hash :: proc(m: ^Headers, entry: Header_Spot) -> mem.Allocator_Error #no_bounds_check {
