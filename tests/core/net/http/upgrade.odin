@@ -1,6 +1,7 @@
 package test_core_net_http
 
 import "base:runtime"
+import "base:sanitizer"
 
 import "core:container/xar"
 import "core:mem"
@@ -529,4 +530,67 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		testing.expect_value(t, outer_arena.offset, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
+}
+
+@(test)
+test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	c := push_test_connection(t, &env)
+	defer http.connection_destroy(c)
+
+	dummy_recv: nbio.Operation
+	defer c.curr_recv = nil
+
+	buf, buf_err := make([]byte, http.MULTIPLIER, http.temp_allocator(c))
+	testing.expect_value(t, buf_err, nil)
+	buf[0] = 'x'
+	buf[1] = 'y'
+	c.scanner.allocator  = &c.temp_arena
+	c.scanner.buf        = buf
+	c.scanner.read_head  = 0
+	c.scanner.write_head = 2
+
+	orig_buf_ptr := raw_data(c.scanner.buf)
+	orig_block   := c.temp_arena.tail
+	testing.expect(t, orig_block != nil, "expected scanner buffer block in temp_arena")
+
+	c.curr_recv = &dummy_recv
+
+	scratch1, err1 := make([]byte, 128, http.temp_allocator(c))
+	testing.expect_value(t, err1, nil)
+	scratch1[0] = 1
+
+	scratch2, err2 := make([]byte, 5000, http.temp_allocator(c))
+	testing.expect_value(t, err2, nil)
+	scratch2[0] = 2
+	testing.expect(t, c.temp_arena.tail != orig_block, "expected 5000-byte allocation to push an 8 KiB overflow block")
+
+	free_all(http.temp_allocator(c))
+
+	testing.expect(t, raw_data(c.scanner.buf) == orig_buf_ptr, "expected scanner buffer pointer preserved while recv is in flight")
+	testing.expect_value(t, c.scanner.read_head, 0)
+	testing.expect_value(t, c.scanner.write_head, 2)
+	testing.expect_value(t, string(c.scanner.buf[:2]), "xy")
+	testing.expect(t, c.temp_arena.tail == orig_block, "expected pinned block to become temp_arena.tail")
+	testing.expect(t, orig_block.prev == nil, "expected overflow block unlinked from pinned block")
+	testing.expect(t, env.thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+	testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer to remain unpoisoned")
+
+	expected_offset := int(uintptr(raw_data(c.scanner.buf)) - uintptr(raw_data(orig_block.data))) + len(c.scanner.buf)
+	testing.expect_value(t, orig_block.offset, expected_offset)
+	testing.expect(t, orig_block.last == raw_data(c.scanner.buf), "expected orig_block.last set to scanner buffer")
+
+	reused, reuse_err := make([]byte, 64, http.temp_allocator(c))
+	testing.expect_value(t, reuse_err, nil)
+	reused[0] = 3
+	testing.expect(t, c.temp_arena.tail == orig_block, "expected trailing space in pinned block to be reused after rewind")
+
+	c.curr_recv = nil
+	c.scanner.read_head = 2
+	free_all(http.temp_allocator(c))
+	testing.expect(t, c.scanner.buf == nil, "expected empty scanner buf cleared once curr_recv == nil")
+	testing.expect(t, c.temp_arena.tail == nil, "expected temp_arena freed once curr_recv == nil")
 }

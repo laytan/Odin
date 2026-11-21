@@ -2,6 +2,7 @@
 package tests_http2
 
 import "base:runtime"
+import "base:sanitizer"
 
 import c "core:c/libc"
 import "core:container/xar"
@@ -1894,4 +1895,185 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 		testing.expect_value(t, client2.perform_err, curl.code.E_OK)
 		testing.expect_value(t, client2.status, c.long(200))
 	}
+}
+
+@(test)
+test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	if acq_err := nbio.acquire_thread_event_loop(); !testing.expect_value(t, acq_err, nil) {
+		return
+	}
+	defer nbio.release_thread_event_loop()
+
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 0})
+	if !testing.expect_value(t, listen_err, nil) {
+		return
+	}
+	defer {
+		closed: bool
+		nbio.close_poly(listen_sock, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	endpoint, endpoint_err := nbio.bound_endpoint(listen_sock)
+	if !testing.expect_value(t, endpoint_err, nil) {
+		return
+	}
+
+	s := http.make_server({})
+	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
+		return
+	}
+	defer virtual.arena_destroy(&s.temp_allocator_backing)
+
+	thread := http.Server_Thread{s = &s, id = 1}
+	xar.init(&thread.connections, context.allocator)
+	prev_td := http.td
+	http.td = &thread
+	defer {
+		nbio.tick(timeout = 0)
+		http.td = prev_td
+		http._server_thread_free_arenas_destroy(&thread)
+		xar.freelist_destroy(&thread.connections)
+	}
+
+	Accept_State :: struct {
+		done:   bool,
+		err:    nbio.Accept_Error,
+		client: nbio.TCP_Socket,
+	}
+	Dial_State :: struct {
+		done: bool,
+		err:  nbio.Network_Error,
+		sock: nbio.TCP_Socket,
+	}
+	a_st: Accept_State
+	d_st: Dial_State
+
+	nbio.accept_poly(listen_sock, &a_st, proc(op: ^nbio.Operation, st: ^Accept_State) {
+		st.err    = op.accept.err
+		st.client = op.accept.client
+		st.done   = true
+	})
+	nbio.dial_poly(endpoint, &d_st, proc(op: ^nbio.Operation, st: ^Dial_State) {
+		st.err  = op.dial.err
+		st.sock = op.dial.socket
+		st.done = true
+	})
+	for !a_st.done || !d_st.done {
+		nbio.tick()
+	}
+	if !testing.expect_value(t, a_st.err, nil) || !testing.expect_value(t, d_st.err, nil) {
+		return
+	}
+	peer := d_st.sock
+	defer {
+		closed: bool
+		nbio.close_poly(peer, &closed, proc(_: ^nbio.Operation, closed: ^bool) { closed^ = true })
+		nbio.run_until(&closed)
+	}
+
+	c, push_err := xar.push(&thread.connections, http.Connection{socket = a_st.client})
+	if !testing.expect_value(t, push_err, nil) {
+		return
+	}
+	c_destroyed := false
+	defer if !c_destroyed {
+		http.connection_destroy(c)
+	}
+
+	c.transaction_arena = http.get_arena(c)
+	c.temp_arena        = http.get_arena(c)
+	tx_alloc := http.transaction_allocator(c)
+	c._vars.allocator         = tx_alloc
+	c.req.headers.allocator  = tx_alloc
+	c.res.headers.allocator  = tx_alloc
+	c.res._buf.allocator      = tx_alloc
+	c.res._deferred.allocator = tx_alloc
+	c.scanner.c              = c
+	c.scanner.allocator      = &c.transaction_arena
+	c.req.quota              = &s.opts.request_quota
+	c.res.quota              = &s.opts.response_quota
+	http.progression_init(&c.req.progress, http.UNLIMITED_QUOTA)
+	http.progression_init(&c.res.progress, http.UNLIMITED_QUOTA)
+	c.res._state = .Sending
+
+	Frame_State :: struct {
+		got:     [8]byte,
+		got_len: int,
+		called:  bool,
+	}
+	frame_state: Frame_State
+	http.context_add(&c.ctx, &frame_state)
+
+	http.scan_temp_bytes(&c.scanner, 8, proc(c: ^http.Connection, data: []byte) {
+		st := http.context_get(&c.ctx, ^Frame_State)^
+		st.called  = true
+		st.got_len = copy(st.got[:], data)
+	})
+
+	testing.expect(t, c.curr_recv != nil, "expected active recv op in flight")
+	testing.expect(t, c.scanner.allocator == &c.temp_arena, "expected scanner buffer allocated in temp_arena")
+
+	orig_buf_ptr := raw_data(c.scanner.buf)
+	orig_block   := c.temp_arena.tail
+
+	nbio.tick(timeout = 10 * time.Millisecond)
+
+	scratch1, err1 := make([]byte, 128, http.temp_allocator(c))
+	testing.expect_value(t, err1, nil)
+	scratch1[0] = 1
+	scratch2, err2 := make([]byte, 5000, http.temp_allocator(c))
+	testing.expect_value(t, err2, nil)
+	scratch2[0] = 2
+	testing.expect(t, c.temp_arena.tail != orig_block, "expected overflow block pushed into temp_arena")
+
+	free_all(http.temp_allocator(c))
+
+	testing.expect(t, raw_data(c.scanner.buf) == orig_buf_ptr, "expected scanner buffer pointer preserved across free_all")
+	testing.expect(t, c.temp_arena.tail == orig_block, "expected pinned block retained as tail")
+	testing.expect(t, orig_block.prev == nil, "expected overflow block unlinked")
+	testing.expect(t, thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+	testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected scanner buffer unpoisoned")
+
+	Send_State :: struct {
+		done: bool,
+		err:  nbio.TCP_Send_Error,
+	}
+	s_st: Send_State
+	payload := transmute([]byte)string("abcdefgh")
+	nbio.send_poly(peer, {payload}, &s_st, proc(op: ^nbio.Operation, st: ^Send_State) {
+		st.err  = op.send.err.(nbio.TCP_Send_Error) or_else nil
+		st.done = true
+	})
+
+	timed_out := false
+	guard := nbio.timeout_poly(2 * time.Second, &timed_out, proc(_: ^nbio.Operation, timed_out: ^bool) {
+		timed_out^ = true
+	})
+	for !timed_out && (!frame_state.called || !s_st.done) {
+		nbio.tick()
+	}
+	if !timed_out {
+		nbio.remove(guard)
+	}
+
+	testing.expect(t, !timed_out, "timed out waiting for peer send / scanner recv")
+	testing.expect_value(t, s_st.err, nil)
+	testing.expect(t, frame_state.called, "expected scan_temp_bytes callback to receive peer data")
+	testing.expect_value(t, string(frame_state.got[:frame_state.got_len]), "abcdefgh")
+
+	http.connection_destroy(c)
+	c_destroyed = true
+
+	active_count :: proc(thread: ^http.Server_Thread) -> int {
+		count := 0
+		iter := xar.freelist_iterator(&thread.connections)
+		for _, _ in xar.freelist_iterate_by_ptr(&iter) {
+			count += 1
+		}
+		return count
+	}
+	testing.expect_value(t, active_count(&thread), 0)
 }

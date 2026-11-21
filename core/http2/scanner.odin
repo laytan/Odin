@@ -82,6 +82,48 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 		return false
 	}
 
+	// Never free, poison, or relocate s.buf while an nbio.recv holds a pointer into it.
+	// Reclaim all other blocks in `a` and rewind the pinned block's offset to the end of s.buf.
+	if s.c.curr_recv != nil {
+		if len(s.buf) == 0 {
+			return false
+		}
+
+		buf_ptr := uintptr(raw_data(s.buf))
+		buf_block: ^_Arena_Block
+		for block := a.tail; block != nil; block = block.prev {
+			block_start := uintptr(raw_data(block.data))
+			block_end   := block_start + uintptr(len(block.data))
+			if buf_ptr >= block_start && buf_ptr < block_end {
+				assert(buf_ptr + uintptr(len(s.buf)) <= block_end)
+				buf_block = block
+				break
+			}
+		}
+
+		if buf_block == nil {
+			return false
+		}
+
+		log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all (recv in flight, pinning buf block)\"", td.id, s.c.socket)
+
+		block := a.tail
+		a.tail = nil
+		for block != nil {
+			prev := block.prev
+			if block != buf_block {
+				_server_thread_put_free_arena(block)
+			}
+			block = prev
+		}
+
+		buf_block.prev   = nil
+		buf_block.offset = int(buf_ptr - uintptr(raw_data(buf_block.data))) + len(s.buf)
+		buf_block.last   = raw_data(s.buf)
+		a.tail = buf_block
+		return true
+	}
+
 	to_copy := s.buf[s.read_head:s.write_head]
 	to_alloc := max(MULTIPLIER, len(to_copy))
 	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", td.id, s.c.socket, len(to_copy), to_alloc)
