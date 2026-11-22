@@ -111,6 +111,7 @@
     - `respond_file` / `respond_handle` file descriptor lifetime (must remain open until `response_defer`, not closed via `defer os.close(f)`).
     - `request_set_quota` / `response_set_quota` `^Quota` pointer lifetime (must outlive the transaction).
     - Transaction-scoped lifetime of request/route/cookie/body slices across keep-alive requests (clone if retaining beyond the request).
+    - Worker-thread-pool request offloading & cross-thread arena contract: while only one thread touches `c` at a time, worker threads may read request state, allocate/build responses and headers on `transaction_allocator`/`temp_allocator`, and destroy detached arenas (`arena_destroy`); `nbio`-bound I/O calls (`respond`/`respond_*`, `send`, `send_chunk`, `body`, `connection_close`) must be posted back to the owning server thread via `nbio.current_thread_event_loop()` + `nbio.next_tick_poly(..., l = loop)` / `nbio.wake_up(loop)`.
   - [ ] Move `core/http2` into `core/net/http`.
 
 ### Memory Management Follow-Ups (For Further Review)
@@ -119,5 +120,5 @@
 - [ ] **Low-watermark idle decay for `free_arenas` (`arena.odin`, `server.odin`)**: Consider periodic low-watermark trimming on `date_update` to reclaim genuinely idle pooled blocks after traffic spikes without hurting steady/bursty high-traffic cache hit rates (revisit later if/when idle retention becomes a problem).
 - [ ] **Streaming `body()` memory usage (`scanner.odin`)**: Review scanning request bodies into `transaction_arena` (~2x geometric `s.buf` growth) vs `temp_arena` / reusable buffers for streaming uploads.
 - [ ] **Streaming response retention (`respond.odin`)**: Review `Chunked_Writer` and `send_chunk` retaining chunks/headers in `transaction_arena` until transaction end (plus `respond_json` doc accuracy and async backpressure).
-- [ ] **Cross-thread arena safety (`arena.odin`)**: Review thread-local `td.free_arenas` assumptions when `Arena` / `transaction_allocator` / `temp_allocator` / `arena_destroy` are touched from user worker threads.
+- [x] **Cross-thread arena safety (`arena.odin`, `scanner.odin`, `server.odin`, `core/websocket/server.odin`)**: Stored `backing: mem.Allocator` on `Arena` (0 bytes added to `_Arena_Block`), added thread-safe `_arena_block_acquire`/`_arena_block_release` bypassing `td.free_arenas` unless `td != nil` and `_arena_backing_allocator(td.s) == backing`, snapshotted `backing` and detached `tail` before releasing bootstrapped arena blocks in `arena_destroy`, cleared `td = nil` on server thread exit, guarded `td.id` logging via `_thread_id()`, and cleared `old.c = nil` in `_detach_scanner_arena`.
 - [ ] **Header & router ergonomics (`server.odin`, `router.odin`)**: Review marking `res.headers` readonly after `write_response_heading`, explicit `Router` allocator (`router_init`), and nil-match guard in `route_params`.

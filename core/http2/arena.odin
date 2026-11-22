@@ -9,26 +9,43 @@ import "core:math"
 import "core:math/bits"
 import "core:mem"
 
+/*
+Thread-safety contract:
+An `Arena` may have its ownership transferred across threads: once initialized on a server thread
+(or lazily bound on first block push), `arena_alloc`, `arena_resize`, `arena_free`, `arena_free_all`,
+and `arena_destroy` may be called from non-server worker threads or another server's thread,
+assuming the underlying backing allocator (`Server.allocator`, or `context.allocator`) is thread-safe.
+
+Blocks at or below `MAX_POOLED_BLOCK_SIZE` are acquired from and recycled into the current server
+thread's lock-free `td.free_arenas` cache only when `td != nil` and its backing allocator matches
+`Arena.backing`; otherwise blocks are allocated from and freed directly to `Arena.backing`.
+
+Simultaneous unsynchronized calls on the same `Arena` instance from multiple threads are NOT supported.
+*/
 Arena :: struct {
-	c:    ^Connection,
-	tail: ^_Arena_Block,
+	c:       ^Connection,
+	tail:    ^_Arena_Block,
+	backing: mem.Allocator,
 }
 
 get_arena :: proc(c: ^Connection) -> Arena {
 	return {
-		c = c,
+		c       = c,
+		backing = _arena_default_backing(c),
 	}
 }
 
 bootstrap_arena :: proc(c: ^Connection) -> (arena: ^Arena, err: mem.Allocator_Error) #optional_allocator_error {
-	block := _server_thread_get_free_arena() or_return
+	backing := _arena_default_backing(c)
+	block := _arena_block_acquire(backing) or_return
 	arena, err = new(Arena, mem.arena_allocator(block))
 	if err != nil {
-		_server_thread_put_free_arena(block)
+		_arena_block_release(backing, block)
 		return nil, err
 	}
-	arena.c    = c
-	arena.tail = block
+	arena.c       = c
+	arena.tail    = block
+	arena.backing = backing
 	return arena, nil
 }
 
@@ -116,11 +133,20 @@ arena_free :: proc(a: ^Arena, ptr: rawptr, size: int) -> mem.Allocator_Error {
 }
 
 arena_destroy :: proc(a: ^Arena) {
+	if a == nil || a.tail == nil {
+		return
+	}
+	// Snapshot backing and detach tail before releasing any blocks: for bootstrapped arenas,
+	// `a` itself lives inside the oldest block in the chain.
+	backing := a.backing
+	if backing.procedure == nil {
+		backing = _arena_default_backing(a.c)
+	}
 	arena := a.tail
 	a.tail = nil
 	for arena != nil {
 		prev := arena.prev
-		_server_thread_put_free_arena(arena)
+		_arena_block_release(backing, arena)
 		arena = prev
 	}
 }
@@ -155,10 +181,26 @@ _bucket_to_put :: proc(size: uint) -> int {
 	return clamp(int(bits.log2(size)) - SHIFT, 0, BUCKETS-1)
 }
 
-@(private="file")
+@(private)
 _arena_backing_allocator :: proc(s: ^Server) -> mem.Allocator {
 	if s != nil && s.allocator.procedure != nil {
 		return s.allocator
+	}
+	return context.allocator
+}
+
+@(private)
+_arena_default_backing :: proc(c: ^Connection) -> mem.Allocator {
+	if c != nil {
+		if c.transaction_arena.backing.procedure != nil {
+			return c.transaction_arena.backing
+		}
+		if c.temp_arena.backing.procedure != nil {
+			return c.temp_arena.backing
+		}
+	}
+	if td != nil {
+		return _arena_backing_allocator(td.s)
 	}
 	return context.allocator
 }
@@ -180,9 +222,14 @@ _arena_block_reset :: proc(arena: ^_Arena_Block) -> ^_Arena_Block {
 	return arena
 }
 
-_server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) #optional_allocator_error {
+@(private)
+_arena_block_acquire :: proc(backing: mem.Allocator, size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) #optional_allocator_error {
 	if size < 0 {
 		return nil, .Invalid_Argument
+	}
+	backing := backing
+	if backing.procedure == nil {
+		backing = context.allocator
 	}
 	align     := align == 0 ? mem.DEFAULT_ALIGNMENT : align
 	align_pad := max(0, align - align_of(_Arena_Block))
@@ -195,14 +242,16 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 
 	if needed <= MAX_POOLED_BLOCK_SIZE {
 		bucket := _bucket_for(needed)
-		if free_arena := td.free_arenas[bucket]; free_arena != nil {
-			td.free_arenas[bucket] = free_arena.prev
-			return _arena_block_reset(free_arena), nil
+		if td != nil && _arena_backing_allocator(td.s) == backing {
+			if free_arena := td.free_arenas[bucket]; free_arena != nil {
+				td.free_arenas[bucket] = free_arena.prev
+				return _arena_block_reset(free_arena), nil
+			}
 		}
 		alloc_size = 1 << (uint(bucket) + SHIFT)
 	}
 
-	data := mem.alloc_bytes_non_zeroed(alloc_size, align_of(_Arena_Block), _arena_backing_allocator(td.s)) or_return
+	data := mem.alloc_bytes_non_zeroed(alloc_size, align_of(_Arena_Block), backing) or_return
 	sanitizer.address_unpoison(data)
 
 	arena = (^_Arena_Block)(raw_data(data))
@@ -216,17 +265,32 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 	return arena, nil
 }
 
-_server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
-	if len(arena.data) > MAX_POOLED_BLOCK_SIZE {
-		_arena_block_free(arena, _arena_backing_allocator(td.s))
+@(private)
+_arena_block_release :: proc(backing: mem.Allocator, arena: ^_Arena_Block) {
+	backing := backing
+	if backing.procedure == nil {
+		backing = context.allocator
+	}
+	if len(arena.data) <= MAX_POOLED_BLOCK_SIZE && td != nil && _arena_backing_allocator(td.s) == backing {
+		sanitizer.address_poison(arena.data[size_of(_Arena_Block):])
+
+		bucket := _bucket_to_put(uint(len(arena.data)))
+		arena.prev = td.free_arenas[bucket]
+		td.free_arenas[bucket] = arena
 		return
 	}
 
-	sanitizer.address_poison(arena.data[size_of(_Arena_Block):])
+	_arena_block_free(arena, backing)
+}
 
-	bucket := _bucket_to_put(uint(len(arena.data)))
-	arena.prev = td.free_arenas[bucket]
-	td.free_arenas[bucket] = arena
+_server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) #optional_allocator_error {
+	backing := _arena_backing_allocator(td != nil ? td.s : nil)
+	return _arena_block_acquire(backing, size, align)
+}
+
+_server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
+	backing := _arena_backing_allocator(td != nil ? td.s : nil)
+	_arena_block_release(backing, arena)
 }
 
 _server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
@@ -242,7 +306,10 @@ _server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
 }
 
 _push_arena_block :: proc(a: ^Arena, size, align: int) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) {
-	arena = _server_thread_get_free_arena(size, align == 0 ? mem.DEFAULT_ALIGNMENT : align) or_return
+	if a.backing.procedure == nil {
+		a.backing = _arena_default_backing(a.c)
+	}
+	arena = _arena_block_acquire(a.backing, size, align == 0 ? mem.DEFAULT_ALIGNMENT : align) or_return
 	arena.prev = a.tail
 	a.tail = arena
 	return arena, nil

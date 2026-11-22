@@ -108,8 +108,9 @@ Message_Type :: enum {
 A complete decoded WebSocket message passed to `Server.on_message`.
 
 The caller owns `arena` (backing `data`) and must free it with `http.arena_destroy(message.arena)`
-once finished with `message.data`. If passing `message.data` to `send`, destroy `message.arena`
-inside the `on_sent` callback rather than synchronously in `on_message`.
+once finished with `message.data` (this is safe to call from another thread, such as a background
+worker thread). If passing `message.data` to `send`, destroy `message.arena` inside the `on_sent`
+callback rather than synchronously in `on_message`.
 */
 Message :: struct {
 	type:  Message_Type,
@@ -476,6 +477,7 @@ _detach_scanner_arena :: proc(c: ^http.Connection, ws: ^_Connection) -> (old: ^h
 		ws.arena = nil
 	}
 
+	old.c = nil
 	return old
 }
 

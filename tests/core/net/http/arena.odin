@@ -3,7 +3,9 @@ package test_core_net_http
 import "base:runtime"
 
 import "core:mem"
+import "core:sync"
 import "core:testing"
+import "core:thread"
 
 import http "core:http2"
 
@@ -27,10 +29,10 @@ arena_counting_allocator :: proc(c: ^Arena_Counting_Allocator) -> mem.Allocator 
 			c := (^Arena_Counting_Allocator)(allocator_data)
 			#partial switch mode {
 			case .Alloc, .Alloc_Non_Zeroed:
-				c.alloc_count += 1
+				sync.atomic_add(&c.alloc_count, 1)
 			case .Free:
 				if old_memory != nil {
-					c.free_count += 1
+					sync.atomic_add(&c.free_count, 1)
 				}
 			}
 			return c.backing.procedure(c.backing.data, mode, size, alignment, old_memory, old_size, location)
@@ -475,4 +477,406 @@ test_arena_oom_propagation :: proc(t: ^testing.T) {
 	testing.expect_value(t, resize_err, mem.Allocator_Error.Out_Of_Memory)
 	testing.expect(t, rbs == nil, "expected nil slice from arena_resize on OOM")
 	testing.expect(t, a.tail == nil, "expected tail to remain nil on OOM")
+}
+
+@(test)
+test_arena_cross_thread_worker_destroy :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&track)
+
+	counter := Arena_Counting_Allocator{backing = mem.tracking_allocator(&track)}
+	s := http.make_server({}, arena_counting_allocator(&counter))
+
+	srv_thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &srv_thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&srv_thread)
+
+	boot, boot_err := http.bootstrap_arena(nil)
+	testing.expect_value(t, boot_err, nil)
+	testing.expect(t, boot != nil, "expected bootstrapped arena")
+
+	boot_small, bs_err := mem.alloc_bytes(64, mem.DEFAULT_ALIGNMENT, http.arena_allocator(boot))
+	testing.expect_value(t, bs_err, nil)
+	for &b in boot_small { b = 0xA1 }
+	boot_large, bl_err := mem.alloc_bytes(5000, mem.DEFAULT_ALIGNMENT, http.arena_allocator(boot))
+	testing.expect_value(t, bl_err, nil)
+	for &b in boot_large { b = 0xB2 }
+
+	val_arena := http.get_arena(nil)
+	val_small, vs_err := http.arena_alloc(&val_arena, 64, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, vs_err, nil)
+	for &b in val_small { b = 0xC3 }
+	val_large, vl_err := http.arena_alloc(&val_arena, 5000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, vl_err, nil)
+	for &b in val_large { b = 0xD4 }
+
+	testing.expect_value(t, counter.alloc_count, 4)
+
+	Work :: struct {
+		boot:        ^http.Arena,
+		val_arena:   ^http.Arena,
+		boot_small:  []byte,
+		boot_large:  []byte,
+		val_small:   []byte,
+		val_large:   []byte,
+		td_was_nil:  bool,
+		bytes_valid: bool,
+	}
+	work := Work{
+		boot       = boot,
+		val_arena  = &val_arena,
+		boot_small = boot_small,
+		boot_large = boot_large,
+		val_small  = val_small,
+		val_large  = val_large,
+	}
+
+	w := thread.create_and_start_with_data(&work, proc(data: rawptr) {
+		work := (^Work)(data)
+		work.td_was_nil = http.td == nil
+
+		valid := true
+		for b in work.boot_small { if b != 0xA1 { valid = false } }
+		for b in work.boot_large { if b != 0xB2 { valid = false } }
+		for b in work.val_small  { if b != 0xC3 { valid = false } }
+		for b in work.val_large  { if b != 0xD4 { valid = false } }
+		work.bytes_valid = valid
+
+		http.arena_destroy(work.boot)
+		http.arena_destroy(work.val_arena)
+		http.arena_destroy(nil)
+	})
+	testing.expect(t, w != nil, "expected worker thread created")
+	thread.destroy(w)
+
+	testing.expect(t, work.td_was_nil, "expected http.td to be nil on spawned worker thread")
+	testing.expect(t, work.bytes_valid, "expected arena bytes intact across threads")
+	testing.expect(t, val_arena.tail == nil, "expected val_arena.tail cleared after worker destroy")
+	for head in srv_thread.free_arenas {
+		testing.expect(t, head == nil, "expected worker destroy not to push into server free_arenas")
+	}
+	testing.expect_value(t, counter.free_count, 4)
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(test)
+test_arena_cross_thread_worker_alloc_and_server_reclaim :: proc(t: ^testing.T) {
+	server_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&server_track, context.allocator)
+	server_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&server_track)
+
+	worker_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&worker_track, context.allocator)
+	worker_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&worker_track)
+
+	s := http.make_server({}, mem.tracking_allocator(&server_track))
+	srv_thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &srv_thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&srv_thread)
+
+	a := http.get_arena(nil)
+
+	Work :: struct {
+		arena:         ^http.Arena,
+		server_track:  ^mem.Tracking_Allocator,
+		worker_alloc:  mem.Allocator,
+		td_was_nil:    bool,
+		ok:            bool,
+		boot_backed:   bool,
+		worker_unused: bool,
+	}
+	work := Work{
+		arena        = &a,
+		server_track = &server_track,
+		worker_alloc = mem.tracking_allocator(&worker_track),
+	}
+
+	w := thread.create_and_start_with_data(&work, proc(data: rawptr) {
+		work := (^Work)(data)
+		work.td_was_nil = http.td == nil
+		context.allocator = work.worker_alloc
+
+		b1, e1 := http.arena_alloc(work.arena, 2000, mem.DEFAULT_ALIGNMENT)
+		if e1 != nil || len(b1) != 2000 { return }
+		for &b in b1 { b = 0x12 }
+
+		b2, e2 := http.arena_alloc(work.arena, 5000, mem.DEFAULT_ALIGNMENT)
+		if e2 != nil || len(b2) != 5000 { return }
+		for &b in b2 { b = 0x34 }
+
+		b3, e3 := http.arena_alloc(work.arena, 64, mem.DEFAULT_ALIGNMENT)
+		if e3 != nil { return }
+		r3, e4 := http.arena_resize(work.arena, b3, 128, mem.DEFAULT_ALIGNMENT)
+		if e4 != nil || raw_data(r3) != raw_data(b3) { return }
+
+		// Non-tail resize forcing another block push.
+		r1, e5 := http.arena_resize(work.arena, b1, 4500, mem.DEFAULT_ALIGNMENT)
+		if e5 != nil || len(r1) != 4500 || r1[0] != 0x12 || r1[1999] != 0x12 || r1[2000] != 0 {
+			return
+		}
+
+		work.worker_unused = ((^mem.Tracking_Allocator)(work.worker_alloc.data)).total_allocation_count == 0
+
+		// Standalone bootstrap_arena created and destroyed purely on the worker thread.
+		boot, berr := http.bootstrap_arena(nil)
+		if berr != nil || boot == nil { return }
+		work.boot_backed = boot.backing == work.worker_alloc
+		extra, ex_err := http.arena_alloc(boot, 5000, mem.DEFAULT_ALIGNMENT)
+		if ex_err != nil || len(extra) != 5000 {
+			http.arena_destroy(boot)
+			return
+		}
+		http.arena_destroy(boot)
+		work.ok = true
+	})
+	testing.expect(t, w != nil, "expected worker thread created")
+	thread.destroy(w)
+
+	testing.expect(t, work.td_was_nil, "expected http.td to be nil on spawned worker thread")
+	testing.expect(t, work.ok, "expected worker allocations and standalone bootstrap_arena to succeed")
+	testing.expect(t, work.worker_unused, "expected worker allocations on a to use server allocator")
+	testing.expect(t, work.boot_backed, "expected standalone worker bootstrap_arena to bind worker allocator")
+	testing.expect_value(t, worker_track.current_memory_allocated, 0)
+	testing.expect_value(t, len(worker_track.bad_free_array), 0)
+	testing.expect(t, server_track.current_memory_allocated > 0, "expected server_track to hold blocks until destroy")
+
+	// Destroying back on the server thread recycles worker-allocated power-of-two blocks into free_arenas.
+	http.arena_destroy(&a)
+	testing.expect(t, srv_thread.free_arenas[0] != nil, "expected 4 KiB block recycled into server thread bucket 0")
+	testing.expect(t, srv_thread.free_arenas[1] != nil, "expected 8 KiB blocks recycled into server thread bucket 1")
+
+	http._server_thread_free_arenas_destroy(&srv_thread)
+	testing.expect_value(t, server_track.current_memory_allocated, 0)
+	testing.expect_value(t, len(server_track.bad_free_array), 0)
+}
+
+@(test)
+test_arena_cross_thread_destroy_after_server_out_of_scope :: proc(t: ^testing.T) {
+	make_bootstrapped_from_local_server :: proc(t: ^testing.T, backing: mem.Allocator) -> (^http.Arena, []byte) {
+		s := http.make_server({}, backing)
+		local_thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &local_thread
+		defer http.td = prev_td
+
+		boot, err := http.bootstrap_arena(nil)
+		testing.expect_value(t, err, nil)
+		payload, perr := http.arena_alloc(boot, 5000, mem.DEFAULT_ALIGNMENT)
+		testing.expect_value(t, perr, nil)
+		for &b in payload { b = 0x7E }
+		return boot, payload
+	}
+
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&track)
+
+	boot, payload := make_bootstrapped_from_local_server(t, mem.tracking_allocator(&track))
+	testing.expect(t, boot != nil, "expected bootstrapped arena")
+	testing.expect(t, track.current_memory_allocated > 0, "expected backing blocks live before worker destroy")
+
+	Work :: struct {
+		boot:    ^http.Arena,
+		payload: []byte,
+		valid:   bool,
+	}
+	work := Work{boot = boot, payload = payload}
+
+	w := thread.create_and_start_with_data(&work, proc(data: rawptr) {
+		work := (^Work)(data)
+		ok := http.td == nil
+		for b in work.payload {
+			if b != 0x7E { ok = false }
+		}
+		work.valid = ok
+		http.arena_destroy(work.boot)
+	})
+	testing.expect(t, w != nil, "expected worker thread created")
+	thread.destroy(w)
+
+	testing.expect(t, work.valid, "expected valid payload on worker thread after Server went out of scope")
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(test)
+test_arena_multi_server_allocator_isolation :: proc(t: ^testing.T) {
+	track_a: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track_a, context.allocator)
+	track_a.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&track_a)
+
+	track_b: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track_b, context.allocator)
+	track_b.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&track_b)
+
+	s_a := http.make_server({}, mem.tracking_allocator(&track_a))
+	s_b := http.make_server({}, mem.tracking_allocator(&track_b))
+
+	thread_a := http.Server_Thread{s = &s_a, id = 1}
+	thread_b := http.Server_Thread{s = &s_b, id = 2}
+	prev_td := http.td
+	defer {
+		http.td = prev_td
+		http._server_thread_free_arenas_destroy(&thread_a)
+		http._server_thread_free_arenas_destroy(&thread_b)
+	}
+
+	// Pre-populate Server B's bucket 1 freelist with a Server B block.
+	http.td = &thread_b
+	b := http.get_arena(nil)
+	_, b_err := http.arena_alloc(&b, 5000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, b_err, nil)
+	b_cached := b.tail
+	http.arena_destroy(&b)
+	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server B 8 KiB block cached on thread_b")
+	b_allocs_before := track_b.total_allocation_count
+	b_frees_before  := track_b.total_free_count
+
+	// Create and allocate on Server A.
+	http.td = &thread_a
+	a := http.get_arena(nil)
+	_, a1_err := http.arena_alloc(&a, 100, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, a1_err, nil)
+	testing.expect_value(t, track_a.total_allocation_count, 1)
+
+	// Migrate Arena `a` onto Server B's thread: must neither steal Server B's cached block nor pollute thread_b.free_arenas.
+	http.td = &thread_b
+	_, a2_err := http.arena_alloc(&a, 5000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, a2_err, nil)
+	testing.expect(t, a.tail != b_cached, "expected Server A arena not to steal Server B cached block")
+	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server B cached block untouched in bucket 1")
+	testing.expect_value(t, track_a.total_allocation_count, 2)
+
+	http.arena_destroy(&a)
+	testing.expect(t, thread_b.free_arenas[0] == nil, "expected Server A 4 KiB block not pushed into thread_b")
+	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server A 8 KiB block not pushed into thread_b")
+	testing.expect_value(t, track_b.total_allocation_count, b_allocs_before)
+	testing.expect_value(t, track_b.total_free_count, b_frees_before)
+	testing.expect_value(t, track_a.current_memory_allocated, 0)
+	testing.expect_value(t, len(track_a.bad_free_array), 0)
+	testing.expect_value(t, len(track_b.bad_free_array), 0)
+}
+
+@(test)
+test_arena_same_server_different_worker_thread :: proc(t: ^testing.T) {
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
+
+	thread_1 := http.Server_Thread{s = &s, id = 1}
+	thread_2 := http.Server_Thread{s = &s, id = 2}
+	prev_td := http.td
+	defer {
+		http.td = prev_td
+		http._server_thread_free_arenas_destroy(&thread_1)
+		http._server_thread_free_arenas_destroy(&thread_2)
+	}
+
+	http.td = &thread_1
+	a1 := http.get_arena(nil)
+	_, e1 := http.arena_alloc(&a1, 64, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, e1, nil)
+	block0 := a1.tail
+	_, e2 := http.arena_alloc(&a1, 5000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, e2, nil)
+	block1 := a1.tail
+	testing.expect_value(t, counter.alloc_count, 2)
+
+	// Destroy on thread_2 of the same server: recycles directly into thread_2.free_arenas.
+	http.td = &thread_2
+	http.arena_destroy(&a1)
+	testing.expect(t, thread_2.free_arenas[0] == block0, "expected 4 KiB block recycled into thread_2 bucket 0")
+	testing.expect(t, thread_2.free_arenas[1] == block1, "expected 8 KiB block recycled into thread_2 bucket 1")
+	for head in thread_1.free_arenas {
+		testing.expect(t, head == nil, "expected thread_1 free_arenas empty")
+	}
+	testing.expect_value(t, counter.free_count, 0)
+
+	// Subsequent allocation on thread_2 reuses both blocks without new backing allocations.
+	a2 := http.get_arena(nil)
+	_, e3 := http.arena_alloc(&a2, 64, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, e3, nil)
+	testing.expect(t, a2.tail == block0, "expected block0 reused on thread_2")
+	_, e4 := http.arena_alloc(&a2, 5000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, e4, nil)
+	testing.expect(t, a2.tail == block1, "expected block1 reused on thread_2")
+	testing.expect_value(t, counter.alloc_count, 2)
+
+	http.arena_destroy(&a2)
+	http._server_thread_free_arenas_destroy(&thread_2)
+	testing.expect_value(t, counter.free_count, 2)
+}
+
+@(test)
+test_arena_temp_free_all_without_td :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&track)
+
+	s := http.make_server({}, mem.tracking_allocator(&track))
+	srv_thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &srv_thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&srv_thread)
+
+	c := http.Connection{
+		temp_arena = http.get_arena(nil),
+	}
+	c.temp_arena.c = &c
+	c.scanner.c = &c
+	c.scanner.allocator = &c.temp_arena
+
+	buf, buf_err := make([]byte, http.MULTIPLIER, http.temp_allocator(&c))
+	testing.expect_value(t, buf_err, nil)
+	unread := "UNREAD_PAYLOAD"
+	c.scanner.buf        = buf
+	c.scanner.read_head  = 0
+	c.scanner.write_head = copy(buf, unread)
+
+	// Push an overflow block in temp_arena before running free_all on a worker thread.
+	extra, extra_err := make([]byte, 5000, http.temp_allocator(&c))
+	testing.expect_value(t, extra_err, nil)
+	extra[0] = 0x55
+	testing.expect_value(t, track.total_allocation_count, 2)
+
+	Work :: struct {
+		c:                ^http.Connection,
+		expected_unread:  string,
+		td_was_nil:       bool,
+		preserved_unread: bool,
+	}
+	work := Work{
+		c               = &c,
+		expected_unread = unread,
+	}
+
+	w := thread.create_and_start_with_data(&work, proc(data: rawptr) {
+		work := (^Work)(data)
+		work.td_was_nil = http.td == nil
+
+		free_all(http.temp_allocator(work.c))
+		got := string(work.c.scanner.buf[work.c.scanner.read_head:work.c.scanner.write_head])
+		work.preserved_unread = got == work.expected_unread
+		http.arena_destroy(&work.c.temp_arena)
+	})
+	testing.expect(t, w != nil, "expected worker thread created")
+	thread.destroy(w)
+
+	testing.expect(t, work.td_was_nil, "expected http.td to be nil on spawned worker thread")
+	testing.expect(t, work.preserved_unread, "expected unread scanner bytes preserved across _scanner_free_all on worker thread")
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
 }

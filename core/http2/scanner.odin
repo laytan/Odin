@@ -52,20 +52,22 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Er
 	}
 
 	to_alloc := max(MULTIPLIER, len(to_copy))
-	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v, to_alloc=%v", td.id, c.socket, len(to_copy), to_alloc)
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v, to_alloc=%v", _thread_id(), c.socket, len(to_copy), to_alloc)
 
-	new_arena := _server_thread_get_free_arena(to_alloc) or_return
+	backing := _arena_default_backing(c)
+	new_arena := _arena_block_acquire(backing, to_alloc) or_return
 	new_buf: []byte
 	new_buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
 	if err != nil {
-		_server_thread_put_free_arena(new_arena)
+		_arena_block_release(backing, new_arena)
 		return err
 	}
 	new_arena.last = raw_data(new_buf)
 	n := copy(new_buf, to_copy)
 
 	transaction_allocator_destroy(c)
-	c.transaction_arena.tail = new_arena
+	c.transaction_arena.backing = backing
+	c.transaction_arena.tail    = new_arena
 
 	s^ = {
 		c          = c,
@@ -100,12 +102,13 @@ _scanner_pin_buf_block :: proc(s: ^Scanner, a: ^Arena) -> bool {
 		return false
 	}
 
+	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
 	block := a.tail
 	a.tail = nil
 	for block != nil {
 		prev := block.prev
 		if block != buf_block {
-			_server_thread_put_free_arena(block)
+			_arena_block_release(backing, block)
 		}
 		block = prev
 	}
@@ -125,13 +128,13 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 	// Never free, poison, or relocate s.buf while an nbio.recv holds a pointer into it.
 	// Reclaim all other blocks in `a` and rewind the pinned block's offset to the end of s.buf.
 	if s.c.curr_recv != nil {
-		log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all (recv in flight, pinning buf block)\"", td.id, s.c.socket)
+		log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all (recv in flight, pinning buf block)\"", _thread_id(), s.c.socket)
 		return _scanner_pin_buf_block(s, a)
 	}
 
 	to_copy := s.buf[s.read_head:s.write_head]
 	to_alloc := max(MULTIPLIER, len(to_copy))
-	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", td.id, s.c.socket, len(to_copy), to_alloc)
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", _thread_id(), s.c.socket, len(to_copy), to_alloc)
 
 	if len(to_copy) == 0 {
 		s.buf = {}
@@ -139,15 +142,16 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 		return false
 	}
 
-	new_arena, arena_err := _server_thread_get_free_arena(to_alloc)
+	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
+	new_arena, arena_err := _arena_block_acquire(backing, to_alloc)
 	if arena_err != nil {
-		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", td.id, s.c.socket, arena_err)
+		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", _thread_id(), s.c.socket, arena_err)
 		return _scanner_pin_buf_block(s, a)
 	}
 	new_buf, err := make([]byte, to_alloc, mem.arena_allocator(new_arena))
 	if err != nil {
-		_server_thread_put_free_arena(new_arena)
-		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", td.id, s.c.socket, err)
+		_arena_block_release(backing, new_arena)
+		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", _thread_id(), s.c.socket, err)
 		return _scanner_pin_buf_block(s, a)
 	}
 	s.buf          = new_buf

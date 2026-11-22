@@ -297,6 +297,11 @@ response_defer :: proc(ctx: ^Ctx, deferred: proc(^Ctx)) -> runtime.Allocator_Err
 @(thread_local)
 td: ^Server_Thread
 
+@(private)
+_thread_id :: #force_inline proc() -> int {
+	return td != nil ? td.id : 0
+}
+
 _setup_threads :: proc(s: ^Server) -> runtime.Allocator_Error {
 	thread_count := max(1, s.opts.thread_count > 0 ? s.opts.thread_count : os.get_processor_core_count())
 	s.threads = make([]Server_Thread, thread_count, s.allocator) or_return
@@ -328,6 +333,7 @@ _server_thread :: proc(s: ^Server, thread: ^Server_Thread, id: int) {
 	thread.s = s
 	thread.id = id
 	td = thread
+	defer td = nil
 
 	if err := nbio.acquire_thread_event_loop(); err != nil {
 		// Should not happen AFAIK, the main thread has already successfully
@@ -639,8 +645,11 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 }
 
 _serve_connection :: proc(c: ^Connection) {
-	c.temp_arena.c        = c
-	c.transaction_arena.c = c
+	backing := _arena_backing_allocator(td.s)
+	c.temp_arena.c              = c
+	c.temp_arena.backing        = backing
+	c.transaction_arena.c       = c
+	c.transaction_arena.backing = backing
 
 	if err := scanner_reset(&c.scanner, c); err != nil {
 		log.errorf("http[t=%v][c=%v]: msg=\"scanner_reset allocation error\", err=%v", td.id, c.socket, err)
