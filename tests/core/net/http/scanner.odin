@@ -1,10 +1,14 @@
 package test_core_net_http
 
+import "base:sanitizer"
+
 import "core:fmt"
 import "core:io"
+import "core:log"
 import "core:mem"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 import http "core:http2"
 
@@ -1255,4 +1259,1101 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.res._sends, 1)
 		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
 	}
+}
+
+@(test)
+test_scanner_buf_size_bucket_alignment :: proc(t: ^testing.T) {
+	hdr := size_of(http._Arena_Block)
+	testing.expect_value(t, http._scanner_buf_size(1), http.MULTIPLIER)
+	testing.expect_value(t, http._scanner_buf_size(512), 512)
+	testing.expect_value(t, http._scanner_buf_size(513), 1024)
+	testing.expect_value(t, http._scanner_buf_size(2048), 2048)
+	testing.expect_value(t, http._scanner_buf_size(4096 - hdr), 4096 - hdr)
+	testing.expect_value(t, http._scanner_buf_size(4096 - hdr + 1), 8192 - hdr)
+	testing.expect_value(t, http._scanner_buf_size(http.BODY_BUF_SIZE), 16 * mem.Kilobyte - hdr)
+	testing.expect_value(t, http._scanner_buf_size(16 * mem.Megabyte - hdr), 16 * mem.Megabyte - hdr)
+	testing.expect_value(t, http._scanner_buf_size(16 * mem.Megabyte + 123), 16 * mem.Megabyte + 123)
+
+	testing.expect_value(t, http._scanner_buf_size(512, http._arena_grow_size(0)), 512)
+	testing.expect_value(t, http._scanner_buf_size(1024, http._arena_grow_size(512)), 1024)
+	testing.expect_value(t, http._scanner_buf_size(1536, http._arena_grow_size(1024)), 2048)
+	testing.expect_value(t, http._scanner_buf_size(2560, http._arena_grow_size(2048)), 4096 - hdr)
+	testing.expect_value(t, http._scanner_buf_size(4096 - hdr + 512, http._arena_grow_size(4096 - hdr)), 8192 - hdr)
+
+	// Verify 512 -> 1024 -> 2048 -> (4096 - hdr) resizes in-place inside a single 4 KiB block.
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	a := http.get_arena(nil)
+	defer http.arena_destroy(&a)
+	alloc := http.arena_allocator(&a)
+
+	buf, err := make([]byte, http.MULTIPLIER, alloc)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, counter.alloc_count, 1)
+
+	for step in ([?]int{1024, 2048, 4096 - hdr}) {
+		next_size := http._scanner_buf_size(len(buf) + 1, http._arena_grow_size(len(buf)))
+		testing.expect_value(t, next_size, step)
+		resized, rerr := http._arena_block_resize_in_place(a.tail, buf, next_size, 1, false)
+		testing.expect_value(t, rerr, nil)
+		buf = resized
+		testing.expect_value(t, len(a.tail.data), 4096)
+		testing.expect_value(t, counter.alloc_count, 1)
+	}
+
+	next_size := http._scanner_buf_size(len(buf) + 1, http._arena_grow_size(len(buf)))
+	testing.expect_value(t, next_size, 8192 - hdr)
+	next_buf, nerr := make([]byte, next_size, alloc)
+	testing.expect_value(t, nerr, nil)
+	buf = next_buf
+	testing.expect_value(t, len(a.tail.data), 8192)
+	testing.expect_value(t, counter.alloc_count, 2)
+}
+
+@(test)
+test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^testing.T) {
+	setup_req_conn :: proc(
+		t: ^testing.T,
+		s: ^http.Server,
+		thread: ^http.Server_Thread,
+		c: ^http.Connection,
+		payload: string,
+	) {
+		c^ = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = c
+		c.temp_arena.c        = c
+		tx_alloc := http.transaction_allocator(c)
+		c._vars.allocator         = tx_alloc
+		c.req.headers.allocator   = tx_alloc
+		c.res.headers.allocator   = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
+		c.scanner.c               = c
+		c.scanner.allocator       = &c.transaction_arena
+		c.req.quota               = &s.opts.request_quota
+		http.progression_init(&c.req.progress, c.req.quota^)
+
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		c.scanner.buf        = buf
+		c.scanner.write_head = copy(buf, payload)
+	}
+
+	// 1. Lying 1 GiB Content-Length with UNLIMITED_QUOTA caps detached reusable buffer at BODY_BUF_SIZE (16 KiB block)
+	//    and compacts in place across repeated chunks without touching headers or temp_allocator allocations.
+	{
+		State :: struct {
+			t:             ^testing.T,
+			orig_hdr_ptr:  rawptr,
+			temp_sentinel: []byte,
+		}
+
+		st := State{t = t}
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		handler := http.Handler{
+			user_data = &st,
+			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+				st := (^State)(h.user_data)
+				c := http.connection_of_context(ctx)
+
+				temp, terr := make([]byte, 256, context.temp_allocator)
+				testing.expect_value(st.t, terr, nil)
+				for &b in temp { b = 0x5A }
+				st.temp_sentinel = temp
+
+				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+			},
+		}
+		s := http.make_server({
+			body_quota = http.UNLIMITED_QUOTA,
+			handler    = handler,
+		}, arena_counting_allocator(&counter))
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_req_conn(
+			t, &s, &thread, &c,
+			"POST /upload HTTP/1.1\r\nHost: localhost\r\nX-Tag: keep-me\r\nContent-Length: 1073741824\r\n\r\n",
+		)
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		st.orig_hdr_ptr = raw_data(c.scanner.buf)
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = http.on_rline1,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner), "expected body scan to request recv")
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner), "expected body detach buffer preparation to succeed")
+
+		testing.expect(t, c.scanner.buf_reusable, "expected reusable buffer after body detach")
+		testing.expect_value(t, len(c.scanner.buf), http.BODY_BUF_SIZE)
+		testing.expect(t, raw_data(c.scanner.buf) != st.orig_hdr_ptr, "expected body detach from header buffer")
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 16 * mem.Kilobyte)
+		// Alloc 1 = initial 4 KiB header block, Alloc 2 = 4 KiB temp_arena sentinel, Alloc 3 = single 16 KiB reusable body block.
+		testing.expect_value(t, counter.alloc_count, 3)
+
+		reusable_ptr := raw_data(c.scanner.buf)
+
+		// Empty rewind on subsequent streaming cycle reuses the exact same 16 KiB buffer with 0 allocations
+		// when the previous recv did not fill the buffer.
+		for round in 0..<10 {
+			for &b in c.scanner.buf { b = u8('A' + (round % 26)) }
+			c.scanner.read_head  = 4096
+			c.scanner.write_head = 4096
+			c.scanner.scan = {
+				split     = http.split_at_most(1024),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = true,
+			}
+			testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+			testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+			testing.expect_value(t, c.scanner.read_head, 0)
+			testing.expect_value(t, c.scanner.write_head, 0)
+			testing.expect(t, raw_data(c.scanner.buf) == reusable_ptr, "expected pointer preserved across non-full rewinds")
+		}
+		testing.expect_value(t, counter.alloc_count, 3)
+
+		// Partial compaction shifts unread bytes to offset 0 in place.
+		tail_msg := "TAIL_PAYLOAD!"
+		tail_start := 4096
+		copy(c.scanner.buf[tail_start:], tail_msg)
+		c.scanner.read_head  = tail_start
+		c.scanner.write_head = tail_start + len(tail_msg)
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = proc(c: ^http.Connection, data: []byte) {},
+			buf_cap   = http.STREAM_MAX_BUF_SIZE,
+			reuse     = true,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+		testing.expect_value(t, c.scanner.read_head, 0)
+		testing.expect_value(t, c.scanner.write_head, len(tail_msg))
+		testing.expect_value(t, string(c.scanner.buf[:len(tail_msg)]), tail_msg)
+		testing.expect(t, raw_data(c.scanner.buf) == reusable_ptr, "expected pointer preserved across compaction")
+		testing.expect_value(t, counter.alloc_count, 3)
+
+		// Adaptive ramp-up: when recvs fill the buffer, .Reuse doubles 16K -> 32K -> 64K -> 128K -> 256K and caps there.
+		hdr_size := size_of(http._Arena_Block)
+		expected_buckets := [?]int{32 * mem.Kilobyte, 64 * mem.Kilobyte, 128 * mem.Kilobyte, 256 * mem.Kilobyte}
+		for bucket_size, idx in expected_buckets {
+			c.scanner.read_head  = len(c.scanner.buf)
+			c.scanner.write_head = len(c.scanner.buf)
+			c.scanner.scan = {
+				split     = http.split_at_most(1024),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = true,
+			}
+			testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+			testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+			testing.expect_value(t, c.scanner.read_head, 0)
+			testing.expect_value(t, c.scanner.write_head, 0)
+			testing.expect_value(t, len(c.scanner.buf), bucket_size - hdr_size)
+			testing.expect_value(t, len(c.transaction_arena.tail.data), bucket_size)
+			testing.expect_value(t, counter.alloc_count, 4 + idx)
+		}
+
+		// Abandoned intermediate .Reuse blocks (16K/32K/64K/128K) were reclaimed back to td.free_arenas,
+		// leaving only the active 256 KiB block and the initial 4 KiB header block in c.transaction_arena.
+		arena_blocks := 0
+		for b := c.transaction_arena.tail; b != nil; b = b.prev {
+			arena_blocks += 1
+		}
+		testing.expect_value(t, arena_blocks, 2)
+		testing.expect_value(t, len(c.transaction_arena.tail.prev.data), 4 * mem.Kilobyte)
+
+		// Once at STREAM_MAX_BUF_SIZE (256 KiB - hdr), further full recvs stay flat with zero allocations.
+		max_ptr := raw_data(c.scanner.buf)
+		for _ in 0..<4 {
+			c.scanner.read_head  = len(c.scanner.buf)
+			c.scanner.write_head = len(c.scanner.buf)
+			c.scanner.scan = {
+				split     = http.split_at_most(1024),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = true,
+			}
+			testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+			testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+			testing.expect(t, raw_data(c.scanner.buf) == max_ptr, "expected pointer preserved once at STREAM_MAX_BUF_SIZE")
+			testing.expect_value(t, len(c.scanner.buf), http.STREAM_MAX_BUF_SIZE)
+			testing.expect_value(t, counter.alloc_count, 7)
+		}
+
+		// Original request line, headers, and temp_allocator data remain intact and unpoisoned.
+		testing.expect_value(t, c.req.line.target, "/upload")
+		tag, tag_ok := http.get_header(&c.req, "X-Tag")
+		testing.expect(t, tag_ok, "expected header preserved")
+		testing.expect_value(t, tag, "keep-me")
+		testing.expect(t, sanitizer.address_region_is_poisoned(st.temp_sentinel) == nil, "expected temp_allocator data unpoisoned")
+		for b in st.temp_sentinel {
+			testing.expect_value(t, b, u8(0x5A))
+		}
+
+		// Concurrent second connection reuses the reclaimed 16K/32K/64K/128K blocks with 0 new backing allocs.
+		c2: http.Connection
+		setup_req_conn(
+			t, &s, &thread, &c2,
+			"POST /upload2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1073741824\r\n\r\n",
+		)
+		defer http.temp_allocator_destroy(&c2)
+		defer http.transaction_allocator_destroy(&c2)
+
+		testing.expect_value(t, counter.alloc_count, 8) // 4 KiB header block for c2.
+		c2.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c2.transaction_arena,
+			callback  = http.on_rline1,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c2.scanner))
+		// s.opts.handler allocates c2's 4 KiB temp_arena sentinel before detaching body buffer.
+		testing.expect_value(t, counter.alloc_count, 9)
+		testing.expect(t, http._scanner_prepare_recv_buf(&c2.scanner))
+		testing.expect_value(t, len(c2.scanner.buf), http.BODY_BUF_SIZE)
+		testing.expect_value(t, counter.alloc_count, 9)
+
+		for bucket_size in ([?]int{32 * mem.Kilobyte, 64 * mem.Kilobyte, 128 * mem.Kilobyte}) {
+			c2.scanner.read_head  = len(c2.scanner.buf)
+			c2.scanner.write_head = len(c2.scanner.buf)
+			c2.scanner.scan = {
+				split     = http.split_at_most(1024),
+				allocator = &c2.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = true,
+			}
+			testing.expect(t, http._scanner_pump_buffered(&c2.scanner))
+			testing.expect(t, http._scanner_prepare_recv_buf(&c2.scanner))
+			testing.expect_value(t, len(c2.transaction_arena.tail.data), bucket_size)
+			testing.expect_value(t, counter.alloc_count, 9)
+		}
+	}
+
+	// 2. Lying 1 GiB chunk size with UNLIMITED_QUOTA starts detached reusable buffer at BODY_BUF_SIZE (16 KiB block).
+	{
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		handler := http.handler(proc(ctx: ^http.Ctx) {
+			c := http.connection_of_context(ctx)
+			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		})
+		s := http.make_server({
+			body_quota = http.UNLIMITED_QUOTA,
+			handler    = handler,
+		}, arena_counting_allocator(&counter))
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_req_conn(
+			t, &s, &thread, &c,
+			"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n40000000\r\n",
+		)
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = http.on_rline1,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+
+		testing.expect(t, c.scanner.buf_reusable, "expected reusable buffer after chunked body detach")
+		testing.expect_value(t, len(c.scanner.buf), http.BODY_BUF_SIZE)
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 16 * mem.Kilobyte)
+		testing.expect_value(t, counter.alloc_count, 2)
+	}
+
+	// 3. Small split Content-Length (200 bytes) caps reusable buffer at MULTIPLIER (512 bytes) inside existing 4 KiB block.
+	{
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		handler := http.handler(proc(ctx: ^http.Ctx) {
+			c := http.connection_of_context(ctx)
+			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		})
+		s := http.make_server({
+			body_quota = http.UNLIMITED_QUOTA,
+			handler    = handler,
+		}, arena_counting_allocator(&counter))
+
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_req_conn(
+			t, &s, &thread, &c,
+			"POST /small HTTP/1.1\r\nHost: localhost\r\nContent-Length: 200\r\n\r\n",
+		)
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = http.on_rline1,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+
+		testing.expect(t, c.scanner.buf_reusable, "expected reusable buffer for split small body")
+		testing.expect_value(t, len(c.scanner.buf), http.MULTIPLIER)
+		testing.expect_value(t, counter.alloc_count, 1)
+		testing.expect(t, c.transaction_arena.tail.prev == nil, "expected 512-byte body buffer to fit inside existing 4 KiB block")
+	}
+
+	// 4. Chunked trailers freeze buf_mode to .Grow and preserve trailer headers + pipelined next request.
+	{
+		Trailer_State :: struct {
+			done: bool,
+		}
+
+		s := http.make_server({})
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_req_conn(t, &s, &thread, &c, "")
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Trailer", "X-Trailer"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		payload := "0\r\nX-Trailer: val\r\n\r\nGET /next HTTP/1.1\r\n"
+		rbuf, rerr := make([]byte, http.BODY_BUF_SIZE, http.transaction_allocator(&c))
+		testing.expect_value(t, rerr, nil)
+		c.scanner.buf          = rbuf
+		c.scanner.buf_reusable = true
+		c.scanner.write_head   = copy(rbuf, payload)
+
+		ts := http.context_add(&c.ctx, Trailer_State{})
+		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+			if !is_partial {
+				ts := http.context_get(http.context_of_request(req), Trailer_State)
+				ts.done = true
+			}
+		})
+
+		testing.expect(t, ts.done, "expected chunked trailer body completion")
+		testing.expect(t, !c.scanner.buf_reusable, "expected on_trailer to clear buf_reusable")
+		tr_val, tr_ok := http.get_header(&c.req, "X-Trailer")
+		testing.expect(t, tr_ok, "expected trailer header stored in request")
+		testing.expect_value(t, tr_val, "val")
+		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "GET /next HTTP/1.1\r\n")
+	}
+}
+
+@(test)
+test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) {
+	// 1. body_parser uses retain = true for true zero-copy parts (zero extra clone allocations).
+	{
+		Parser_State :: struct {
+			t:          ^testing.T,
+			called:     bool,
+			buf_start:  uintptr,
+			buf_end:    uintptr,
+		}
+
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		s := http.make_server({}, arena_counting_allocator(&counter))
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c        = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c._vars.allocator       = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.scanner.c             = &c
+		c.scanner.allocator     = &c.transaction_arena
+		http.progression_init(&c.req.progress, {})
+
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		payload := "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		c.scanner.buf        = buf
+		c.scanner.write_head = copy(buf, payload)
+		testing.expect_value(t, counter.alloc_count, 1)
+
+		ps := http.context_add(&c.ctx, Parser_State{
+			t         = t,
+			buf_start = uintptr(raw_data(buf)),
+			buf_end   = uintptr(raw_data(buf)) + uintptr(len(buf)),
+		})
+		next := http.handler(proc(ctx: ^http.Ctx) {
+			ps := http.context_get(ctx, Parser_State)
+			ps.called = true
+
+			it := http.body_parser_iterator(ctx)
+			for part, _ in http.body_parser_iter(&it) {
+				p := uintptr(raw_data(part))
+				testing.expect(ps.t, p >= ps.buf_start && p < ps.buf_end, "expected zero-copy part aliasing original scanner buffer")
+			}
+
+			bps: http.Body_Parser_Stream
+			http.body_parser_stream_init(&bps, ctx)
+			stream := http.body_parser_stream(&bps)
+			out: [32]byte
+			n, rerr := io.read(stream, out[:])
+			testing.expect_value(ps.t, rerr, nil)
+			testing.expect_value(ps.t, string(out[:n]), "hello world")
+		})
+
+		parser := http.body_parser(&next)
+		parser.handle(&parser, &c.ctx)
+		testing.expect(t, ps.called, "expected body_parser to invoke next handler")
+		testing.expect_value(t, counter.alloc_count, 1)
+	}
+
+	// 2. .Retain mode starts <= 16 KiB, progressively doubles 16K -> 32K -> 64K when blocks fill,
+	//    and clamps cleanly to remaining buf_cap without overwriting previously yielded slices.
+	{
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		s := http.make_server({}, arena_counting_allocator(&counter))
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c        = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		c.scanner.c         = &c
+		c.scanner.allocator = &c.transaction_arena
+
+		trigger_retain :: proc(t: ^testing.T, c: ^http.Connection, cap := i32(http.RETAIN_MAX_BUF_SIZE)) {
+			c.scanner.scan = {
+				split     = http.split_at_most(64 * mem.Kilobyte),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = cap,
+				reuse     = false,
+			}
+			testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+			testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+		}
+
+		hdr_size := size_of(http._Arena_Block)
+
+		// Block 1: untrusted initial allocation starts at BODY_BUF_SIZE (16 KiB - hdr).
+		trigger_retain(t, &c)
+		buf1 := c.scanner.buf
+		testing.expect(t, !c.scanner.buf_reusable, "expected non-reusable buffer on Block 1")
+		testing.expect_value(t, len(buf1), http.BODY_BUF_SIZE)
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 16 * mem.Kilobyte)
+		testing.expect_value(t, counter.alloc_count, 1)
+		for &b in buf1 { b = 'A' }
+		c.scanner.read_head  = len(buf1)
+		c.scanner.write_head = len(buf1)
+
+		// Block 2: progressively doubles to 32 KiB - hdr once Block 1 fills; buf1 untouched.
+		trigger_retain(t, &c)
+		buf2 := c.scanner.buf
+		testing.expect(t, !c.scanner.buf_reusable, "expected non-reusable buffer on Block 2")
+		testing.expect(t, raw_data(buf2) != raw_data(buf1), "expected fresh chained buffer on Block 2")
+		testing.expect_value(t, len(buf2), 32 * mem.Kilobyte - hdr_size)
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 32 * mem.Kilobyte)
+		testing.expect_value(t, counter.alloc_count, 2)
+		for &b in buf2 { b = 'B' }
+		c.scanner.read_head  = len(buf2)
+		c.scanner.write_head = len(buf2)
+
+		// Block 3: progressively doubles to 64 KiB - hdr once Block 2 fills; buf1 and buf2 untouched.
+		trigger_retain(t, &c)
+		buf3 := c.scanner.buf
+		testing.expect(t, raw_data(buf3) != raw_data(buf2), "expected third chained buffer on Block 3")
+		testing.expect_value(t, len(buf3), 64 * mem.Kilobyte - hdr_size)
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 64 * mem.Kilobyte)
+		testing.expect_value(t, counter.alloc_count, 3)
+		for &b in buf3 { b = 'C' }
+		c.scanner.read_head  = len(buf3)
+		c.scanner.write_head = len(buf3)
+
+		// Block 4: remaining buf_cap = 16384 clamps down to 16 KiB - hdr; prior blocks intact.
+		trigger_retain(t, &c, 16384)
+		buf4 := c.scanner.buf
+		testing.expect(t, raw_data(buf4) != raw_data(buf3), "expected fourth chained buffer on Block 4")
+		testing.expect_value(t, len(buf4), http.BODY_BUF_SIZE)
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 16 * mem.Kilobyte)
+		testing.expect_value(t, counter.alloc_count, 4)
+
+		for b in buf1 { testing.expect_value(t, b, u8('A')) }
+		for b in buf2 { testing.expect_value(t, b, u8('B')) }
+		for b in buf3 { testing.expect_value(t, b, u8('C')) }
+	}
+}
+
+@(test)
+test_scanner_pre_alloc_quota_and_timeout_rejection :: proc(t: ^testing.T) {
+	setup_conn :: proc(t: ^testing.T, s: ^http.Server, c: ^http.Connection, max_bytes: int, timeout: int) {
+		c^ = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.Arena{backing = context.allocator},
+		}
+		c.transaction_arena.c = c
+		c.temp_arena.c        = c
+		tx_alloc := http.transaction_allocator(c)
+		c._vars.allocator         = tx_alloc
+		c.req.headers.allocator   = tx_alloc
+		c.res.headers.allocator   = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
+		c.scanner.c               = c
+		c.scanner.allocator       = &c.transaction_arena
+		c.res._state              = .Handling
+		c.res.progress.max        = 0
+		c.res._sends              = 1
+		c.req.progress.max        = max_bytes
+		c.req.progress.timeout    = time.Duration(timeout)
+		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
+		testing.expect_value(t, err, nil)
+		c.scanner.buf = buf
+	}
+
+	for reuse in ([?]bool{true, false}) {
+		// 1. progress.max == 0 rejects with 413 Payload Too Large and 0 extra allocations.
+		{
+			counter := Arena_Counting_Allocator{backing = context.allocator}
+			s := http.make_server({}, arena_counting_allocator(&counter))
+			thread := http.Server_Thread{s = &s, id = 1}
+			prev_td := http.td
+			http.td = &thread
+			defer http.td = prev_td
+			defer http._server_thread_free_arenas_destroy(&thread)
+
+			c: http.Connection
+			setup_conn(t, &s, &c, 0, -1)
+			defer http.temp_allocator_destroy(&c)
+			defer http.transaction_allocator_destroy(&c)
+
+			before_allocs := counter.alloc_count
+			orig_tail := c.transaction_arena.tail
+			c.scanner.scan = {
+				split     = http.split_at_most(4096),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = reuse,
+			}
+			http.scanner_pump(&c.scanner)
+			testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
+			testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+			testing.expect_value(t, c.transaction_arena.tail, orig_tail)
+			testing.expect_value(t, counter.alloc_count, before_allocs)
+		}
+
+		// 2. progress.timeout == 0 rejects with 408 Request Timeout and 0 extra allocations.
+		{
+			counter := Arena_Counting_Allocator{backing = context.allocator}
+			s := http.make_server({}, arena_counting_allocator(&counter))
+			thread := http.Server_Thread{s = &s, id = 1}
+			prev_td := http.td
+			http.td = &thread
+			defer http.td = prev_td
+			defer http._server_thread_free_arenas_destroy(&thread)
+
+			c: http.Connection
+			setup_conn(t, &s, &c, 1024, 0)
+			defer http.temp_allocator_destroy(&c)
+			defer http.transaction_allocator_destroy(&c)
+
+			before_allocs := counter.alloc_count
+			orig_tail := c.transaction_arena.tail
+			c.scanner.scan = {
+				split     = http.split_at_most(4096),
+				allocator = &c.transaction_arena,
+				callback  = proc(c: ^http.Connection, data: []byte) {},
+				buf_cap   = http.STREAM_MAX_BUF_SIZE,
+				reuse     = reuse,
+			}
+			http.scanner_pump(&c.scanner)
+			testing.expect_value(t, c.res.status, http.Status.Request_Timeout)
+			testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+			testing.expect_value(t, c.transaction_arena.tail, orig_tail)
+			testing.expect_value(t, counter.alloc_count, before_allocs)
+		}
+	}
+}
+
+@(test)
+test_chunked_framing_bounds :: proc(t: ^testing.T) {
+	setup_chunked_conn :: proc(t: ^testing.T, s: ^http.Server, c: ^http.Connection, payload: string, buf_len := http.MULTIPLIER) {
+		c^ = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.Arena{backing = context.allocator},
+		}
+		c.transaction_arena.c = c
+		c.temp_arena.c        = c
+		tx_alloc := http.transaction_allocator(c)
+		c._vars.allocator         = tx_alloc
+		c.req.headers.allocator   = tx_alloc
+		c.res.headers.allocator   = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
+		c.scanner.c               = c
+		c.scanner.allocator       = &c.transaction_arena
+		c.req.quota               = &s.opts.body_quota
+		http.progression_init(&c.req.progress, c.req.quota^)
+		c.res._state              = .Handling
+		c.res.progress.max        = 0
+		c.res._sends              = 1
+		c.req.line.version        = {1, 1}
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		buf, err := make([]byte, max(buf_len, len(payload)), tx_alloc)
+		testing.expect_value(t, err, nil)
+		c.scanner.buf        = buf
+		c.scanner.write_head = copy(buf, payload)
+	}
+
+	// 1. Non-CRLF bytes after chunk data -> immediate 400 Bad Request on 2 bytes in both retain = false and retain = true.
+	for retain in ([?]bool{false, true}) {
+		s := http.make_server({body_quota = http.UNLIMITED_QUOTA})
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_chunked_conn(t, &s, &c, "5\r\nhelloXX")
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {}, retain = retain)
+		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+	}
+
+	// 2a. Single huge incomplete trailer line (> request_quota.max_size) -> 431 Request Header Fields Too Large.
+	{
+		s := http.make_server({
+			request_quota = {max_size = 512, min = -1},
+			body_quota    = http.UNLIMITED_QUOTA,
+		})
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		b := strings.builder_make()
+		defer strings.builder_destroy(&b)
+		strings.write_string(&b, "0\r\nX-Big: ")
+		for _ in 0..<512 {
+			strings.write_byte(&b, 'x')
+		}
+
+		c: http.Connection
+		setup_chunked_conn(t, &s, &c, strings.to_string(b))
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+	}
+
+	// 2b. Multiple incomplete trailer lines exceeding request_quota.max_size (needing recv) -> 431.
+	{
+		s := http.make_server({
+			request_quota = {max_size = 32, min = -1},
+			body_quota    = http.UNLIMITED_QUOTA,
+		})
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c: http.Connection
+		setup_chunked_conn(t, &s, &c, "0\r\nX-A: 123456789012\r\nX-B: 123456789012\r\n")
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+	}
+}
+
+@(test)
+test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
+	Transition_State :: struct {
+		done: bool,
+	}
+
+	// 1. .Reuse (256 KiB full, < 512 bytes left) transitioning to on_trailer compacts in place with 0 new allocs.
+	{
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		s := http.make_server({}, arena_counting_allocator(&counter))
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c        = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c._vars.allocator       = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.scanner.c             = &c
+		c.scanner.allocator     = &c.transaction_arena
+		http.progression_init(&c.req.progress, {})
+
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Trailer", "X-Tr"), nil)
+		http._headers_set_readonly(&c.req.headers)
+
+		buf, err := make([]byte, http.STREAM_MAX_BUF_SIZE, tx_alloc)
+		testing.expect_value(t, err, nil)
+		orig_ptr := raw_data(buf)
+
+		partial_trailer := "0\r\nX-Tr: "
+		start := len(buf) - len(partial_trailer) - 8
+		copy(buf[start:], partial_trailer)
+		c.scanner.buf          = buf
+		c.scanner.buf_reusable = true
+		c.scanner.read_head    = start
+		c.scanner.write_head   = start + len(partial_trailer)
+
+		ts := http.context_add(&c.ctx, Transition_State{})
+		allocs_before := counter.alloc_count
+
+		// Drive chunked size parsing from buffered data at the buffer tail, then prepare recv for trailer.
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = proc(c: ^http.Connection, data: []byte) {
+				// Simulate _body_chunked's on_size seeing "0" and transitioning to trailer scan.
+				assert(string(data) == "0")
+				http.scan_line(&c.scanner, proc(c: ^http.Connection, tr: []byte) {
+					if len(tr) == 0 {
+						ts := http.context_get(&c.ctx, Transition_State)
+						ts.done = true
+						return
+					}
+					k, v, ok := http.header_parse(string(tr))
+					assert(ok)
+					http._headers_set_writable(&c.req.headers)
+					_ = http.headers_add(&c.req.headers, k, v)
+					http._headers_set_readonly(&c.req.headers)
+					http.scan_line(&c.scanner, proc(c: ^http.Connection, end: []byte) {
+						assert(len(end) == 0)
+						ts := http.context_get(&c.ctx, Transition_State)
+						ts.done = true
+					})
+				})
+			},
+			buf_cap   = http.STREAM_MAX_BUF_SIZE,
+			reuse     = true,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+
+		testing.expect(t, !c.scanner.buf_reusable, "expected reusable buffer to freeze on trailer scan")
+		testing.expect(t, raw_data(c.scanner.buf) == orig_ptr, "expected in-place compaction without realloc")
+		testing.expect_value(t, counter.alloc_count, allocs_before)
+		testing.expect_value(t, c.scanner.read_head, 0)
+		testing.expect_value(t, string(c.scanner.buf[:c.scanner.write_head]), "X-Tr: ")
+
+		// Append remaining trailer line and verify completion.
+		rest := "ok\r\n\r\n"
+		c.scanner.write_head += copy(c.scanner.buf[c.scanner.write_head:], rest)
+		testing.expect(t, !http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, ts.done, "expected trailer completion")
+		val, ok := http.get_header(&c.req, "X-Tr")
+		testing.expect(t, ok, "expected trailer header")
+		testing.expect_value(t, val, "ok")
+	}
+
+	// 2. .Retain (64 KiB full, < 512 bytes left) transitioning to .Grow detaches to a small 4 KiB block (not 128 KiB)
+	//    and preserves previously retained slices untouched.
+	{
+		counter := Arena_Counting_Allocator{backing = context.allocator}
+		s := http.make_server({}, arena_counting_allocator(&counter))
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c        = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c._vars.allocator       = tx_alloc
+		c.req.headers.allocator = tx_alloc
+		c.scanner.c             = &c
+		c.scanner.allocator     = &c.transaction_arena
+		http.progression_init(&c.req.progress, {})
+
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
+		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
+		http._headers_set_readonly(&c.req.headers)
+		ts := http.context_add(&c.ctx, Transition_State{})
+
+		buf_size := 64 * mem.Kilobyte - size_of(http._Arena_Block)
+		buf, err := make([]byte, buf_size, tx_alloc)
+		testing.expect_value(t, err, nil)
+		for &b in buf[:len(buf)-16] { b = 'Z' }
+		retained := buf[:1024]
+
+		partial_trailer := "0\r\nX-Tr: "
+		start := len(buf) - 16
+		copy(buf[start:], partial_trailer)
+		c.scanner.buf          = buf
+		c.scanner.buf_reusable = false
+		c.scanner.read_head    = start
+		c.scanner.write_head   = start + len(partial_trailer)
+
+		allocs_before := counter.alloc_count
+
+		c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &c.transaction_arena,
+			callback  = proc(c: ^http.Connection, data: []byte) {
+				assert(string(data) == "0")
+				http.scan_line(&c.scanner, proc(c: ^http.Connection, tr: []byte) {
+					k, v, ok := http.header_parse(string(tr))
+					assert(ok)
+					http._headers_set_writable(&c.req.headers)
+					_ = http.headers_add(&c.req.headers, k, v)
+					http._headers_set_readonly(&c.req.headers)
+					http.scan_line(&c.scanner, proc(c: ^http.Connection, end: []byte) {
+						assert(len(end) == 0)
+						ts := http.context_get(&c.ctx, Transition_State)
+						ts.done = true
+					})
+				})
+			},
+			buf_cap   = http.RETAIN_MAX_BUF_SIZE,
+			reuse     = false,
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+
+		testing.expect(t, !c.scanner.buf_reusable, "expected non-reusable buffer after trailer scan")
+		testing.expect_value(t, len(c.transaction_arena.tail.data), 4 * mem.Kilobyte)
+		testing.expect_value(t, len(c.scanner.buf), 1024)
+		testing.expect_value(t, counter.alloc_count, allocs_before + 1)
+		testing.expect_value(t, c.scanner.read_head, 0)
+		testing.expect_value(t, string(c.scanner.buf[:c.scanner.write_head]), "X-Tr: ")
+		for b in retained { testing.expect_value(t, b, u8('Z')) }
+
+		rest := "ok\r\n\r\n"
+		c.scanner.write_head += copy(c.scanner.buf[c.scanner.write_head:], rest)
+		testing.expect(t, !http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, ts.done, "expected trailer completion")
+		val, ok := http.get_header(&c.req, "X-Tr")
+		testing.expect(t, ok, "expected trailer header")
+		testing.expect_value(t, val, "ok")
+	}
+}
+
+@(test)
+test_scanner_allocator_switch_oom_preserves_consistency :: proc(t: ^testing.T) {
+	Fail_Allocator :: struct {
+		backing: mem.Allocator,
+		fail:    bool,
+	}
+
+	fail_allocator :: proc(fa: ^Fail_Allocator) -> mem.Allocator {
+		return {
+			data = fa,
+			procedure = proc(
+				allocator_data: rawptr,
+				mode: mem.Allocator_Mode,
+				size, alignment: int,
+				old_memory: rawptr,
+				old_size: int,
+				location := #caller_location,
+			) -> ([]byte, mem.Allocator_Error) {
+				fa := (^Fail_Allocator)(allocator_data)
+				if fa.fail {
+					#partial switch mode {
+					case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+						return nil, .Out_Of_Memory
+					}
+				}
+				return fa.backing.procedure(fa.backing.data, mode, size, alignment, old_memory, old_size, location)
+			},
+		}
+	}
+
+	for payload in ([?]string{"hello", "hello\r\n"}) {
+		fa := Fail_Allocator{backing = context.allocator, fail = true}
+		s := http.make_server({})
+		thread := http.Server_Thread{s = &s, id = 1}
+		prev_td := http.td
+		http.td = &thread
+		defer http.td = prev_td
+		defer http._server_thread_free_arenas_destroy(&thread)
+
+		c := http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.Arena{backing = fail_allocator(&fa)},
+		}
+		c.transaction_arena.c = &c
+		c.temp_arena.c        = &c
+		defer http.temp_allocator_destroy(&c)
+		defer http.transaction_allocator_destroy(&c)
+
+		tx_alloc := http.transaction_allocator(&c)
+		c._vars.allocator         = tx_alloc
+		c.req.headers.allocator   = tx_alloc
+		c.res.headers.allocator   = tx_alloc
+		c.res._buf.allocator      = tx_alloc
+		c.res._deferred.allocator = tx_alloc
+		c.scanner.c               = &c
+		c.scanner.allocator       = &c.transaction_arena
+		c.res._state              = .Handling
+		c.res.progress.max        = 0
+		c.res._sends              = 1
+		c.req.progress.max        = -1
+		c.req.progress.timeout    = -1
+
+		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
+		testing.expect_value(t, err, nil)
+		c.scanner.buf        = buf
+		c.scanner.write_head = copy(buf, payload)
+
+		prev_logger := context.logger
+		context.logger = log.nil_logger()
+		http.scan_temp_line(&c.scanner, proc(c: ^http.Connection, data: []byte) {})
+		context.logger = prev_logger
+		testing.expect_value(t, c.res.status, http.Status.Internal_Server_Error)
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		testing.expect_value(t, c.scanner.allocator, &c.transaction_arena)
+		testing.expect(t, c.temp_arena.tail == nil, "expected failed temp_arena to remain empty")
+		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), payload)
+	}
+}
+
+@(test)
+test_scanner_reset_after_reusable_body_and_alignment :: proc(t: ^testing.T) {
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	c := http.Connection{
+		transaction_arena = http.get_arena(nil),
+		temp_arena        = http.get_arena(nil),
+	}
+	c.transaction_arena.c = &c
+	c.temp_arena.c        = &c
+	defer http.temp_allocator_destroy(&c)
+	defer http.transaction_allocator_destroy(&c)
+
+	tx_alloc := http.transaction_allocator(&c)
+	c.scanner.c         = &c
+	c.scanner.allocator = &c.transaction_arena
+
+	// 1. scanner_reset after detached .Reuse body preserves pipelined bytes and resets mode/flag.
+	buf, err := make([]byte, http.BODY_BUF_SIZE, tx_alloc)
+	testing.expect_value(t, err, nil)
+	pipelined := "GET /next HTTP/1.1\r\n"
+	c.scanner.buf          = buf
+	c.scanner.buf_reusable = true
+	c.scanner.read_head    = 100
+	c.scanner.write_head   = 100 + copy(buf[100:], pipelined)
+
+	testing.expect_value(t, http.scanner_reset(&c.scanner, &c), nil)
+	testing.expect(t, !c.scanner.buf_reusable, "expected scanner_reset to clear buf_reusable")
+	testing.expect(t, c.transaction_arena.tail != nil && c.transaction_arena.tail.prev == nil, "expected single block after scanner_reset")
+	testing.expect_value(t, len(c.transaction_arena.tail.data), 4 * mem.Kilobyte)
+	testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), pipelined)
+
+	// 2. Carried-over 4096 - size_of(_Arena_Block) bytes fit inside a single 4 KiB block without overshooting to 8 KiB.
+	exact_block_cap := 4 * mem.Kilobyte - size_of(http._Arena_Block)
+	big_buf, berr := make([]byte, http.BODY_BUF_SIZE, http.transaction_allocator(&c))
+	testing.expect_value(t, berr, nil)
+	for i in 0..<exact_block_cap {
+		big_buf[i] = u8('A' + (i % 26))
+	}
+	c.scanner.buf        = big_buf
+	c.scanner.read_head  = 0
+	c.scanner.write_head = exact_block_cap
+
+	testing.expect_value(t, http.scanner_reset(&c.scanner, &c), nil)
+	testing.expect_value(t, len(c.scanner.buf), exact_block_cap)
+	testing.expect_value(t, len(c.transaction_arena.tail.data), 4 * mem.Kilobyte)
+	testing.expect_value(t, c.scanner.write_head, exact_block_cap)
 }

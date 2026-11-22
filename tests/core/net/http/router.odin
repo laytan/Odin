@@ -485,3 +485,111 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/dir/a.txt")
 	}
 }
+
+@(test)
+test_subrouter_middleware_handler_pointer_stability :: proc(t: ^testing.T) {
+	http.headers_init_hash_secret()
+
+	Mw_State :: struct {
+		mw_handler:     ^http.Handler,
+		orig_user_data: rawptr,
+		orig_next:      ^http.Handler,
+		inner_called:   bool,
+		defer_called:   bool,
+		after_ud_ok:    bool,
+		after_next_ok:  bool,
+		defer_ud_ok:    bool,
+		defer_next_ok:  bool,
+	}
+
+	s := http.make_server({})
+	thread := http.Server_Thread{s = &s, id = 1}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
+
+	st: Mw_State
+
+	api: http.Router
+	defer http.router_destroy(api)
+	http.route_get(&api, "/items", http.Handler{
+		user_data = &st,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Mw_State)(h.user_data)
+			st.inner_called = true
+			ctx.res.status  = .OK
+			http.write_response_heading(&ctx.res)
+			ctx.res._state = .Sent
+		},
+	})
+
+	api_handler := http.router(&api)
+	mw := http.Handler{
+		user_data = &st,
+		next      = &api_handler,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Mw_State)(h.user_data)
+			st.mw_handler     = h
+			st.orig_user_data = h.user_data
+			st.orig_next      = h.next
+
+			_ = http.context_add(ctx, st)
+			_ = http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+				st := http.context_get(ctx, ^Mw_State)^
+				st.defer_called  = true
+				st.defer_ud_ok   = st.mw_handler.user_data == st.orig_user_data
+				st.defer_next_ok = st.mw_handler.next      == st.orig_next
+			})
+
+			h.next.handle(h.next, ctx)
+
+			st.after_ud_ok   = h.user_data == st.orig_user_data
+			st.after_next_ok = h.next      == st.orig_next
+		},
+	}
+
+	root: http.Router
+	defer http.router_destroy(root)
+	http.route_all(&root, "/api/*", mw)
+
+	c: http.Connection
+	c.transaction_arena   = http.get_arena(nil)
+	c.temp_arena          = http.get_arena(nil)
+	c.transaction_arena.c = &c
+	c.temp_arena.c        = &c
+	defer {
+		http.temp_allocator_destroy(&c)
+		http.transaction_allocator_destroy(&c)
+	}
+
+	tx_alloc := http.transaction_allocator(&c)
+	c._vars.allocator         = tx_alloc
+	c.req.headers.allocator   = tx_alloc
+	c.res.headers.allocator   = tx_alloc
+	c.res._buf.allocator      = tx_alloc
+	c.res._deferred.allocator = tx_alloc
+	c.scanner.c               = &c
+	c.scanner.allocator       = &c.transaction_arena
+	c.scanner.is_pumping      = true
+	c.res._state              = .Handling
+	c.res.progress.max        = 0
+	c.res._sends              = 0
+	c.req.has_consumed_body   = true
+	c.req.line = {
+		method  = .Get,
+		target  = "/api/items",
+		version = {1, 1},
+	}
+
+	rh := http.router(&root)
+	rh.handle(&rh, &c.ctx)
+	http._check_send_done(&c)
+
+	testing.expect(t, st.inner_called, "expected inner sub-router route to execute")
+	testing.expect(t, st.defer_called, "expected response_defer to execute")
+	testing.expect(t, st.after_ud_ok, "expected middleware user_data preserved after sub-router dispatch")
+	testing.expect(t, st.after_next_ok, "expected middleware next preserved after sub-router dispatch")
+	testing.expect(t, st.defer_ud_ok, "expected middleware user_data preserved in response_defer")
+	testing.expect(t, st.defer_next_ok, "expected middleware next preserved in response_defer")
+}

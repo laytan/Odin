@@ -393,7 +393,11 @@ _is_scanning_request_line :: proc(c: ^Connection) -> bool {
 }
 
 _is_scanning_headers :: proc(c: ^Connection) -> bool {
-	return c.res._state == .None && c.req.line.version != {}
+	if c.req.line.version == {} {
+		return false
+	}
+
+	return c.res._state == .None || c.req.quota == &td.s.opts.request_quota
 }
 
 _connection_is_idle :: proc(c: ^Connection) -> bool {

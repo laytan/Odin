@@ -108,14 +108,16 @@ router :: proc(router: ^Router) -> Handler {
 			match.suffix = ""
 		}
 
-		route, has_route := _route_trie_match(router.routes[rline.method], target, &match.vars, &match.suffix)
-		if !has_route && rline.method == .Head {
-			route, has_route = _route_trie_match(router.routes[.Get], target, &match.vars, &match.suffix)
+		route := _route_trie_match(&router.routes[rline.method], target, &match.vars, &match.suffix)
+		if route == nil && rline.method == .Head {
+			route = _route_trie_match(&router.routes[.Get], target, &match.vars, &match.suffix)
 		}
-		if !has_route {
-			route, has_route = _route_trie_match(router.all, target, &match.vars, &match.suffix)
-			if !has_route {
-				route = Route{handler(handler_404), ""}
+		if route == nil {
+			route = _route_trie_match(&router.all, target, &match.vars, &match.suffix)
+			if route == nil {
+				match.route = nil
+				handler_404(ctx)
+				return
 			}
 		}
 
@@ -362,7 +364,7 @@ route_all :: proc {
 
 _Route_Match :: struct {
 	target: string,
-	route:  Route,
+	route:  ^Route,
 	vars:   [dynamic]Route_Param,
 	suffix: string,
 }
@@ -492,37 +494,37 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 	}
 }
 
-_route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, suffix: ^string) -> (Route, bool) {
+_route_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_Param, suffix: ^string) -> ^Route {
 	assert(path[0] == '/')
 	return _trie_match(t, path, vars, len(vars), suffix, at_root = true)
 
-	_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string, at_root: bool) -> (Route, bool) {
+	_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_Param, vars_start: int, suffix: ^string, at_root: bool) -> ^Route {
 		orig_path := path
 		path := path
 		segment, ok := _next_path_segment(&path)
 		if !ok {
 			// On "/", an explicit "/" route (registered on the leading `""` node) takes priority over "/*".
 			if t.segment == "" && t.route.handler.handle != nil {
-				return t.route, true
+				return &t.route
 			}
 			// When `!at_root`, `orig_path` is a non-empty or empty subslice immediately following the `'/'`
 			// consumed into this node, so indexing `[-1]` inspects that preceding slash safely.
 			// Route trailing-slash prefix roots (e.g. "/static/" on "/static/*", or "/" on "/*") to `*`.
 			if !at_root && raw_data(orig_path)[-1] == '/' {
-				for ts in t.segments {
+				for &ts in t.segments {
 					if ts.segment == "*" {
 						assert(ts.route.handler.handle != nil)
 						suffix^ = "/"
-						return ts.route, true
+						return &ts.route
 					}
 				}
 			}
-			return t.route, t.route.handler.handle != nil
+			return t.route.handler.handle != nil ? &t.route : nil
 		}
 
 		// NOTE: could binary search but I don't think it's worth it for the amount of paths you usually have.
 
-		for ts in t.segments {
+		for &ts in t.segments {
 			switch {
 			case ts.segment == "*":
 				assert(ts.route.handler.handle != nil)
@@ -532,27 +534,27 @@ _route_trie_match :: proc(t: _Route_Trie, path: string, vars: ^[dynamic]Route_Pa
 					// Step back 1 byte to include the `'/'` consumed entering this parent node.
 					suffix^ = string(raw_data(orig_path)[-1:][:len(orig_path)+1])
 				}
-				return ts.route, true
+				return &ts.route
 
 			case _is_param(ts.segment):
-				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix, at_root = false); has_match {
+				if match := _trie_match(&ts, path, vars, vars_start, suffix, at_root = false); match != nil {
 					// Inject at `vars_start` as recursion unwinds so params stay in outer-to-inner
 					// path order without mutating `vars` on failed branches or shifting parent sub-router params.
 					inject_at(vars, vars_start, Route_Param{
 						name  = ts.segment[1:],
 						value = segment,
 					})
-					return match, true
+					return match
 				}
 
 			case ts.segment == segment:
-				if match, has_match := _trie_match(ts, path, vars, vars_start, suffix, at_root = false); has_match {
-					return match, true
+				if match := _trie_match(&ts, path, vars, vars_start, suffix, at_root = false); match != nil {
+					return match
 				}
 			}
 		}
 
-		return {}, false
+		return nil
 	}
 }
 

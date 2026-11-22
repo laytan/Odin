@@ -2202,3 +2202,365 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 		testing.expect(t, res.loop_nil, "expected event loop released cleanly")
 	}
 }
+
+@(test)
+test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+
+	UPLOAD_SIZE :: 2 * mem.Megabyte
+	PARSED_SIZE :: 128 * mem.Kilobyte
+	CHUNK_SIZE  :: 16 * mem.Kilobyte
+
+	fnv1a_step :: proc(h: u64, data: []byte) -> u64 {
+		res := h
+		for b in data {
+			res = (res ~ u64(b)) * 1099511628211
+		}
+		return res
+	}
+
+	expected_hash_for :: proc(total: int) -> u64 {
+		h: u64 = 14695981039346656037
+		buf: [16 * 1024]byte
+		pos := 0
+		for pos < total {
+			n := min(len(buf), total - pos)
+			for i in 0..<n {
+				buf[i] = u8(((pos + i) * 31 + 7) & 0xFF)
+			}
+			h = fnv1a_step(h, buf[:n])
+			pos += n
+		}
+		return h
+	}
+
+	Stream_State :: struct {
+		count:        int,
+		hash:         u64,
+		track:        ^mem.Tracking_Allocator,
+		peak_out:     ^i64,
+		sentinel:     []byte,
+	}
+
+	Server_Check :: struct {
+		track:                  ^mem.Tracking_Allocator,
+		peak_after_cl:          i64,
+		peak_after_chunked:     i64,
+		cl_temp_ok:             bool,
+		chunked_temp_ok:        bool,
+	}
+
+	server_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&server_track, context.allocator)
+	server_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&server_track)
+
+	srv_check := Server_Check{track = &server_track}
+
+	r: http.Router
+	defer http.router_destroy(r)
+
+	http.route_post(&r, "/stream-cl", http.Handler{
+		user_data = &srv_check,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			chk := (^Server_Check)(h.user_data)
+			sentinel, serr := make([]byte, 128, context.temp_allocator)
+			if serr != nil {
+				ctx.res.status = .Internal_Server_Error
+				http.respond(&ctx.res)
+				return
+			}
+			for &b in sentinel { b = 0x5A }
+
+			http.context_add(ctx, Stream_State{
+				hash     = 14695981039346656037,
+				track    = chk.track,
+				peak_out = &chk.peak_after_cl,
+				sentinel = sentinel,
+			})
+			http.context_add(ctx, chk)
+
+			http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
+				ctx := http.context_of_request(req)
+				st  := http.context_get(ctx, Stream_State)
+				for b in body {
+					st.hash = (st.hash ~ u64(b)) * 1099511628211
+				}
+				st.count += len(body)
+
+				if !is_partial {
+					chk := http.context_get(ctx, ^Server_Check)^
+					st.peak_out^ = st.track.peak_memory_allocated
+					temp_ok := len(st.sentinel) == 128 && sanitizer.address_region_is_poisoned(st.sentinel) == nil
+					for b in st.sentinel {
+						if b != 0x5A { temp_ok = false }
+					}
+					chk.cl_temp_ok = temp_ok
+					tag, _ := http.get_header(req, "X-Request-Tag")
+					http.set_header(&ctx.res, "connection", "close")
+					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s", st.count, st.hash, tag, allocator = http.transaction_allocator(ctx)))
+				}
+			})
+		},
+	})
+
+	http.route_post(&r, "/stream-chunked", http.Handler{
+		user_data = &srv_check,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			chk := (^Server_Check)(h.user_data)
+			sentinel, serr := make([]byte, 128, context.temp_allocator)
+			if serr != nil {
+				ctx.res.status = .Internal_Server_Error
+				http.respond(&ctx.res)
+				return
+			}
+			for &b in sentinel { b = 0xA5 }
+
+			http.context_add(ctx, Stream_State{
+				hash     = 14695981039346656037,
+				track    = chk.track,
+				peak_out = &chk.peak_after_chunked,
+				sentinel = sentinel,
+			})
+			http.context_add(ctx, chk)
+
+			http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
+				ctx := http.context_of_request(req)
+				st  := http.context_get(ctx, Stream_State)
+				for b in body {
+					st.hash = (st.hash ~ u64(b)) * 1099511628211
+				}
+				st.count += len(body)
+
+				if !is_partial {
+					chk := http.context_get(ctx, ^Server_Check)^
+					st.peak_out^ = st.track.peak_memory_allocated
+					temp_ok := len(st.sentinel) == 128 && sanitizer.address_region_is_poisoned(st.sentinel) == nil
+					for b in st.sentinel {
+						if b != 0xA5 { temp_ok = false }
+					}
+					chk.chunked_temp_ok = temp_ok
+					tag, _ := http.get_header(req, "X-Request-Tag")
+					tr, _  := http.get_header(req, "X-Trailer-Check")
+					http.set_header(&ctx.res, "connection", "close")
+					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s:%s", st.count, st.hash, tag, tr, allocator = http.transaction_allocator(ctx)))
+				}
+			})
+		},
+	})
+
+	parsed_next := http.handler(proc(ctx: ^http.Ctx) {
+		bps: http.Body_Parser_Stream
+		http.body_parser_stream_init(&bps, ctx)
+		stream := http.body_parser_stream(&bps)
+
+		h: u64 = 14695981039346656037
+		total := 0
+		buf: [4096]byte
+		for {
+			n, rerr := io.read(stream, buf[:])
+			if n > 0 {
+				for b in buf[:n] {
+					h = (h ~ u64(b)) * 1099511628211
+				}
+				total += n
+			}
+			if rerr == .EOF {
+				break
+			}
+			if rerr != nil {
+				ctx.res.status = .Internal_Server_Error
+				http.respond(&ctx.res)
+				return
+			}
+		}
+		http.set_header(&ctx.res, "connection", "close")
+		http.respond_plain(&ctx.res, fmt.aprintf("%d:%d", total, h, allocator = http.transaction_allocator(ctx)))
+	})
+	parsed_handler := http.body_parser(&parsed_next)
+	http.route_post(&r, "/parsed", parsed_handler)
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = 18098,
+		thread_count = 1,
+		body_quota   = {max_size = 4 * mem.Megabyte, min = 5 * time.Second},
+		handler      = http.router(&r),
+	}, mem.tracking_allocator(&server_track))
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Client_Result :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		cl_ok:        bool,
+		chunked_ok:   bool,
+		parsed_ok:    bool,
+		cl_body:      [256]byte,
+		cl_len:       int,
+		chunked_body: [256]byte,
+		chunked_len:  int,
+		parsed_body:  [256]byte,
+		parsed_len:   int,
+	}
+	res := Client_Result{server = &server}
+
+	client_thread := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+		res := (^Client_Result)(data)
+		defer http.server_shutdown(res.server)
+
+		endpoint, ep_err := nbio.bound_endpoint(res.server.socket)
+		res.endpoint_err = ep_err
+		if ep_err != nil {
+			return
+		}
+
+		send_all :: proc(sock: net.TCP_Socket, bytes: []byte) -> bool {
+			sent := 0
+			for sent < len(bytes) {
+				n, serr := net.send_tcp(sock, bytes[sent:])
+				if serr != nil || n <= 0 {
+					return false
+				}
+				sent += n
+			}
+			return true
+		}
+
+		recv_body :: proc(sock: net.TCP_Socket, out_body: []byte) -> (n: int, ok: bool) {
+			resp_buf: [2048]byte
+			total := 0
+			for total < len(resp_buf) {
+				rn, rerr := net.recv_tcp(sock, resp_buf[total:])
+				if rn > 0 {
+					total += rn
+				}
+				if rn == 0 || rerr != nil {
+					break
+				}
+			}
+			sep := strings.index(string(resp_buf[:total]), "\r\n\r\n")
+			if sep < 0 {
+				return 0, false
+			}
+			if !strings.has_prefix(string(resp_buf[:total]), "HTTP/1.1 200 ") {
+				return 0, false
+			}
+			body := resp_buf[sep+4:total]
+			return copy(out_body, body), len(body) <= len(out_body)
+		}
+
+		write_pattern :: proc(buf: []byte, start_pos: int) {
+			for i in 0..<len(buf) {
+				buf[i] = u8(((start_pos + i) * 31 + 7) & 0xFF)
+			}
+		}
+
+		WRITE_SIZE :: 64 * mem.Kilobyte
+		payload: [WRITE_SIZE]byte
+		hdr_buf: [512]byte
+
+		// 1. 2 MiB Content-Length upload (64 KiB TCP writes to exercise adaptive .Reuse ramp-up).
+		if sock, derr := net.dial_tcp(endpoint); derr == nil {
+			defer net.close(sock)
+			hdr := fmt.bprintf(
+				hdr_buf[:],
+				"POST /stream-cl HTTP/1.1\r\nHost: localhost\r\nX-Request-Tag: keep-me\r\nContent-Length: %d\r\n\r\n",
+				UPLOAD_SIZE,
+			)
+			ok := send_all(sock, transmute([]byte)hdr)
+			pos := 0
+			for ok && pos < UPLOAD_SIZE {
+				n := min(len(payload), UPLOAD_SIZE - pos)
+				write_pattern(payload[:n], pos)
+				ok = send_all(sock, payload[:n])
+				pos += n
+			}
+			if ok {
+				bn, bok := recv_body(sock, res.cl_body[:])
+				res.cl_len = bn
+				res.cl_ok  = bok
+			}
+		}
+
+		// 2. 2 MiB Transfer-Encoding: chunked upload with trailer.
+		if sock, derr := net.dial_tcp(endpoint); derr == nil {
+			defer net.close(sock)
+			hdr := "POST /stream-chunked HTTP/1.1\r\nHost: localhost\r\nX-Request-Tag: keep-me\r\nTransfer-Encoding: chunked\r\nTrailer: X-Trailer-Check\r\n\r\n"
+			ok := send_all(sock, transmute([]byte)hdr)
+			pos := 0
+			for ok && pos < UPLOAD_SIZE {
+				n := min(CHUNK_SIZE, UPLOAD_SIZE - pos)
+				chunk_hdr := fmt.bprintf(hdr_buf[:], "%x\r\n", n)
+				write_pattern(payload[:n], pos)
+				ok = send_all(sock, transmute([]byte)chunk_hdr) &&
+					send_all(sock, payload[:n]) &&
+					send_all(sock, transmute([]byte)string("\r\n"))
+				pos += n
+			}
+			if ok {
+				ok = send_all(sock, transmute([]byte)string("0\r\nX-Trailer-Check: ok-trailer\r\n\r\n"))
+			}
+			if ok {
+				bn, bok := recv_body(sock, res.chunked_body[:])
+				res.chunked_len = bn
+				res.chunked_ok  = bok
+			}
+		}
+
+		// 3. 128 KiB body_parser upload across multiple writes.
+		if sock, derr := net.dial_tcp(endpoint); derr == nil {
+			defer net.close(sock)
+			hdr := fmt.bprintf(
+				hdr_buf[:],
+				"POST /parsed HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n",
+				PARSED_SIZE,
+			)
+			ok := send_all(sock, transmute([]byte)hdr)
+			pos := 0
+			for ok && pos < PARSED_SIZE {
+				n := min(4096, PARSED_SIZE - pos)
+				write_pattern(payload[:n], pos)
+				ok = send_all(sock, payload[:n])
+				pos += n
+			}
+			if ok {
+				bn, bok := recv_body(sock, res.parsed_body[:])
+				res.parsed_len = bn
+				res.parsed_ok  = bok
+			}
+		}
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	expected_2m  := expected_hash_for(UPLOAD_SIZE)
+	expected_128 := expected_hash_for(PARSED_SIZE)
+	exp_cl_str      := fmt.tprintf("%d:%d:keep-me", UPLOAD_SIZE, expected_2m)
+	exp_chunked_str := fmt.tprintf("%d:%d:keep-me:ok-trailer", UPLOAD_SIZE, expected_2m)
+	exp_parsed_str  := fmt.tprintf("%d:%d", PARSED_SIZE, expected_128)
+
+	testing.expect_value(t, res.endpoint_err, nil)
+	testing.expect(t, res.cl_ok, "expected 2 MiB Content-Length streaming upload to succeed")
+	testing.expect_value(t, string(res.cl_body[:res.cl_len]), exp_cl_str)
+	testing.expect(t, res.chunked_ok, "expected 2 MiB chunked streaming upload to succeed")
+	testing.expect_value(t, string(res.chunked_body[:res.chunked_len]), exp_chunked_str)
+	testing.expect(t, res.parsed_ok, "expected 128 KiB body_parser upload to succeed")
+	testing.expect_value(t, string(res.parsed_body[:res.parsed_len]), exp_parsed_str)
+
+	testing.expect(t, srv_check.cl_temp_ok, "expected temp_allocator data preserved during Content-Length streaming")
+	testing.expect(t, srv_check.chunked_temp_ok, "expected temp_allocator data preserved during chunked streaming")
+	testing.expect(t, srv_check.peak_after_cl > 0 && srv_check.peak_after_cl < 768 * mem.Kilobyte, "expected O(1) bounded peak memory during 2 MiB Content-Length streaming")
+	testing.expect(t, srv_check.peak_after_chunked > 0 && srv_check.peak_after_chunked < 768 * mem.Kilobyte, "expected O(1) bounded peak memory during 2 MiB chunked streaming")
+	testing.expect(t, server_track.peak_memory_allocated < 768 * mem.Kilobyte, "expected bounded peak memory after 128 KiB body_parser upload")
+
+	testing.expect_value(t, server_track.current_memory_allocated, 0)
+	testing.expect_value(t, len(server_track.bad_free_array), 0)
+}

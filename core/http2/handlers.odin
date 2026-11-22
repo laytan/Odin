@@ -103,17 +103,18 @@ logged :: proc(next: ^Handler) -> Handler {
 }
 
 Body_Parser_State :: struct {
-	h:     ^Handler,
+	next:  ^Handler,
 	parts: [dynamic][]byte,
 }
 
-body_parser :: proc(next: ^Handler) -> Handler {
+body_parser :: proc(next: ^Handler, loc := #caller_location) -> Handler {
+	assert(next != nil, "body_parser requires a non-nil next handler", loc)
 	return {
 		next   = next,
 		handle = proc(h: ^Handler, ctx: ^Ctx) {
 			assert(context_get(ctx, Body_Parser_State) == nil)
 			s, add_err := context_add(ctx, Body_Parser_State{
-				h = h,
+				next = h.next,
 			})
 			if add_err != nil {
 				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
@@ -121,7 +122,7 @@ body_parser :: proc(next: ^Handler) -> Handler {
 			}
 			s.parts.allocator = transaction_allocator(ctx)
 
-			body(&ctx.req, on_body)
+			body(&ctx.req, on_body, retain = true)
 
 			on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
 				ctx := context_of_request(r)
@@ -136,7 +137,7 @@ body_parser :: proc(next: ^Handler) -> Handler {
 				}
 
 				if !is_partial {
-					s.h.next.handle(s.h.next, ctx)
+					s.next.handle(s.next, ctx)
 				}
 			}
 		},

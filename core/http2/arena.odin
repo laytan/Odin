@@ -153,6 +153,28 @@ arena_destroy :: proc(a: ^Arena) {
 
 arena_free_all :: arena_destroy
 
+@(private)
+_arena_release_exclusive_block :: proc(a: ^Arena, buf: []byte) -> bool {
+	if a == nil || len(buf) == 0 {
+		return false
+	}
+
+	buf_ptr := uintptr(raw_data(buf))
+	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
+
+	pp := &a.tail
+	for block := pp^; block != nil; block = pp^ {
+		data_start := uintptr(raw_data(block.data)) + size_of(_Arena_Block)
+		if buf_ptr == data_start && block.offset == size_of(_Arena_Block) + len(buf) {
+			pp^ = block.prev
+			_arena_block_release(backing, block)
+			return true
+		}
+		pp = &block.prev
+	}
+	return false
+}
+
 _Arena_Block :: struct {
 	using base: mem.Arena,
 	last: rawptr,
@@ -169,6 +191,34 @@ BUCKETS    :: 13   // Last bucket starts at 16 MiB
 @(private)
 MAX_POOLED_BLOCK_SIZE :: 1 << (SHIFT + BUCKETS - 1)
 #assert(MAX_POOLED_BLOCK_SIZE == 16 * mem.Megabyte)
+
+/*
+Returns a size `>= size` (at least `MULTIPLIER`) that makes full use of the block it ends up in when
+allocated with `align = 1`: sizes that fit the first `ARENA_SIZE` block round up to a power of two,
+pooled sizes fill their dedicated bucket block exactly (or round down to the largest bucket within
+`size` when `round_down = true`), and oversized allocations are returned as is.
+*/
+_arena_fit_size :: proc(size: int, round_down := false) -> int {
+	FIRST_BLOCK :: ARENA_SIZE - size_of(_Arena_Block)
+	switch {
+	case size <= FIRST_BLOCK:
+		return min(math.next_power_of_two(max(size, MULTIPLIER)), FIRST_BLOCK)
+	case round_down && size <= MAX_POOLED_BLOCK_SIZE:
+		return (1 << uint(bits.log2(uint(size + size_of(_Arena_Block))))) - size_of(_Arena_Block)
+	case size <= MAX_POOLED_BLOCK_SIZE - size_of(_Arena_Block):
+		return math.next_power_of_two(size + size_of(_Arena_Block)) - size_of(_Arena_Block)
+	case:
+		return size
+	}
+}
+
+// Returns the next fitted size up from `size`, roughly doubling it (one bucket up for fitted sizes).
+_arena_grow_size :: proc(size: int) -> int {
+	if size > max(int) / 2 {
+		return max(int)
+	}
+	return _arena_fit_size(2 * size - size_of(_Arena_Block))
+}
 
 _bucket_for :: proc(min_size: int) -> int {
 	assert(min_size > 0)

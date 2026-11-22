@@ -2,11 +2,11 @@ package http
 
 import "base:runtime"
 
-import "core:strings"
 import "core:bytes"
 import "core:log"
 import "core:mem"
 import "core:nbio"
+import "core:strings"
 import "core:time"
 
 Scan_Splitter :: struct {
@@ -16,10 +16,15 @@ Scan_Splitter :: struct {
 
 Scan_Cb :: proc(c: ^Connection, data: []byte)
 
-Scan :: struct #all_or_none {
+Scan :: struct {
 	split:     Scan_Splitter,
 	allocator: ^Arena,
 	callback:  Scan_Cb,
+	// If > 0 (body scans), the buffer starts at `<= BODY_BUF_SIZE` and grows geometrically up to this size,
+	// instead of being sized by the pending token.
+	buf_cap:   i32,
+	// If true, `data` passed to `callback` is only valid until it returns and the buffer is reused for later recvs.
+	reuse:     bool,
 }
 
 Scanner :: struct {
@@ -32,17 +37,107 @@ Scanner :: struct {
 
 	scan:       Scan,
 
-	is_pumping: bool,
+	is_pumping:   bool,
+	// Set when `buf` was allocated for a `reuse` scan and nothing handed out of it outlives a callback,
+	// so it may be compacted, overwritten, and released when replaced.
+	buf_reusable: bool,
 
 	last_recv_start: time.Time,
 }
 
-MULTIPLIER :: 512
+MULTIPLIER          :: 512
+BODY_BUF_SIZE       :: 16 * mem.Kilobyte - size_of(_Arena_Block)
+STREAM_MAX_BUF_SIZE :: 256 * mem.Kilobyte - size_of(_Arena_Block)
+RETAIN_MAX_BUF_SIZE :: 32 * mem.Megabyte
+
+// Returns a buffer size of at least `min_needed`, aiming for `want` but at most `cap` (if > 0),
+// rounded to make full use of arena blocks.
+_scanner_buf_size :: proc(min_needed: int, want := 0, cap := 0) -> int {
+	size := max(min_needed, want)
+	if cap > 0 && size > cap {
+		return max(_arena_fit_size(cap, round_down = true), _arena_fit_size(min_needed))
+	}
+	return _arena_fit_size(size)
+}
+
+@(private="file")
+_body_buf_cap :: proc(c: ^Connection, retain: bool, hint := -1) -> i32 {
+	max_cap := retain ? RETAIN_MAX_BUF_SIZE : STREAM_MAX_BUF_SIZE
+	cap := max_cap
+	if hint >= 0 {
+		cap = min(cap, hint)
+	}
+	if c.req.progress.max >= 0 {
+		cap = min(cap, c.req.progress.max)
+	}
+	return i32(clamp(cap, MULTIPLIER, max_cap))
+}
+
+// Moves the unconsumed bytes (from `s.read_head + offset`) into a new buffer of `size` on `allocator`,
+// releasing the old buffer if reusable.
+@(private="file")
+_scanner_replace_buf :: proc(s: ^Scanner, allocator: ^Arena, size: int, offset := 0) -> bool {
+	buf_left := s.buf[s.read_head+offset:s.write_head]
+	new_buf, err := make([]byte, size, arena_allocator(allocator))
+	if err != nil {
+		log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc OOM\", err=%v", _thread_id(), s.c.socket, err)
+		invalid_request(s.c, .Internal_Server_Error)
+		return false
+	}
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v, reuse=%v", _thread_id(), s.c.socket, len(s.buf), size, s.scan.reuse)
+
+	write_head := copy(new_buf, buf_left)
+	assert(write_head == len(buf_left))
+	if s.buf_reusable {
+		_arena_release_exclusive_block(s.allocator, s.buf)
+	}
+
+	s.allocator    = allocator
+	s.buf          = new_buf
+	s.read_head    = 0
+	s.write_head   = write_head
+	s.buf_reusable = s.scan.reuse
+	return true
+}
+
+// Rebuilds `a` around any unread bytes remaining in `s.buf`, freeing all previous blocks in `a`.
+// Returns `kept = false` with no error when nothing unread remains (leaving the caller to free `a` itself).
+@(private="file")
+_scanner_reset_arena :: proc(s: ^Scanner, a: ^Arena, c: ^Connection) -> (kept: bool, err: runtime.Allocator_Error) {
+	to_copy := s.buf[s.read_head:s.write_head]
+	if len(to_copy) == 0 {
+		s.buf = {}
+		s.read_head, s.write_head = 0, 0
+		s.buf_reusable = false
+		return false, nil
+	}
+
+	to_alloc  := _arena_fit_size(len(to_copy))
+	backing   := a.backing.procedure != nil ? a.backing : _arena_default_backing(c)
+	new_arena := _arena_block_acquire(backing, to_alloc, align = 1) or_return
+	new_buf: []byte
+	new_buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	if err != nil {
+		_arena_block_release(backing, new_arena)
+		return false, err
+	}
+	new_arena.last = raw_data(new_buf)
+	s.buf          = new_buf
+	s.read_head    = 0
+	s.write_head   = copy(new_buf, to_copy)
+	s.buf_reusable = false
+
+	arena_free_all(a)
+	a.backing = backing
+	a.tail    = new_arena
+	return true, nil
+}
 
 scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Error) {
 	is_pumping := s.is_pumping
-	to_copy := s.buf[s.read_head:s.write_head]
-	if len(to_copy) == 0 {
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v", _thread_id(), c.socket, s.write_head - s.read_head)
+	kept := _scanner_reset_arena(s, &c.transaction_arena, c) or_return
+	if !kept {
 		transaction_allocator_destroy(c)
 		s^ = {
 			c          = c,
@@ -51,29 +146,11 @@ scanner_reset :: proc(s: ^Scanner, c: ^Connection) -> (err: runtime.Allocator_Er
 		return nil
 	}
 
-	to_alloc := max(MULTIPLIER, len(to_copy))
-	log.debugf("http[t=%v][c=%v]: msg=\"scanner_reset\", to_copy=%v, to_alloc=%v", _thread_id(), c.socket, len(to_copy), to_alloc)
-
-	backing := _arena_default_backing(c)
-	new_arena := _arena_block_acquire(backing, to_alloc) or_return
-	new_buf: []byte
-	new_buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
-	if err != nil {
-		_arena_block_release(backing, new_arena)
-		return err
-	}
-	new_arena.last = raw_data(new_buf)
-	n := copy(new_buf, to_copy)
-
-	transaction_allocator_destroy(c)
-	c.transaction_arena.backing = backing
-	c.transaction_arena.tail    = new_arena
-
 	s^ = {
 		c          = c,
-		buf        = new_buf,
-		read_head  = 0,
-		write_head = n,
+		buf        = s.buf,
+		read_head  = s.read_head,
+		write_head = s.write_head,
 		allocator  = &c.transaction_arena,
 		is_pumping = is_pumping,
 	}
@@ -132,36 +209,13 @@ _scanner_free_all :: proc(s: ^Scanner, a: ^Arena) -> (handled: bool) {
 		return _scanner_pin_buf_block(s, a)
 	}
 
-	to_copy := s.buf[s.read_head:s.write_head]
-	to_alloc := max(MULTIPLIER, len(to_copy))
-	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v, to_alloc=%v", _thread_id(), s.c.socket, len(to_copy), to_alloc)
-
-	if len(to_copy) == 0 {
-		s.buf = {}
-		s.read_head, s.write_head = 0, 0
-		return false
-	}
-
-	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
-	new_arena, arena_err := _arena_block_acquire(backing, to_alloc)
-	if arena_err != nil {
-		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", _thread_id(), s.c.socket, arena_err)
-		return _scanner_pin_buf_block(s, a)
-	}
-	new_buf, err := make([]byte, to_alloc, mem.arena_allocator(new_arena))
+	log.debugf("http[t=%v][c=%v]: msg=\"scanner_free_all\", to_copy=%v", _thread_id(), s.c.socket, s.write_head - s.read_head)
+	kept, err := _scanner_reset_arena(s, a, a.c)
 	if err != nil {
-		_arena_block_release(backing, new_arena)
 		log.warnf("http[t=%v][c=%v]: msg=\"scanner_free_all OOM, pinning existing buf block\", err=%v", _thread_id(), s.c.socket, err)
 		return _scanner_pin_buf_block(s, a)
 	}
-	s.buf          = new_buf
-	new_arena.last = raw_data(s.buf)
-	s.read_head    = 0
-	s.write_head   = copy(s.buf, to_copy)
-
-	arena_free_all(a)
-	a.tail = new_arena
-	return true
+	return kept
 }
 
 _scan_bytes :: proc(s: ^Scanner, n: int, allocator: ^Arena, cb: Scan_Cb) {
@@ -261,8 +315,8 @@ split_line :: proc() -> Scan_Splitter {
 	}
 }
 
-scanner_pump :: proc(s: ^Scanner) {
-	if s.is_pumping { return }
+_scanner_pump_buffered :: proc(s: ^Scanner) -> (needs_recv: bool) {
+	if s.is_pumping { return false }
 
 	c := s.c
 	context.temp_allocator = temp_allocator(c)
@@ -275,119 +329,132 @@ scanner_pump :: proc(s: ^Scanner) {
 
 	for !destroy_flag.destroyed && s.scan.callback != nil {
 		offset, n, advance, ok := s.scan.split.procedure(s.scan.split.user_data, s.buf[s.read_head:s.write_head])
-		if ok {
-			assert(advance >= n && n >= offset)
-
-			data: []byte
-			// PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
-			if s.scan.allocator != s.allocator {
-				to_copy := s.buf[s.read_head+offset:s.write_head]
-
-				new_buf, err := make([]byte, max(len(to_copy), MULTIPLIER), arena_allocator(s.scan.allocator))
-				if err != nil {
-					log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator) OOM\", err=%v", td.id, s.c.socket, err)
-					invalid_request(s.c, .Internal_Server_Error)
-					return
-				}
-				s.allocator = s.scan.allocator
-				s.buf       = new_buf
-				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
-
-				s.read_head  = advance-offset
-				s.write_head = copy(s.buf, to_copy)
-				assert(s.write_head == len(to_copy))
-
-				data = s.buf[:n]
-			} else {
-				data = s.buf[s.read_head+offset:][:n]
-				s.read_head += advance
-			}
-
-			cb := s.scan.callback
-			s.scan = {}
-			cb(s.c, data)
-			if destroy_flag.destroyed { return }
-		} else {
-			capacity := len(s.buf)-s.write_head
-			if s.scan.allocator != s.allocator { // PERF: could check if prev is transaction_allocator and new is temp_allocator and skip this
-				buf_left := s.buf[s.read_head:s.write_head]
-				new_size := max(MULTIPLIER, len(buf_left) + MULTIPLIER)
-
-				new_buf, err := make([]byte, new_size, arena_allocator(s.scan.allocator))
-				if err != nil {
-					log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator) OOM\", err=%v", td.id, s.c.socket, err)
-					invalid_request(s.c, .Internal_Server_Error)
-					return
-				}
-				s.allocator = s.scan.allocator
-				s.buf       = new_buf
-				log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc (new allocator)\"", td.id, s.c.socket)
-
-				s.read_head  = 0
-				s.write_head = copy(s.buf[:], buf_left)
-				assert(s.write_head == len(buf_left))
-			} else if capacity < MULTIPLIER {
-				prev_buf := s.buf
-				buf_left := s.buf[s.read_head:s.write_head]
-				new_size := max(MULTIPLIER, len(prev_buf) * 2)
-
-				resized, err := _arena_block_resize_in_place(s.allocator != nil ? s.allocator.tail : nil, s.buf, new_size, 1, false)
-				if err == nil {
-					s.buf = resized
-					log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
-				} else {
-					new_buf, alloc_err := make([]byte, new_size, arena_allocator(s.allocator))
-					if alloc_err != nil {
-						log.errorf("http[t=%v][c=%v]: msg=\"scanner realloc OOM\", err=%v", td.id, s.c.socket, alloc_err)
-						invalid_request(s.c, .Internal_Server_Error)
-						return
-					}
-					s.buf = new_buf
-					log.debugf("http[t=%v][c=%v]: msg=\"scanner realloc\", prev=%v, new=%v", td.id, s.c.socket, len(prev_buf), len(s.buf))
-
-					s.read_head  = 0
-					s.write_head = copy(s.buf[:], buf_left)
-					assert(s.write_head == len(buf_left))
-				}
-			}
-
-			dst := s.buf[s.write_head:]
-
-			max := s.c.req.progress.max
-			if max == 0 {
-				if _is_scanning_request_line(s.c) {
-					invalid_request(s.c, .URI_Too_Long)
-				} else if _is_scanning_headers(s.c) {
-					invalid_request(s.c, .Request_Header_Fields_Too_Large)
-				} else {
-					invalid_request(s.c, .Payload_Too_Large)
-				}
-				return
-			} else if max > 0 {
-				dst = dst[:min(len(dst), max)]
-			}
-
-			timeout := s.c.req.progress.timeout
-			if timeout == 0 {
-				invalid_request(s.c, .Request_Timeout)
-				return
-			} else if timeout < 0 {
-				timeout = nbio.NO_TIMEOUT
-			}
-
-			log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", td.id, s.c.socket, len(dst), timeout)
-
-			s.last_recv_start = now()
-			s.c.curr_recv = nbio.recv_poly(
-				s.c.socket,
-				{dst},
-				s,
-				scanner_on_recv,
-				timeout=timeout,
-			)
-			return
+		if !ok {
+			return true
 		}
+
+		assert(advance >= n && n >= offset)
+
+		data: []byte
+		if s.scan.allocator != s.allocator {
+			to_copy_len := s.write_head - (s.read_head + offset)
+			if !_scanner_replace_buf(s, s.scan.allocator, _arena_fit_size(to_copy_len), offset) {
+				return false
+			}
+			data        = s.buf[:n]
+			s.read_head = advance - offset
+		} else {
+			// Data handed to a non-reusing callback may be retained, so the buffer must not be overwritten anymore.
+			if !s.scan.reuse {
+				s.buf_reusable = false
+			}
+			data = s.buf[s.read_head+offset:][:n]
+			s.read_head += advance
+		}
+
+		cb := s.scan.callback
+		s.scan = {}
+		cb(s.c, data)
+		if destroy_flag.destroyed { return false }
 	}
+	return false
+}
+
+// Size for a fresh buffer: body scans start at `<= BODY_BUF_SIZE` rather than trusting large declared sizes up front.
+@(private="file")
+_scanner_initial_buf_size :: proc(s: ^Scanner) -> int {
+	cap := int(s.scan.buf_cap)
+	return _scanner_buf_size(s.write_head - s.read_head + MULTIPLIER, min(cap, BODY_BUF_SIZE), cap)
+}
+
+_scanner_prepare_recv_buf :: proc(s: ^Scanner) -> bool {
+	if s.scan.allocator != s.allocator {
+		return _scanner_replace_buf(s, s.scan.allocator, _scanner_initial_buf_size(s))
+	}
+
+	// A reusing scan must not overwrite a buffer that may still be referenced (e.g. by header values).
+	if s.scan.reuse && !s.buf_reusable {
+		return _scanner_replace_buf(s, s.allocator, _scanner_initial_buf_size(s))
+	}
+
+	// Check before compacting whether the last recv filled the buffer to the end.
+	filled := s.write_head == len(s.buf)
+	if s.buf_reusable && s.read_head > 0 {
+		s.write_head = copy(s.buf, s.buf[s.read_head:s.write_head])
+		s.read_head  = 0
+	}
+	if !s.scan.reuse {
+		s.buf_reusable = false
+	}
+
+	needs_space := len(s.buf) - s.write_head < MULTIPLIER
+	if !needs_space && !(s.buf_reusable && filled) {
+		return true
+	}
+
+	// Body scans grow geometrically (chaining new blocks when retaining), other scans size for the pending token.
+	buf_left := s.write_head - s.read_head
+	cap      := int(s.scan.buf_cap)
+	want     := _arena_grow_size(cap > 0 ? len(s.buf) : buf_left)
+	new_size := _scanner_buf_size(buf_left + MULTIPLIER, max(want, min(cap, BODY_BUF_SIZE)), cap)
+	if !needs_space && new_size <= len(s.buf) {
+		return true
+	}
+
+	resize_to := _arena_fit_size(s.read_head + new_size)
+	if resized, err := _arena_block_resize_in_place(s.allocator != nil ? s.allocator.tail : nil, s.buf, resize_to, 1, false); err == nil {
+		log.debugf("http[t=%v][c=%v]: msg=\"scanner resized in place\", prev=%v, new=%v", _thread_id(), s.c.socket, len(s.buf), len(resized))
+		s.buf = resized
+		return true
+	}
+	return _scanner_replace_buf(s, s.allocator, new_size)
+}
+
+scanner_pump :: proc(s: ^Scanner) {
+	if !_scanner_pump_buffered(s) {
+		return
+	}
+
+	max := s.c.req.progress.max
+	if max == 0 {
+		if _is_scanning_request_line(s.c) {
+			invalid_request(s.c, .URI_Too_Long)
+		} else if _is_scanning_headers(s.c) {
+			invalid_request(s.c, .Request_Header_Fields_Too_Large)
+		} else {
+			invalid_request(s.c, .Payload_Too_Large)
+		}
+		return
+	}
+
+	timeout := s.c.req.progress.timeout
+	if timeout == 0 {
+		invalid_request(s.c, .Request_Timeout)
+		return
+	} else if timeout < 0 {
+		timeout = nbio.NO_TIMEOUT
+	}
+
+	if !_scanner_prepare_recv_buf(s) {
+		return
+	}
+
+	dst := s.buf[s.write_head:]
+	if max > 0 {
+		dst = dst[:min(len(dst), max)]
+	}
+
+	log.debugf("http[t=%v][c=%v]: msg=\"recv\", n=%v, timeout=%v", _thread_id(), s.c.socket, len(dst), timeout)
+
+	s.last_recv_start = now()
+	s.c.curr_recv = nbio.recv_poly(
+		s.c.socket,
+		{dst},
+		s,
+		scanner_on_recv,
+		timeout=timeout,
+	)
+	return
 
 	scanner_on_recv :: proc(op: ^nbio.Operation, s: ^Scanner) {
 		context.temp_allocator = temp_allocator(s.c)
@@ -427,17 +494,55 @@ scanner_pump :: proc(s: ^Scanner) {
 	}
 }
 
+/*
+Callback invoked with request body chunks from `body`.
+
+With `retain = false` (default), `body` is a slice into the connection's reusable streaming buffer
+(starting at `<= 16 KiB` and ramping up to `<= 256 KiB` when recvs fill it) and is only valid for the
+duration of this callback; copy/clone it if you need to retain the bytes after returning or before
+calling async send procedures. When `body` is called with `retain = true`, chunks live on
+`transaction_arena` for the duration of the request.
+*/
 Body_Cb :: proc(req: ^Request, body: []byte, is_partial: bool)
 
 Body_Request :: struct {
 	cb:        Body_Cb,
 	curr_size: int,
+	retain:    bool,
 }
 
-body :: proc(req: ^Request, cb: Body_Cb, loc := #caller_location) {
+// Scans the next part of the request body into `transaction_arena`, honouring `body(..., retain)`.
+// `hint` is the number of body bytes known to remain (-1 if unknown) to avoid oversized buffers.
+@(private="file")
+_scan_body :: proc(c: ^Connection, split: Scan_Splitter, cb: Scan_Cb, hint := -1) {
+	body_req := context_get(&c.ctx, Body_Request)
+	c.scanner.scan = {
+		split     = split,
+		allocator = &c.transaction_arena,
+		callback  = cb,
+		buf_cap   = _body_buf_cap(c, body_req.retain, hint),
+		reuse     = !body_req.retain,
+	}
+	scanner_pump(&c.scanner)
+}
+
+/*
+Streams the request body to `cb`.
+
+Each non-final invocation passes `is_partial = true`; the final invocation passes
+`is_partial = false` (possibly with an empty/nil `body`).
+
+With `retain = false` (default), chunks are scanned into a single O(1) reusable buffer on
+`transaction_arena` (starting at `<= 16 KiB` and adaptively scaling up to `256 KiB` when recvs fill
+it) and `body` slices are only valid for the duration of that callback invocation. With
+`retain = true`, chunks are scanned zero-copy into chained buffers on `transaction_arena` (starting
+at `<= 16 KiB` and progressively scaling up to `32 MiB` as blocks fill) and remain valid for the
+lifetime of the request transaction.
+*/
+body :: proc(req: ^Request, cb: Body_Cb, retain := false, loc := #caller_location) {
 	ctx := context_of_request(req)
 	assert(context_get(ctx, Body_Request) == nil, "body already consumed", loc)
-	if _, err := context_add(ctx, Body_Request{cb = cb}); err != nil {
+	if _, err := context_add(ctx, Body_Request{cb = cb, retain = retain}); err != nil {
 		c := connection_of_request(req)
 		log.errorf("http[t=%v][c=%v]: msg=\"body context_add OOM\", err=%v", td.id, c.socket, err)
 		invalid_request(c, .Internal_Server_Error)
@@ -505,7 +610,7 @@ _body_chunked :: proc(req: ^Request) {
 	if !_maybe_send_continue(c) {
 		return
 	}
-	scan_line(&c.scanner, on_size)
+	_scan_body(c, split_line(), on_size)
 
 	on_size :: proc(c: ^Connection, data: []byte) {
 		if !_valid_field_bytes(data) {
@@ -533,13 +638,19 @@ _body_chunked :: proc(req: ^Request) {
 		}
 
 		if size == 0 {
+			// Trailers reuse request_quota and scan non-reusably so headers can store zero-copy slices.
+			c.req.quota = &td.s.opts.request_quota
+			progression_reset(&c.req.progress, c.req.quota^)
+			if buffered := c.scanner.write_head - c.scanner.read_head; buffered > 0 {
+				progression_update(&c.req.progress, c.req.quota^, buffered, 0)
+			}
 			scan_line(&c.scanner, on_trailer)
 			return
 		}
 
 		body_req := context_get(&c.ctx, Body_Request)
 		body_req.curr_size = size
-		scan_at_most(&c.scanner, size, on_body)
+		_scan_body(c, split_at_most(size), on_body)
 	}
 
 	on_body :: proc(c: ^Connection, data: []byte) {
@@ -554,20 +665,20 @@ _body_chunked :: proc(req: ^Request) {
 		}
 
 		if body_req.curr_size > 0 {
-			scan_at_most(&c.scanner, body_req.curr_size, on_body)
+			_scan_body(c, split_at_most(body_req.curr_size), on_body)
 			return
 		}
 
-		scan_line(&c.scanner, on_empty_line)
+		_scan_body(c, split_n(2), on_chunk_crlf)
 	}
 
-	on_empty_line :: proc(c: ^Connection, data: []byte) {
-		if len(data) != 0 {
+	on_chunk_crlf :: proc(c: ^Connection, data: []byte) {
+		if len(data) != 2 || data[0] != '\r' || data[1] != '\n' {
 			invalid_request(c, .Bad_Request)
 			return
 		}
 
-		scan_line(&c.scanner, on_size)
+		_scan_body(c, split_line(), on_size)
 	}
 
 	on_trailer :: proc(c: ^Connection, data: []byte) {
@@ -633,7 +744,7 @@ _body_length :: proc(req: ^Request) {
 
 	body_req := context_get(&c.ctx, Body_Request)
 	body_req.curr_size = clen
-	scan_at_most(&c.scanner, clen, on_body)
+	_scan_body(c, split_at_most(clen), on_body, hint = clen)
 
 	on_body :: proc(c: ^Connection, data: []byte) {
 		body_req := context_get(&c.ctx, Body_Request)
@@ -645,7 +756,7 @@ _body_length :: proc(req: ^Request) {
 			if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
 				return
 			}
-			scan_at_most(&c.scanner, body_req.curr_size, on_body)
+			_scan_body(c, split_at_most(body_req.curr_size), on_body, hint = body_req.curr_size)
 			return
 		}
 

@@ -338,27 +338,37 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env, payload = "hi")
 		defer destroy_test_connection(c)
 
-		c.res._state        = .Sending
-		c.res._sends        = 1
-		c.req.progress.max = 0
+		c.res._state           = .Sending
+		c.res._sends           = 1
+		c.req.progress.max     = -1
+		c.req.progress.timeout = -1
 
-		http.scan_temp_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
-		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		c.scanner.scan = {
+			split     = http.split_n(16),
+			allocator = &c.temp_arena,
+			callback  = proc(c: ^http.Connection, data: []byte) {},
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
 		testing.expect_value(t, c.scanner.allocator, &c.temp_arena)
 		testing.expect(t, len(c.scanner.buf) >= http.MULTIPLIER, "expected scanner buffer allocated in temp_arena")
 		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hi")
 
-		c.res._state        = .Sending
-		c.req.progress.max = -1
 		http.scan_temp_bytes(&c.scanner, 2, proc(c: ^http.Connection, data: []byte) {
 			free_all(context.temp_allocator)
 		})
 		testing.expect(t, c.scanner.buf == nil, "expected empty scanner buf after free_all")
 		testing.expect(t, c.temp_arena.tail == nil, "expected empty temp_arena after free_all")
 
-		c.req.progress.max = 0
-		http.scan_temp_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
-		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
+		c.scanner.scan = {
+			split     = http.split_n(16),
+			allocator = &c.temp_arena,
+			callback  = proc(c: ^http.Connection, data: []byte) {},
+		}
+		testing.expect(t, http._scanner_pump_buffered(&c.scanner))
+		testing.expect(t, http._scanner_prepare_recv_buf(&c.scanner))
+		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
 		testing.expect(t, len(c.scanner.buf) >= http.MULTIPLIER, "expected fresh scanner buffer allocated")
 	}
 
