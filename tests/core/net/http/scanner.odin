@@ -990,6 +990,358 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_body_pause_resume :: proc(t: ^testing.T) {
+	Pause_Mode :: enum {
+		Async_Paused,
+		Sync_Pause_Resume,
+		Sync_Pause_Resume_Pause,
+		Pause_Before_Body_And_On_Final,
+	}
+
+	Pause_State :: struct {
+		mode:              Pause_Mode,
+		req_count:         int,
+		cb_calls:          int,
+		body_received:     [128]byte,
+		body_len:          int,
+		saved_slice:       []byte,
+		finished:          bool,
+		consumed_on_end:   bool,
+		trailer_ok:        bool,
+		second_target:     string,
+		early_respond_pending: bool,
+	}
+
+	Test_Env :: struct {
+		s:      http.Server,
+		thread: http.Server_Thread,
+		prev:   ^http.Server_Thread,
+		c:      http.Connection,
+	}
+
+	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
+		http.write_response_heading(&c.res)
+		c.res._state = .Sending
+		c.res._sends = pending_sends
+		http.respond(&c.res)
+	}
+
+	handler := http.Handler{
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Pause_State)(h.user_data)
+			c := http.connection_of_context(ctx)
+			st.req_count += 1
+
+			if st.req_count == 2 {
+				st.second_target = strings.clone(ctx.req.line.target, context.allocator)
+				finish_test_response(c, pending_sends = 1)
+				return
+			}
+
+			http.context_add(ctx, st)
+			if st.mode == .Pause_Before_Body_And_On_Final {
+				// No-ops before body() is called.
+				http.body_pause(&c.req)
+				http.body_resume(&c.req)
+			}
+
+			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+				ctx := http.context_of_request(req)
+				st := http.context_get(ctx, ^Pause_State)^
+				c := http.connection_of_request(req)
+				st.cb_calls += 1
+
+				if len(data) > 0 {
+					n := copy(st.body_received[st.body_len:], data)
+					st.body_len += n
+				}
+
+				if !is_partial {
+					if st.mode == .Pause_Before_Body_And_On_Final {
+						// No-ops on final callback once body has been consumed.
+						http.body_pause(req)
+						http.body_resume(req)
+					}
+					st.finished = true
+					st.consumed_on_end = req.has_consumed_body
+					if tr, ok := http.get_header(req, "X-Tr"); ok && tr == "ok" {
+						st.trailer_ok = true
+					}
+					pending := st.early_respond_pending ? 1 : 0
+					http.write_response_heading(&c.res)
+					c.res._state = .Sending
+					c.res._sends = pending
+					http.respond(&c.res)
+					return
+				}
+
+				switch st.mode {
+				case .Async_Paused, .Pause_Before_Body_And_On_Final:
+					st.saved_slice = data
+					http.body_pause(req)
+				case .Sync_Pause_Resume:
+					http.body_pause(req)
+					http.body_resume(req)
+				case .Sync_Pause_Resume_Pause:
+					if st.cb_calls == 1 {
+						st.saved_slice = data
+						http.body_pause(req)
+						http.body_resume(req)
+						http.body_pause(req)
+					} else {
+						http.body_pause(req)
+						http.body_resume(req)
+					}
+				}
+			})
+		},
+	}
+
+	setup_and_run :: proc(t: ^testing.T, st: ^Pause_State, h: ^http.Handler, payload: string, env: ^Test_Env) {
+		h.user_data = st
+		env.s = http.make_server({handler = h^})
+		env.thread = http.Server_Thread{s = &env.s, id = 1}
+		env.prev = http.td
+		http.td = &env.thread
+
+		env.c = http.Connection{
+			transaction_arena = http.get_arena(nil),
+			temp_arena        = http.get_arena(nil),
+		}
+		env.c.transaction_arena.c = &env.c
+		env.c.temp_arena.c = &env.c
+
+		tx_alloc := http.transaction_allocator(&env.c)
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, 1024), tx_alloc)
+		testing.expect_value(t, buf_err, nil)
+		env.c.scanner.buf = buf
+		env.c.scanner.write_head = copy(buf, payload)
+		env.c.scanner.allocator = &env.c.transaction_arena
+
+		http._serve_connection(&env.c)
+	}
+
+	cleanup_env :: proc(env: ^Test_Env) {
+		http.temp_allocator_destroy(&env.c)
+		http.transaction_allocator_destroy(&env.c)
+		http._server_thread_free_arenas_destroy(&env.thread)
+		http.td = env.prev
+	}
+
+	append_bytes :: proc(c: ^http.Connection, more: string) {
+		c.scanner.write_head += copy(c.scanner.buf[c.scanner.write_head:], more)
+	}
+
+	// 1. Content-Length pause/resume across chunks + keep-alive pipelining.
+	{
+		st := Pause_State{mode = .Async_Paused}
+		defer delete(st.second_target)
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, st.req_count, 1)
+		testing.expect_value(t, st.cb_calls, 1)
+		testing.expect(t, !st.finished, "expected Content-Length body to pause before finishing")
+		testing.expect(t, !env.c.req.has_consumed_body, "expected has_consumed_body false while paused")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no scan scheduled while paused")
+		testing.expect(t, !env.c.scanner.is_pumping, "expected scanner not pumping while paused")
+		testing.expect_value(t, string(st.saved_slice), "hello")
+
+		// Redundant pause is idempotent, and appending unread bytes does not overwrite saved_slice while paused.
+		http.body_pause(&env.c.req)
+		append_bytes(&env.c, "worldGET /after-cl HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		testing.expect_value(t, string(st.saved_slice), "hello")
+
+		http.body_resume(&env.c.req)
+
+		// Paused after final Content-Length data chunk (curr_size == 0) before uniform (nil, false) EOF.
+		testing.expect_value(t, st.cb_calls, 2)
+		testing.expect(t, !st.finished, "expected pause after final Content-Length chunk before EOF")
+		testing.expect(t, !env.c.req.has_consumed_body, "expected has_consumed_body false while paused before EOF")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil while paused before EOF")
+		testing.expect_value(t, string(st.saved_slice), "world")
+
+		http.body_resume(&env.c.req)
+
+		testing.expect(t, st.finished, "expected Content-Length body to emit (nil, false) on resume")
+		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
+		testing.expect_value(t, st.cb_calls, 3)
+		testing.expect_value(t, string(st.body_received[:st.body_len]), "helloworld")
+		testing.expect_value(t, st.req_count, 2)
+		testing.expect_value(t, st.second_target, "/after-cl")
+	}
+
+	// 2. Chunked encoding pause/resume mid-chunk AND on exact chunk boundaries + trailers + keep-alive.
+	{
+		st := Pause_State{mode = .Async_Paused}
+		defer delete(st.second_target)
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /ch HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\na\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		// Paused mid-chunk (5 bytes left in first chunk).
+		testing.expect_value(t, st.cb_calls, 1)
+		testing.expect(t, !st.finished, "expected mid-chunk pause")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil mid-chunk pause")
+		testing.expect_value(t, string(st.saved_slice), "hello")
+
+		append_bytes(&env.c, "world\r\n5\r\n!!!!!\r\n0\r\nX-Tr: ok\r\n\r\nGET /after-ch HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		testing.expect_value(t, string(st.saved_slice), "hello")
+
+		http.body_resume(&env.c.req)
+
+		// Paused on exact chunk boundary (curr_size == 0 before \r\n); next chunk must not run yet.
+		testing.expect_value(t, st.cb_calls, 2)
+		testing.expect(t, !st.finished, "expected pause at chunk 1 boundary")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk boundary")
+		testing.expect_value(t, string(st.saved_slice), "world")
+
+		http.body_resume(&env.c.req)
+
+		// Paused on second exact chunk boundary before final 0-chunk + trailers.
+		testing.expect_value(t, st.cb_calls, 3)
+		testing.expect(t, !st.finished, "expected pause at chunk 2 boundary")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk 2 boundary")
+		testing.expect_value(t, string(st.saved_slice), "!!!!!")
+
+		http.body_resume(&env.c.req)
+
+		testing.expect(t, st.finished, "expected chunked body to complete after trailers")
+		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on chunked end")
+		testing.expect(t, st.trailer_ok, "expected allowed trailer X-Tr to be parsed")
+		testing.expect_value(t, st.cb_calls, 4)
+		testing.expect_value(t, string(st.body_received[:st.body_len]), "helloworld!!!!!")
+		testing.expect_value(t, st.req_count, 2)
+		testing.expect_value(t, st.second_target, "/after-ch")
+	}
+
+	// 3a. Synchronous body_pause + body_resume inside Body_Cb completes iteratively.
+	{
+		st := Pause_State{mode = .Sync_Pause_Resume}
+		defer delete(st.second_target)
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /sync HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
+			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n" +
+			"GET /after-sync HTTP/1.1\r\nHost: localhost\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect(t, st.finished, "expected sync pause+resume to finish iteratively")
+		testing.expect_value(t, st.cb_calls, 3)
+		testing.expect_value(t, string(st.body_received[:st.body_len]), "abcdef")
+		testing.expect_value(t, st.req_count, 2)
+		testing.expect_value(t, st.second_target, "/after-sync")
+	}
+
+	// 3b. Synchronous pause -> resume -> pause stays paused until external body_resume.
+	{
+		st := Pause_State{mode = .Sync_Pause_Resume_Pause, early_respond_pending = true}
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /prp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
+			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, st.cb_calls, 1)
+		testing.expect(t, !st.finished, "expected second pause inside Body_Cb to keep stream paused")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil after pause->resume->pause")
+		testing.expect_value(t, string(st.saved_slice), "abc")
+
+		http.body_resume(&env.c.req)
+
+		testing.expect(t, st.finished, "expected external resume to complete buffered body")
+		testing.expect_value(t, st.cb_calls, 3)
+		testing.expect_value(t, string(st.body_received[:st.body_len]), "abcdef")
+	}
+
+	// 4. Edge cases: pre-body/post-final no-ops, redundant resume, early respond + stray resume, pending scan guard.
+	{
+		st := Pause_State{mode = .Pause_Before_Body_And_On_Final, early_respond_pending = true}
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /edge-final HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, st.cb_calls, 1)
+		testing.expect(t, !st.finished, "expected Content-Length chunk to pause before (nil, false) EOF")
+		testing.expect_value(t, string(st.saved_slice), "hello")
+
+		http.body_resume(&env.c.req)
+
+		testing.expect(t, st.finished, "expected resume after final Content-Length chunk to deliver (nil, false) EOF")
+		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
+		testing.expect_value(t, st.cb_calls, 2)
+		// Redundant resume when not paused / already consumed must be a safe no-op.
+		http.body_resume(&env.c.req)
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no scan after redundant resume")
+	}
+
+	{
+		st := Pause_State{mode = .Async_Paused}
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /early-resp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, st.cb_calls, 1)
+		append_bytes(&env.c, "world")
+		finish_test_response(&env.c, pending_sends = 1)
+		testing.expect(t, env.c.res._state == .Sent, "expected response state Sent")
+
+		// Stray resume after respond() must not re-arm scanning.
+		http.body_resume(&env.c.req)
+		testing.expect(t, !st.finished, "expected stray resume after respond not to deliver further body chunks")
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stay nil after Sent")
+	}
+
+	{
+		st := Pause_State{mode = .Async_Paused, early_respond_pending = true}
+		env: Test_Env
+		setup_and_run(t, &st, &handler,
+			"POST /pending-scan HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc",
+			&env,
+		)
+		defer cleanup_env(&env)
+
+		testing.expect_value(t, st.cb_calls, 1)
+		testing.expect(t, env.c.scanner.scan.callback == nil, "expected paused at chunk boundary")
+
+		sentinel_cb :: proc(c: ^http.Connection, data: []byte) {}
+		env.c.scanner.scan = {
+			split     = http.split_line(),
+			allocator = &env.c.transaction_arena,
+			callback  = sentinel_cb,
+		}
+		// External pause + resume while another scan is already pending must not clobber the pending scan.
+		http.body_pause(&env.c.req)
+		http.body_resume(&env.c.req)
+		testing.expect(t, env.c.scanner.scan.callback == sentinel_cb, "expected body_resume not to overwrite active scan.callback")
+
+		env.c.scanner.scan = {}
+		http.body_pause(&env.c.req)
+		append_bytes(&env.c, "\r\n0\r\n\r\n")
+		http.body_resume(&env.c.req)
+		testing.expect(t, st.finished, "expected chunked body to finish after clearing sentinel and resuming")
+		testing.expect_value(t, string(st.body_received[:st.body_len]), "abc")
+	}
+}
+
+@(test)
 test_lazy_expect_continue :: proc(t: ^testing.T) {
 	http.headers_init_hash_secret()
 

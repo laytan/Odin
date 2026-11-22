@@ -497,11 +497,24 @@ scanner_pump :: proc(s: ^Scanner) {
 /*
 Callback invoked with request body chunks from `body`.
 
+Both `Content-Length` and `Transfer-Encoding: chunked` follow the same stream contract:
+every data chunk invokes `is_partial = true` with a non-empty `body` slice, and the final EOF
+invocation passes `body == nil` and `is_partial = false`.
+
 With `retain = false` (default), `body` is a slice into the connection's reusable streaming buffer
-(starting at `<= 16 KiB` and ramping up to `<= 256 KiB` when recvs fill it) and is only valid for the
-duration of this callback; copy/clone it if you need to retain the bytes after returning or before
-calling async send procedures. When `body` is called with `retain = true`, chunks live on
-`transaction_arena` for the duration of the request.
+(starting at `<= 16 KiB` and ramping up to `<= 256 KiB` when recvs fill it). Unless paused via
+`body_pause`, returning from this callback lets the scanner compact or overwrite that live buffer
+in place — a silent data corruption bug that ASAN cannot detect because the allocation is reused
+rather than freed.
+
+For async consumers (`send`, `send_chunk`, `nbio.write`, etc.) with `retain = false`, either:
+1. Copy/clone `body` before returning, or
+2. Call `body_pause(req)` inside this callback before issuing the async operation, keeping `body`
+   valid zero-copy until the async completion calls `body_resume(req)` (which then continues
+   scanning or delivers the final `(nil, is_partial = false)` callback).
+
+When `body` is called with `retain = true`, chunks live on `transaction_arena` for the duration of
+the request.
 */
 Body_Cb :: proc(req: ^Request, body: []byte, is_partial: bool)
 
@@ -509,6 +522,7 @@ Body_Request :: struct {
 	cb:        Body_Cb,
 	curr_size: int,
 	retain:    bool,
+	paused:    bool,
 }
 
 // Scans the next part of the request body into `transaction_arena`, honouring `body(..., retain)`.
@@ -526,18 +540,28 @@ _scan_body :: proc(c: ^Connection, split: Scan_Splitter, cb: Scan_Cb, hint := -1
 	scanner_pump(&c.scanner)
 }
 
+@(private="file")
+_request_is_chunked :: proc(req: ^Request) -> bool {
+	enc_header, ok := get_header(req, "Transfer-Encoding")
+	return ok && _headers_eq(enc_header, "chunked")
+}
+
 /*
 Streams the request body to `cb`.
 
-Each non-final invocation passes `is_partial = true`; the final invocation passes
-`is_partial = false` (possibly with an empty/nil `body`).
+Each data chunk passes `is_partial = true` with `len(body) > 0`; once all body bytes (and any
+chunked trailers) are consumed, a final EOF invocation passes `nil, is_partial = false`.
 
 With `retain = false` (default), chunks are scanned into a single O(1) reusable buffer on
 `transaction_arena` (starting at `<= 16 KiB` and adaptively scaling up to `256 KiB` when recvs fill
-it) and `body` slices are only valid for the duration of that callback invocation. With
-`retain = true`, chunks are scanned zero-copy into chained buffers on `transaction_arena` (starting
-at `<= 16 KiB` and progressively scaling up to `32 MiB` as blocks fill) and remain valid for the
-lifetime of the request transaction.
+it). Returning from `cb` without calling `body_pause` allows subsequent reads to compact or
+overwrite that live buffer in place (undetectable by ASAN), so async consumers (`send`,
+`send_chunk`, `nbio.write`, etc.) must either copy `body` before returning or call `body_pause(req)`
+until their async work completes and calls `body_resume(req)`.
+
+With `retain = true`, chunks are scanned zero-copy into chained buffers on `transaction_arena`
+(starting at `<= 16 KiB` and progressively scaling up to `32 MiB` as blocks fill) and remain
+valid for the lifetime of the request transaction.
 */
 body :: proc(req: ^Request, cb: Body_Cb, retain := false, loc := #caller_location) {
 	ctx := context_of_request(req)
@@ -554,11 +578,72 @@ body :: proc(req: ^Request, cb: Body_Cb, retain := false, loc := #caller_locatio
 		return
 	}
 
-	enc_header, ok := get_header(req, "Transfer-Encoding")
-	if ok && _headers_eq(enc_header, "chunked") {
+	if _request_is_chunked(req) {
 		_body_chunked(req)
 	} else {
 		_body_length(req)
+	}
+}
+
+/*
+Pauses streaming body reads for `req` until `body_resume` is called.
+
+Call from within a `Body_Cb` (before dispatching any async operation that will call `body_resume`)
+to apply backpressure while an async consumer drains the current `body` chunk (e.g. `nbio.write`
+to disk or `send_chunk` to the socket). While paused, the scanner stops issuing `nbio.recv` and
+does not compact, overwrite, or reallocate its buffer, so `body` remains valid zero-copy (even
+with `retain = false`) until `body_resume` is called. When resuming after the final data chunk,
+`body_resume` invokes the final `(nil, is_partial = false)` EOF callback.
+
+No-op if `body` has not been called or the body has already been consumed (`is_partial == false`).
+*/
+body_pause :: proc(req: ^Request) {
+	if req.has_consumed_body {
+		return
+	}
+	c := connection_of_request(req)
+	body_req := context_get(&c.ctx, Body_Request)
+	if body_req == nil {
+		return
+	}
+	body_req.paused = true
+}
+
+/*
+Resumes streaming body reads previously paused with `body_pause`.
+
+Calling `body_resume` hands the current `body` slice back to the scanner: with `retain = false`,
+its bytes may be compacted or overwritten immediately, so any async consumer holding `body` must
+have finished reading it first.
+
+Safe to call redundantly, synchronously inside `Body_Cb` (cancelling an earlier `body_pause`
+without recursion), after the body has finished, or after the response has ended/errored.
+*/
+body_resume :: proc(req: ^Request) {
+	if req.has_consumed_body {
+		return
+	}
+	c := connection_of_request(req)
+	body_req := context_get(&c.ctx, Body_Request)
+	if body_req == nil || !body_req.paused {
+		return
+	}
+	body_req.paused = false
+
+	// If called synchronously while the scanner pump is active (e.g. inside `Body_Cb`, or from a
+	// synchronous `on_sent` on a `HEAD` request), let the active continuation schedule the next
+	// scan iteratively upon return.
+	if c.scanner.is_pumping {
+		return
+	}
+	if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil || c.curr_recv != nil {
+		return
+	}
+
+	if _request_is_chunked(req) {
+		_body_chunked_continue(c)
+	} else {
+		_body_length_continue(c)
 	}
 }
 
@@ -610,114 +695,123 @@ _body_chunked :: proc(req: ^Request) {
 	if !_maybe_send_continue(c) {
 		return
 	}
-	_scan_body(c, split_line(), on_size)
+	_scan_body(c, split_line(), _body_chunked_on_size)
+}
 
-	on_size :: proc(c: ^Connection, data: []byte) {
-		if !_valid_field_bytes(data) {
+@(private="file")
+_body_chunked_continue :: proc(c: ^Connection) {
+	body_req := context_get(&c.ctx, Body_Request)
+	if body_req.curr_size > 0 {
+		_scan_body(c, split_at_most(body_req.curr_size), _body_chunked_on_body)
+		return
+	}
+	_scan_body(c, split_n(2), _body_chunked_on_crlf)
+}
+
+@(private="file")
+_body_chunked_on_size :: proc(c: ^Connection, data: []byte) {
+	if !_valid_field_bytes(data) {
+		invalid_request(c, .Bad_Request)
+		return
+	}
+
+	size_line := string(data)
+
+	// If there is a semicolon, discard everything after it,
+	// that would be chunk extensions which we currently have no interest in.
+	if semi := strings.index_byte(size_line, ';'); semi > -1 {
+		size_line = size_line[:semi]
+	}
+
+	size, ok := parse_int16(size_line)
+	if !ok {
+		invalid_request(c, .Bad_Request)
+		return
+	}
+
+	if c.req.progress.max >= 0 && size > c.req.progress.max {
+		invalid_request(c, .Payload_Too_Large)
+		return
+	}
+
+	if size == 0 {
+		// Trailers reuse request_quota and scan non-reusably so headers can store zero-copy slices.
+		c.req.quota = &td.s.opts.request_quota
+		progression_reset(&c.req.progress, c.req.quota^)
+		if buffered := c.scanner.write_head - c.scanner.read_head; buffered > 0 {
+			progression_update(&c.req.progress, c.req.quota^, buffered, 0)
+		}
+		scan_line(&c.scanner, _body_chunked_on_trailer)
+		return
+	}
+
+	body_req := context_get(&c.ctx, Body_Request)
+	body_req.curr_size = size
+	_scan_body(c, split_at_most(size), _body_chunked_on_body)
+}
+
+@(private="file")
+_body_chunked_on_body :: proc(c: ^Connection, data: []byte) {
+	body_req := context_get(&c.ctx, Body_Request)
+	body_req.curr_size -= len(data)
+
+	if _body_cb(&c.req, data, is_partial=true) {
+		return
+	}
+	if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil || body_req.paused {
+		return
+	}
+
+	_body_chunked_continue(c)
+}
+
+@(private="file")
+_body_chunked_on_crlf :: proc(c: ^Connection, data: []byte) {
+	if len(data) != 2 || data[0] != '\r' || data[1] != '\n' {
+		invalid_request(c, .Bad_Request)
+		return
+	}
+
+	_scan_body(c, split_line(), _body_chunked_on_size)
+}
+
+@(private="file")
+_body_chunked_on_trailer :: proc(c: ^Connection, data: []byte) {
+	// Headers are done, success, clean up chunked stuff from headers.
+	if len(data) == 0 {
+		_headers_set_writable(&c.req.headers)
+
+		headers_delete(&c.req.headers, "Trailer")
+		headers_delete(&c.req.headers, "Transfer-Encoding")
+
+		_headers_set_readonly(&c.req.headers)
+
+		if !validate_headers(c) {
 			invalid_request(c, .Bad_Request)
 			return
 		}
 
-		size_line := string(data)
-
-		// If there is a semicolon, discard everything after it,
-		// that would be chunk extensions which we currently have no interest in.
-		if semi := strings.index_byte(size_line, ';'); semi > -1 {
-			size_line = size_line[:semi]
-		}
-
-		size, ok := parse_int16(size_line)
-		if !ok {
-			invalid_request(c, .Bad_Request)
-			return
-		}
-
-		if c.req.progress.max >= 0 && size > c.req.progress.max {
-			invalid_request(c, .Payload_Too_Large)
-			return
-		}
-
-		if size == 0 {
-			// Trailers reuse request_quota and scan non-reusably so headers can store zero-copy slices.
-			c.req.quota = &td.s.opts.request_quota
-			progression_reset(&c.req.progress, c.req.quota^)
-			if buffered := c.scanner.write_head - c.scanner.read_head; buffered > 0 {
-				progression_update(&c.req.progress, c.req.quota^, buffered, 0)
-			}
-			scan_line(&c.scanner, on_trailer)
-			return
-		}
-
-		body_req := context_get(&c.ctx, Body_Request)
-		body_req.curr_size = size
-		_scan_body(c, split_at_most(size), on_body)
+		_body_cb(&c.req, nil, is_partial=false)
+		return
 	}
 
-	on_body :: proc(c: ^Connection, data: []byte) {
-		body_req := context_get(&c.ctx, Body_Request)
-		body_req.curr_size -= len(data)
-
-		if _body_cb(&c.req, data, is_partial=true) {
-			return
-		}
-		if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
-			return
-		}
-
-		if body_req.curr_size > 0 {
-			_scan_body(c, split_at_most(body_req.curr_size), on_body)
-			return
-		}
-
-		_scan_body(c, split_n(2), on_chunk_crlf)
+	key, val, ok := header_parse(string(data))
+	if !ok {
+		invalid_request(c, .Bad_Request)
+		return
 	}
 
-	on_chunk_crlf :: proc(c: ^Connection, data: []byte) {
-		if len(data) != 2 || data[0] != '\r' || data[1] != '\n' {
-			invalid_request(c, .Bad_Request)
+	// A recipient MUST ignore (or consider as an error) any fields that are forbidden to be sent in a trailer.
+	if header_allowed_trailer(key) {
+		_headers_set_writable(&c.req.headers)
+		added := _request_add_header(c, key, val)
+		_headers_set_readonly(&c.req.headers)
+		if !added {
 			return
 		}
-
-		_scan_body(c, split_line(), on_size)
 	}
 
-	on_trailer :: proc(c: ^Connection, data: []byte) {
-		// Headers are done, success, clean up chunked stuff from headers.
-		if len(data) == 0 {
-			_headers_set_writable(&c.req.headers)
-
-			headers_delete(&c.req.headers, "Trailer")
-			headers_delete(&c.req.headers, "Transfer-Encoding")
-
-			_headers_set_readonly(&c.req.headers)
-
-			if !validate_headers(c) {
-				invalid_request(c, .Bad_Request)
-				return
-			}
-
-			_body_cb(&c.req, nil, is_partial=false)
-			return
-		}
-
-		key, val, ok := header_parse(string(data))
-		if !ok {
-			invalid_request(c, .Bad_Request)
-			return
-		}
-
-		// A recipient MUST ignore (or consider as an error) any fields that are forbidden to be sent in a trailer.
-		if header_allowed_trailer(key) {
-			_headers_set_writable(&c.req.headers)
-			added := _request_add_header(c, key, val)
-			_headers_set_readonly(&c.req.headers)
-			if !added {
-				return
-			}
-		}
-
-		scan_line(&c.scanner, on_trailer)
-	}
+	scan_line(&c.scanner, _body_chunked_on_trailer)
 }
 
 _body_length :: proc(req: ^Request) {
@@ -744,24 +838,30 @@ _body_length :: proc(req: ^Request) {
 
 	body_req := context_get(&c.ctx, Body_Request)
 	body_req.curr_size = clen
-	_scan_body(c, split_at_most(clen), on_body, hint = clen)
+	_scan_body(c, split_at_most(clen), _body_length_on_body, hint = clen)
+}
 
-	on_body :: proc(c: ^Connection, data: []byte) {
-		body_req := context_get(&c.ctx, Body_Request)
-		body_req.curr_size -= len(data)
-		if body_req.curr_size > 0 {
-			if _body_cb(&c.req, data, is_partial=true) {
-				return
-			}
-			if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil {
-				return
-			}
-			_scan_body(c, split_at_most(body_req.curr_size), on_body, hint = body_req.curr_size)
-			return
-		}
-
-		_body_cb(&c.req, data, is_partial=false)
+@(private="file")
+_body_length_continue :: proc(c: ^Connection) {
+	body_req := context_get(&c.ctx, Body_Request)
+	if body_req.curr_size <= 0 {
+		_body_cb(&c.req, nil, is_partial=false)
+		return
 	}
+	_scan_body(c, split_at_most(body_req.curr_size), _body_length_on_body, hint = body_req.curr_size)
+}
+
+@(private="file")
+_body_length_on_body :: proc(c: ^Connection, data: []byte) {
+	body_req := context_get(&c.ctx, Body_Request)
+	body_req.curr_size -= len(data)
+	if _body_cb(&c.req, data, is_partial=true) {
+		return
+	}
+	if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil || body_req.paused {
+		return
+	}
+	_body_length_continue(c)
 }
 
 _maybe_send_continue :: proc(c: ^Connection) -> bool {

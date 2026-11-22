@@ -2825,3 +2825,325 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 	testing.expect_value(t, server_track.current_memory_allocated, 0)
 	testing.expect_value(t, len(server_track.bad_free_array), 0)
 }
+
+@(test)
+test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+
+	STREAM_SIZE :: 2 * mem.Megabyte
+
+	fnv1a_step :: proc(h: u64, data: []byte) -> u64 {
+		h := h
+		for b in data {
+			h = (h ~ u64(b)) * 1099511628211
+		}
+		return h
+	}
+
+	expected_hash_for :: proc(total: int) -> u64 {
+		h: u64 = 14695981039346656037
+		buf: [16 * 1024]byte
+		pos := 0
+		for pos < total {
+			n := min(len(buf), total - pos)
+			for i in 0..<n {
+				buf[i] = u8(((pos + i) * 31 + 7) & 0xFF)
+			}
+			h = fnv1a_step(h, buf[:n])
+			pos += n
+		}
+		return h
+	}
+
+	server_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&server_track, context.allocator)
+	server_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&server_track)
+
+	Echo_Stats :: struct {
+		track:             ^mem.Tracking_Allocator,
+		cl_pauses:         int,
+		chunked_pauses:    int,
+		cl_steady_chunks:  int,
+		chunked_steady:    int,
+		cl_unexpected_alloc:      bool,
+		chunked_unexpected_alloc: bool,
+	}
+	stats := Echo_Stats{track = &server_track}
+
+	Echo_Kind :: enum {
+		Content_Length,
+		Chunked,
+	}
+	Echo_Req :: struct {
+		stats:      ^Echo_Stats,
+		kind:       Echo_Kind,
+		chunks:     int,
+		prev_buf:   int,
+		prev_alloc: i64,
+	}
+
+	handle_echo :: proc(ctx: ^http.Ctx, stats: ^Echo_Stats, kind: Echo_Kind) {
+		if _, err := http.context_add(ctx, Echo_Req{stats = stats, kind = kind}); err != nil {
+			ctx.res.status = .Internal_Server_Error
+			http.respond(&ctx.res)
+			return
+		}
+
+		on_echo_sent :: proc(c: ^http.Connection, err: http.Send_Error) {
+			if err != nil || c.res._state == .Error {
+				return
+			}
+			http.body_resume(&c.req)
+		}
+
+		http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
+			c := http.connection_of_request(req)
+			er := http.context_get(&c.ctx, Echo_Req)
+			st := er.stats
+
+			if !is_partial {
+				if er.chunks >= 2 && st.track.total_memory_allocated != er.prev_alloc {
+					switch er.kind {
+					case .Content_Length: st.cl_unexpected_alloc = true
+					case .Chunked:        st.chunked_unexpected_alloc = true
+					}
+				}
+				http.respond(&c.res)
+				return
+			}
+
+			er.chunks += 1
+			cur_buf   := len(c.scanner.buf)
+			cur_alloc := st.track.total_memory_allocated
+			if er.chunks >= 2 && cur_buf == er.prev_buf {
+				if cur_alloc != er.prev_alloc {
+					switch er.kind {
+					case .Content_Length: st.cl_unexpected_alloc = true
+					case .Chunked:        st.chunked_unexpected_alloc = true
+					}
+				}
+				switch er.kind {
+				case .Content_Length: st.cl_steady_chunks += 1
+				case .Chunked:        st.chunked_steady += 1
+				}
+			}
+			er.prev_buf = cur_buf
+
+			http.body_pause(req)
+			switch er.kind {
+			case .Content_Length: st.cl_pauses += 1
+			case .Chunked:        st.chunked_pauses += 1
+			}
+			// Zero-copy pass of `retain = false` scanner slice directly into async `send_chunk`.
+			http.send_chunk(&c.res, {body}, on_echo_sent)
+			er.prev_alloc = st.track.total_memory_allocated
+		}, retain = false)
+	}
+
+	r: http.Router
+	defer http.router_destroy(r)
+
+	http.route_post(&r, "/echo-cl", http.Handler{
+		user_data = &stats,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			handle_echo(ctx, (^Echo_Stats)(h.user_data), .Content_Length)
+		},
+	})
+	http.route_post(&r, "/echo-chunked", http.Handler{
+		user_data = &stats,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			handle_echo(ctx, (^Echo_Stats)(h.user_data), .Chunked)
+		},
+	})
+	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
+		http.respond_plain(&ctx.res, "still-alive")
+	})
+
+	server := http.make_server(http.Server_Options{
+		address        = nbio.IP4_Loopback,
+		port           = 18100,
+		thread_count   = 1,
+		body_quota     = http.UNLIMITED_QUOTA,
+		response_quota = http.UNLIMITED_QUOTA,
+		handler        = http.router(&r),
+	}, mem.tracking_allocator(&server_track))
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Hash_Result :: struct {
+		setopt_ok:   bool,
+		perform_err: curl.code,
+		getinfo_err: curl.code,
+		status:      c.long,
+		count:       int,
+		hash:        u64,
+		small_buf:   [64]byte,
+		small_len:   int,
+	}
+
+	Upload_State :: struct {
+		sent:  int,
+		total: int,
+	}
+
+	Client_Result :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		handle_ok:    bool,
+		cl:           Hash_Result,
+		chunked:      Hash_Result,
+		after:        Hash_Result,
+	}
+	res := Client_Result{server = &server}
+
+	client_thread := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+		res := (^Client_Result)(data)
+		defer http.server_shutdown(res.server)
+
+		endpoint, ep_err := nbio.bound_endpoint(res.server.socket)
+		res.endpoint_err = ep_err
+		if ep_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		res.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		read_pattern :: proc "c" (ptr: [^]byte, size: c.size_t, nmemb: c.size_t, userdata: rawptr) -> c.size_t {
+			st := (^Upload_State)(userdata)
+			if st.sent >= st.total {
+				return 0
+			}
+			max_n := min(int(size) * int(nmemb), 16 * 1024)
+			n := min(max_n, st.total - st.sent)
+			for i in 0..<n {
+				ptr[i] = u8(((st.sent + i) * 31 + 7) & 0xFF)
+			}
+			st.sent += n
+			return c.size_t(n)
+		}
+
+		write_hash :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+			r := (^Hash_Result)(userp)
+			n := int(size) * int(nmemb)
+			for i in 0..<n {
+				r.hash = (r.hash ~ u64(contents[i])) * 1099511628211
+			}
+			if r.count < len(r.small_buf) {
+				copied := copy(r.small_buf[r.small_len:], contents[:min(n, len(r.small_buf) - r.small_len)])
+				r.small_len += copied
+			}
+			r.count += n
+			return c.size_t(n)
+		}
+
+		// 1. POST /echo-cl with Content-Length: 2 MiB.
+		{
+			up := Upload_State{total = STREAM_SIZE}
+			res.cl.hash = 14695981039346656037
+			hdrs := curl.slist_append(nil, "Expect:")
+			defer curl.slist_free_all(hdrs)
+			url := fmt.ctprintf("http://127.0.0.1:%d/echo-cl", endpoint.port)
+			res.cl.setopt_ok =
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .POST, c.long(1)) == .E_OK &&
+				curl.easy_setopt(handle, .POSTFIELDSIZE, c.long(STREAM_SIZE)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPHEADER, hdrs) == .E_OK &&
+				curl.easy_setopt(handle, .READFUNCTION, read_pattern) == .E_OK &&
+				curl.easy_setopt(handle, .READDATA, &up) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, write_hash) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.cl) == .E_OK
+			if res.cl.setopt_ok {
+				res.cl.perform_err = curl.easy_perform(handle)
+				res.cl.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.cl.status)
+			}
+		}
+
+		// 2. POST /echo-chunked with Transfer-Encoding: chunked (2 MiB).
+		{
+			up := Upload_State{total = STREAM_SIZE}
+			res.chunked.hash = 14695981039346656037
+			hdrs := curl.slist_append(nil, "Transfer-Encoding: chunked")
+			hdrs = curl.slist_append(hdrs, "Expect:")
+			defer curl.slist_free_all(hdrs)
+			url := fmt.ctprintf("http://127.0.0.1:%d/echo-chunked", endpoint.port)
+			res.chunked.setopt_ok =
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .POST, c.long(1)) == .E_OK &&
+				curl.easy_setopt(handle, .POSTFIELDSIZE, c.long(-1)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPHEADER, hdrs) == .E_OK &&
+				curl.easy_setopt(handle, .READFUNCTION, read_pattern) == .E_OK &&
+				curl.easy_setopt(handle, .READDATA, &up) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, write_hash) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.chunked) == .E_OK
+			if res.chunked.setopt_ok {
+				res.chunked.perform_err = curl.easy_perform(handle)
+				res.chunked.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.chunked.status)
+			}
+		}
+
+		// 3. GET /after verifying server stays healthy.
+		{
+			res.after.hash = 14695981039346656037
+			url := fmt.ctprintf("http://127.0.0.1:%d/after", endpoint.port)
+			res.after.setopt_ok =
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .POST, c.long(0)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPGET, c.long(1)) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPHEADER, nil) == .E_OK &&
+				curl.easy_setopt(handle, .READFUNCTION, nil) == .E_OK &&
+				curl.easy_setopt(handle, .READDATA, nil) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, write_hash) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.after) == .E_OK
+			if res.after.setopt_ok {
+				res.after.perform_err = curl.easy_perform(handle)
+				res.after.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.after.status)
+			}
+		}
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	testing.expect_value(t, res.endpoint_err, nil)
+	testing.expect(t, res.handle_ok, "curl.easy_init failed")
+
+	expected_hash := expected_hash_for(STREAM_SIZE)
+
+	check_stream :: proc(t: ^testing.T, name: string, got: ^Hash_Result, exp_len: int, exp_hash: u64) {
+		testing.expectf(t, got.setopt_ok, "%s: setopt failed", name)
+		testing.expectf(t, got.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(got.perform_err))
+		testing.expect_value(t, got.getinfo_err, curl.code.E_OK)
+		testing.expect_value(t, got.status, c.long(200))
+		testing.expect_value(t, got.count, exp_len)
+		testing.expect_value(t, got.hash, exp_hash)
+	}
+
+	check_stream(t, "echo-cl",      &res.cl,      STREAM_SIZE, expected_hash)
+	check_stream(t, "echo-chunked", &res.chunked, STREAM_SIZE, expected_hash)
+
+	testing.expect(t, res.after.setopt_ok, "after: setopt failed")
+	testing.expectf(t, res.after.perform_err == .E_OK, "after: curl failed: %s", curl.easy_strerror(res.after.perform_err))
+	testing.expect_value(t, res.after.status, c.long(200))
+	testing.expect_value(t, string(res.after.small_buf[:res.after.small_len]), "still-alive")
+
+	testing.expect(t, stats.cl_pauses > 10, "expected Content-Length echo to pause across many chunks")
+	testing.expect(t, stats.chunked_pauses > 10, "expected chunked echo to pause across many chunks")
+	testing.expect(t, stats.cl_steady_chunks > 10 && !stats.cl_unexpected_alloc, "expected zero per-chunk allocations during paused Content-Length echo")
+	testing.expect(t, stats.chunked_steady > 10 && !stats.chunked_unexpected_alloc, "expected zero per-chunk allocations during paused chunked echo")
+	testing.expect(t, server_track.peak_memory_allocated < 768 * mem.Kilobyte, "expected O(1) bounded peak server memory across 2 MiB paused zero-copy echoes")
+
+	testing.expect_value(t, server_track.current_memory_allocated, 0)
+	testing.expect_value(t, len(server_track.bad_free_array), 0)
+}
