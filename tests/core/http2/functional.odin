@@ -2091,6 +2091,7 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 		}
 
 		Bind_Result :: struct {
+			allocator:               runtime.Allocator,
 			port:                    int,
 			setup_err:               http.Server_Error,
 			socket_cleared:          bool,
@@ -2098,10 +2099,11 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			loop_nil:                bool,
 			loop_nil_after_destroy:  bool,
 		}
-		res := Bind_Result{port = ep.port}
+		res := Bind_Result{allocator = context.allocator, port = ep.port}
 
 		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
 			res := (^Bind_Result)(data)
+			context.allocator = res.allocator
 			s := http.make_server(http.Server_Options{
 				address      = nbio.IP4_Loopback,
 				port         = res.port,
@@ -2127,15 +2129,17 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 	// 2. _setup OOM during _setup_threads closes s.socket and releases loop.
 	{
 		OOM_Result :: struct {
+			allocator:      runtime.Allocator,
 			setup_err:      http.Server_Error,
 			socket_cleared: bool,
 			threads_nil:    bool,
 			loop_nil:       bool,
 		}
-		res: OOM_Result
+		res := OOM_Result{allocator = context.allocator}
 
 		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
 			res := (^OOM_Result)(data)
+			context.allocator = res.allocator
 			oom_alloc := runtime.Allocator{
 				procedure = proc(allocator_data: rawptr, mode: runtime.Allocator_Mode, size, alignment: int, old_memory: rawptr, old_size: int, location := #caller_location) -> ([]byte, runtime.Allocator_Error) {
 					if mode == .Free || mode == .Free_All {
@@ -2167,15 +2171,17 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 	// 3. Multi-threaded _setup followed by _destroy without _serve joins worker threads cleanly without deadlocking.
 	{
 		NoServe_Result :: struct {
+			allocator:      runtime.Allocator,
 			setup_err:      http.Server_Error,
 			socket_cleared: bool,
 			threads_nil:    bool,
 			loop_nil:       bool,
 		}
-		res: NoServe_Result
+		res := NoServe_Result{allocator = context.allocator}
 
 		worker := thread.create_and_start_with_data(&res, proc(data: rawptr) {
 			res := (^NoServe_Result)(data)
+			context.allocator = res.allocator
 			s := http.make_server(http.Server_Options{
 				address      = nbio.IP4_Loopback,
 				port         = 18097,
