@@ -2,7 +2,6 @@ package test_core_net_http
 
 import "core:encoding/json"
 import "core:fmt"
-import "core:io"
 import "core:mem"
 import "core:strings"
 import "core:testing"
@@ -517,7 +516,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
+test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 	env: Upgrade_Test_Env
 	setup_upgrade_env(t, &env)
 	defer destroy_upgrade_env(&env)
@@ -617,8 +616,7 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(http._write_chunk_header(buf[:], 4096)), "1000\r\n")
 	}
 
-	// 6. chunked_writer_init sets Transfer-Encoding: chunked lazily without sending headers,
-	//    buffers writes below chunk_size, and returns .Closed after io.destroy.
+	// 6. send_chunk sets Transfer-Encoding: chunked without Content-Length when writing headers.
 	{
 		c := push_test_connection(t, &env)
 		defer destroy_test_connection(c)
@@ -627,32 +625,12 @@ test_respond_helpers_and_chunked_writer :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		cw: http.Chunked_Writer
-		w := http.chunked_writer_init(&cw, &c.res, chunk_size = 8)
-
+		http.send_chunk(&c.res, {transmute([]byte)string("hi!")})
 		te, has_te := http.headers_get(c.res.headers, "transfer-encoding")
 		testing.expect(t, has_te)
 		testing.expect_value(t, te, "chunked")
-		testing.expect(t, c.res._state == .Handling, "expected headers not to flush on init")
-		testing.expect_value(t, len(c.res._buf), 0)
-
-		n, werr := io.write_string(w, "hi!")
-		testing.expect_value(t, werr, io.Error.None)
-		testing.expect_value(t, n, 3)
-		testing.expect_value(t, string(cw.buf[:]), "hi!")
-		testing.expect(t, c.res._state == .Handling, "expected buffered write not to flush headers")
-		testing.expect_value(t, len(c.res._buf), 0)
-
-		// Destroy flushes remaining buffered bytes and marks the writer closed.
-		derr := io.destroy(w)
-		testing.expect_value(t, derr, io.Error.None)
-		testing.expect(t, cw.ended)
 		testing.expect(t, strings.contains(string(c.res._buf[:]), "Transfer-Encoding: chunked\r\n"), "expected Transfer-Encoding: chunked")
 		testing.expect(t, !strings.contains(string(c.res._buf[:]), "Content-Length:"), "unexpected Content-Length in chunked response")
-
-		n2, werr2 := io.write_string(w, "after")
-		testing.expect_value(t, werr2, io.Error.Closed)
-		testing.expect_value(t, n2, 0)
 	}
 }
 
@@ -741,5 +719,60 @@ test_headers_allocator_errors_and_readonly :: proc(t: ^testing.T) {
 		vp^ = "val"
 		v_ent, has_ent := http.headers_get(empty, "x-entry")
 		testing.expect(t, has_ent && v_ent == "val", "expected inserted entry value to be readable")
+	}
+}
+
+@(test)
+test_constraint_bufs :: proc(t: ^testing.T) {
+	backing: [128]byte
+
+	// 1. Single slice larger than max trims to max.
+	{
+		bufs := [?][]byte{backing[:100]}
+		out := http._constraint_bufs(bufs[:], 80)
+		testing.expect_value(t, len(out), 1)
+		testing.expect_value(t, len(out[0]), 80)
+	}
+
+	// 2. Exact boundary across two slices drops the second slice completely.
+	{
+		bufs := [?][]byte{backing[:50], backing[50:100]}
+		out := http._constraint_bufs(bufs[:], 50)
+		testing.expect_value(t, len(out), 1)
+		testing.expect_value(t, len(out[0]), 50)
+	}
+
+	// 3. Multi-slice truncating into the first slice.
+	{
+		bufs := [?][]byte{backing[:50], backing[50:100]}
+		out := http._constraint_bufs(bufs[:], 30)
+		testing.expect_value(t, len(out), 1)
+		testing.expect_value(t, len(out[0]), 30)
+	}
+
+	// 4. Multi-slice partial trim of the second slice.
+	{
+		bufs := [?][]byte{backing[:50], backing[50:100]}
+		out := http._constraint_bufs(bufs[:], 70)
+		testing.expect_value(t, len(out), 2)
+		testing.expect_value(t, len(out[0]), 50)
+		testing.expect_value(t, len(out[1]), 20)
+	}
+
+	// 5. Trailing empty slice is dropped and preceding slice trimmed accurately.
+	{
+		bufs := [?][]byte{backing[:100], nil}
+		out := http._constraint_bufs(bufs[:], 80)
+		testing.expect_value(t, len(out), 1)
+		testing.expect_value(t, len(out[0]), 80)
+	}
+
+	// 6. No-op when total <= max.
+	{
+		bufs := [?][]byte{backing[:40], backing[40:60]}
+		out := http._constraint_bufs(bufs[:], 60)
+		testing.expect_value(t, len(out), 2)
+		testing.expect_value(t, len(out[0]), 40)
+		testing.expect_value(t, len(out[1]), 20)
 	}
 }

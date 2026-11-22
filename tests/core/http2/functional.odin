@@ -988,30 +988,6 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 		http.context_add(ctx, Chunk_Chain_State{})
 		http.send_chunk(&ctx.res, {transmute([]byte)string("one-")}, on_chunk_chain)
 	})
-	http.route_get(&r, "/writer", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "Content-Type", "application/x-ndjson")
-		cw: http.Chunked_Writer
-		w := http.chunked_writer_init(&cw, &ctx.res, chunk_size = 8)
-		defer io.close(w)
-
-		fmt.wprintln(w, "line1")
-		io.flush(w)
-		opt: json.Marshal_Options
-		json.marshal_to_writer(w, Json_Payload{msg = "stream", count = 7}, &opt)
-	})
-	http.route_get(&r, "/writer-unbuffered", proc(ctx: ^http.Ctx) {
-		cw: http.Chunked_Writer
-		w := http.chunked_writer_init(&cw, &ctx.res, chunk_size = 0)
-		defer io.close(w)
-
-		io.write_string(w, "alpha-")
-		io.write_string(w, "beta")
-	})
-	http.route_get(&r, "/writer-empty", proc(ctx: ^http.Ctx) {
-		cw: http.Chunked_Writer
-		w := http.chunked_writer_init(&cw, &ctx.res)
-		io.close(w)
-	})
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
@@ -1027,20 +1003,17 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 	}
 
 	Respond_Helpers_Context :: struct {
-		server:            ^http.Server,
-		endpoint_err:      net.Socket_Info_Error,
-		handle_ok:         bool,
-		plain:             File_Case_Result,
-		html:              File_Case_Result,
-		json_get:          File_Case_Result,
-		json_head:         File_Case_Result,
-		json_err:          File_Case_Result,
-		chunks:            File_Case_Result,
-		writer:            File_Case_Result,
-		writer_unbuffered: File_Case_Result,
-		writer_empty:      File_Case_Result,
-		writer_head:       File_Case_Result,
-		after_keepalive:   File_Case_Result,
+		server:          ^http.Server,
+		endpoint_err:    net.Socket_Info_Error,
+		handle_ok:       bool,
+		plain:           File_Case_Result,
+		html:            File_Case_Result,
+		json_get:        File_Case_Result,
+		json_head:       File_Case_Result,
+		json_err:        File_Case_Result,
+		chunks:          File_Case_Result,
+		chunks_head:     File_Case_Result,
+		after_keepalive: File_Case_Result,
 	}
 
 	ctx := Respond_Helpers_Context{server = &server}
@@ -1050,10 +1023,7 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 	defer delete(ctx.json_head.response.body)
 	defer delete(ctx.json_err.response.body)
 	defer delete(ctx.chunks.response.body)
-	defer delete(ctx.writer.response.body)
-	defer delete(ctx.writer_unbuffered.response.body)
-	defer delete(ctx.writer_empty.response.body)
-	defer delete(ctx.writer_head.response.body)
+	defer delete(ctx.chunks_head.response.body)
 	defer delete(ctx.after_keepalive.response.body)
 
 	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
@@ -1097,17 +1067,14 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 			}
 		}
 
-		do_req(handle, endpoint.port, "/plain",             false, &ctx.plain)
-		do_req(handle, endpoint.port, "/html",              false, &ctx.html)
-		do_req(handle, endpoint.port, "/json",              false, &ctx.json_get)
-		do_req(handle, endpoint.port, "/json",              true,  &ctx.json_head)
-		do_req(handle, endpoint.port, "/json-err",          false, &ctx.json_err)
-		do_req(handle, endpoint.port, "/chunks",            false, &ctx.chunks)
-		do_req(handle, endpoint.port, "/writer",            false, &ctx.writer)
-		do_req(handle, endpoint.port, "/writer-unbuffered", false, &ctx.writer_unbuffered)
-		do_req(handle, endpoint.port, "/writer-empty",      false, &ctx.writer_empty)
-		do_req(handle, endpoint.port, "/writer",            true,  &ctx.writer_head)
-		do_req(handle, endpoint.port, "/plain",             false, &ctx.after_keepalive)
+		do_req(handle, endpoint.port, "/plain",    false, &ctx.plain)
+		do_req(handle, endpoint.port, "/html",     false, &ctx.html)
+		do_req(handle, endpoint.port, "/json",     false, &ctx.json_get)
+		do_req(handle, endpoint.port, "/json",     true,  &ctx.json_head)
+		do_req(handle, endpoint.port, "/json-err", false, &ctx.json_err)
+		do_req(handle, endpoint.port, "/chunks",   false, &ctx.chunks)
+		do_req(handle, endpoint.port, "/chunks",   true,  &ctx.chunks_head)
+		do_req(handle, endpoint.port, "/plain",    false, &ctx.after_keepalive)
 	})
 
 	http._serve(&server)
@@ -1131,17 +1098,14 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(res.response.body[:]), expect_body)
 	}
 
-	check(t, "plain",             &ctx.plain,             200, true,  "text/plain",           "hello plain")
-	check(t, "html",              &ctx.html,              200, true,  "text/html",            "<h1>hello</h1>")
-	check(t, "json_get",          &ctx.json_get,          200, true,  "application/json",     `{"msg":"ok","count":3}`)
-	check(t, "json_head",         &ctx.json_head,         200, true,  "application/json",     "")
-	check(t, "json_err",          &ctx.json_err,          500, true,  "text/plain",           "marshal error")
-	check(t, "chunks",            &ctx.chunks,            200, false, "",                     "one-two-three")
-	check(t, "writer",            &ctx.writer,            200, true,  "application/x-ndjson", "line1\n" + `{"msg":"stream","count":7}`)
-	check(t, "writer_unbuffered", &ctx.writer_unbuffered, 200, false, "",                     "alpha-beta")
-	check(t, "writer_empty",      &ctx.writer_empty,      200, false, "",                     "")
-	check(t, "writer_head",       &ctx.writer_head,       200, true,  "application/x-ndjson", "")
-	check(t, "after_keepalive",   &ctx.after_keepalive,   200, true,  "text/plain",           "hello plain")
+	check(t, "plain",           &ctx.plain,           200, true,  "text/plain",       "hello plain")
+	check(t, "html",            &ctx.html,            200, true,  "text/html",        "<h1>hello</h1>")
+	check(t, "json_get",        &ctx.json_get,        200, true,  "application/json", `{"msg":"ok","count":3}`)
+	check(t, "json_head",       &ctx.json_head,       200, true,  "application/json", "")
+	check(t, "json_err",        &ctx.json_err,        500, true,  "text/plain",       "marshal error")
+	check(t, "chunks",          &ctx.chunks,          200, false, "",                 "one-two-three")
+	check(t, "chunks_head",     &ctx.chunks_head,     200, false, "",                 "")
+	check(t, "after_keepalive", &ctx.after_keepalive, 200, true,  "text/plain",       "hello plain")
 }
 
 @(test)
@@ -2560,6 +2524,303 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 	testing.expect(t, srv_check.peak_after_cl > 0 && srv_check.peak_after_cl < 768 * mem.Kilobyte, "expected O(1) bounded peak memory during 2 MiB Content-Length streaming")
 	testing.expect(t, srv_check.peak_after_chunked > 0 && srv_check.peak_after_chunked < 768 * mem.Kilobyte, "expected O(1) bounded peak memory during 2 MiB chunked streaming")
 	testing.expect(t, server_track.peak_memory_allocated < 768 * mem.Kilobyte, "expected bounded peak memory after 128 KiB body_parser upload")
+
+	testing.expect_value(t, server_track.current_memory_allocated, 0)
+	testing.expect_value(t, len(server_track.bad_free_array), 0)
+}
+
+@(test)
+test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 10 * time.Second)
+
+	STREAM_SIZE :: 2 * mem.Megabyte
+	CHUNK_SIZE  :: 4 * mem.Kilobyte
+	BURST_CHUNKS :: 4
+	BURST_CHUNK_SIZE :: 1024
+
+	fnv1a_step :: proc(h: u64, data: []byte) -> u64 {
+		res := h
+		for b in data {
+			res = (res ~ u64(b)) * 1099511628211
+		}
+		return res
+	}
+
+	write_pattern :: proc(buf: []byte, start_pos: int) {
+		for i in 0..<len(buf) {
+			buf[i] = u8(((start_pos + i) * 31 + 7) & 0xFF)
+		}
+	}
+
+	expected_hash_for :: proc(total: int) -> u64 {
+		h: u64 = 14695981039346656037
+		buf: [16 * 1024]byte
+		pos := 0
+		for pos < total {
+			n := min(len(buf), total - pos)
+			write_pattern(buf[:n], pos)
+			h = fnv1a_step(h, buf[:n])
+			pos += n
+		}
+		return h
+	}
+
+	server_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&server_track, context.allocator)
+	server_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	defer mem.tracking_allocator_destroy(&server_track)
+
+	Server_Peak_Check :: struct {
+		track:                ^mem.Tracking_Allocator,
+		peak_seq:             i64,
+		peak_burst:           i64,
+		seq_zero_tx_growth:   bool,
+		burst_zero_tx_growth: bool,
+		burst_saw_multi:      bool,
+	}
+	srv_check := Server_Peak_Check{track = &server_track}
+
+	r: http.Router
+	defer http.router_destroy(r)
+
+	// 1. Sequential send_chunk streaming (depth=1, reusing one 4 KiB buffer and inline_hdr).
+	Seq_State :: struct {
+		buf:            [CHUNK_SIZE]byte,
+		pos:            int,
+		chunks:         int,
+		tx_tail_1:      rawptr,
+		tx_offset_1:    int,
+		chk:            ^Server_Peak_Check,
+	}
+	http.route_get(&r, "/seq", http.Handler{
+		user_data = &srv_check,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			chk := (^Server_Peak_Check)(h.user_data)
+			if _, err := http.context_add(ctx, Seq_State{chk = chk}); err != nil {
+				ctx.res.status = .Internal_Server_Error
+				http.respond(&ctx.res)
+				return
+			}
+
+			send_next :: proc(c: ^http.Connection, err: http.Send_Error) {
+				if err != nil || c.res._state == .Error {
+					return
+				}
+				st := http.context_get(&c.ctx, Seq_State)
+				if st.pos >= STREAM_SIZE {
+					st.chk.peak_seq = st.chk.track.peak_memory_allocated
+					st.chk.seq_zero_tx_growth =
+						st.tx_tail_1 != nil &&
+						rawptr(c.transaction_arena.tail) == st.tx_tail_1 &&
+						c.transaction_arena.tail.offset == st.tx_offset_1
+					http.respond(&c.res)
+					return
+				}
+				n := min(len(st.buf), STREAM_SIZE - st.pos)
+				for i in 0..<n {
+					st.buf[i] = u8(((st.pos + i) * 31 + 7) & 0xFF)
+				}
+				st.pos    += n
+				st.chunks += 1
+				http.send_chunk(&c.res, {st.buf[:n]}, send_next)
+				if st.chunks == 1 && c.transaction_arena.tail != nil {
+					st.tx_tail_1   = c.transaction_arena.tail
+					st.tx_offset_1 = c.transaction_arena.tail.offset
+				}
+			}
+
+			send_next(http.connection_of_context(ctx), nil)
+		},
+	})
+
+	// 2. Bursty send_chunk streaming (4 x 1 KiB chunks per burst, draining to _sends == 0 between bursts).
+	Burst_State :: struct {
+		bufs:        [BURST_CHUNKS][BURST_CHUNK_SIZE]byte,
+		pos:         int,
+		bursts:      int,
+		tx_tail_1:   rawptr,
+		tx_offset_1: int,
+		chk:         ^Server_Peak_Check,
+	}
+	http.route_get(&r, "/burst", http.Handler{
+		user_data = &srv_check,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			chk := (^Server_Peak_Check)(h.user_data)
+			if _, err := http.context_add(ctx, Burst_State{chk = chk}); err != nil {
+				ctx.res.status = .Internal_Server_Error
+				http.respond(&ctx.res)
+				return
+			}
+
+			send_burst :: proc(c: ^http.Connection) {
+				if c.res._state == .Error {
+					return
+				}
+				st := http.context_get(&c.ctx, Burst_State)
+				if st.pos >= STREAM_SIZE {
+					st.chk.peak_burst = st.chk.track.peak_memory_allocated
+					st.chk.burst_zero_tx_growth =
+						st.tx_tail_1 != nil &&
+						rawptr(c.transaction_arena.tail) == st.tx_tail_1 &&
+						c.transaction_arena.tail.offset == st.tx_offset_1
+					http.respond(&c.res)
+					return
+				}
+
+				st.bursts += 1
+				for i in 0..<BURST_CHUNKS {
+					if st.pos >= STREAM_SIZE {
+						break
+					}
+					n := min(len(st.bufs[i]), STREAM_SIZE - st.pos)
+					for j in 0..<n {
+						st.bufs[i][j] = u8(((st.pos + j) * 31 + 7) & 0xFF)
+					}
+					st.pos += n
+					if c.res._sends > 0 {
+						st.chk.burst_saw_multi = true
+					}
+					http.send_chunk(&c.res, {st.bufs[i][:n]}, on_burst_part)
+				}
+				if st.bursts == 1 && c.transaction_arena.tail != nil {
+					st.tx_tail_1   = c.transaction_arena.tail
+					st.tx_offset_1 = c.transaction_arena.tail.offset
+				}
+			}
+
+			on_burst_part :: proc(c: ^http.Connection, err: http.Send_Error) {
+				if err != nil || c.res._state == .Error || c.res._sends > 0 {
+					return
+				}
+				send_burst(c)
+			}
+
+			send_burst(http.connection_of_context(ctx))
+		},
+	})
+
+	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
+		http.respond_plain(&ctx.res, "still-alive")
+	})
+
+	server := http.make_server(http.Server_Options{
+		address        = nbio.IP4_Loopback,
+		port           = 18099,
+		thread_count   = 1,
+		response_quota = http.UNLIMITED_QUOTA,
+		handler        = http.router(&r),
+	}, mem.tracking_allocator(&server_track))
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Hash_Result :: struct {
+		setopt_ok:   bool,
+		perform_err: curl.code,
+		getinfo_err: curl.code,
+		status:      c.long,
+		count:       int,
+		hash:        u64,
+		small_buf:   [64]byte,
+		small_len:   int,
+	}
+
+	Client_Result :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		handle_ok:    bool,
+		seq:          Hash_Result,
+		burst:        Hash_Result,
+		after:        Hash_Result,
+	}
+	res := Client_Result{server = &server}
+
+	client_thread := thread.create_and_start_with_data(&res, proc(data: rawptr) {
+		res := (^Client_Result)(data)
+		defer http.server_shutdown(res.server)
+
+		endpoint, ep_err := nbio.bound_endpoint(res.server.socket)
+		res.endpoint_err = ep_err
+		if ep_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		res.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		write_hash :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+			r := (^Hash_Result)(userp)
+			n := int(size) * int(nmemb)
+			for i in 0..<n {
+				r.hash = (r.hash ~ u64(contents[i])) * 1099511628211
+			}
+			if r.count < len(r.small_buf) {
+				copied := copy(r.small_buf[r.small_len:], contents[:min(n, len(r.small_buf) - r.small_len)])
+				r.small_len += copied
+			}
+			r.count += n
+			return c.size_t(n)
+		}
+
+		do_req :: proc(handle: ^curl.CURL, port: int, path: string, out: ^Hash_Result) {
+			out.hash = 14695981039346656037
+			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
+			out.setopt_ok =
+				curl.easy_setopt(handle, .HTTPGET, c.long(1)) == .E_OK &&
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, write_hash) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, out) == .E_OK
+			if !out.setopt_ok {
+				return
+			}
+			out.perform_err = curl.easy_perform(handle)
+			out.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &out.status)
+		}
+
+		do_req(handle, endpoint.port, "/seq",   &res.seq)
+		do_req(handle, endpoint.port, "/burst", &res.burst)
+		do_req(handle, endpoint.port, "/after", &res.after)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	testing.expect_value(t, res.endpoint_err, nil)
+	testing.expect(t, res.handle_ok, "curl.easy_init failed")
+
+	expected_hash := expected_hash_for(STREAM_SIZE)
+
+	check_stream :: proc(t: ^testing.T, name: string, got: ^Hash_Result, exp_len: int, exp_hash: u64) {
+		testing.expectf(t, got.setopt_ok, "%s: setopt failed", name)
+		testing.expectf(t, got.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(got.perform_err))
+		testing.expect_value(t, got.getinfo_err, curl.code.E_OK)
+		testing.expect_value(t, got.status, c.long(200))
+		testing.expect_value(t, got.count, exp_len)
+		testing.expect_value(t, got.hash, exp_hash)
+	}
+
+	check_stream(t, "seq",   &res.seq,   STREAM_SIZE, expected_hash)
+	check_stream(t, "burst", &res.burst, STREAM_SIZE, expected_hash)
+
+	testing.expect_value(t, res.after.perform_err, curl.code.E_OK)
+	testing.expect_value(t, res.after.status, c.long(200))
+	testing.expect_value(t, string(res.after.small_buf[:res.after.small_len]), "still-alive")
+
+	testing.expect(t, srv_check.seq_zero_tx_growth, "expected zero transaction_arena growth after first sequential chunk")
+	testing.expect(t, srv_check.burst_saw_multi, "expected bursty send_chunk to have overlapping sends in flight")
+	testing.expect(t, srv_check.burst_zero_tx_growth, "expected zero transaction_arena growth after first drained burst")
+	testing.expect(t, srv_check.peak_seq > 0 && srv_check.peak_seq < 256 * mem.Kilobyte, "expected O(1) bounded peak memory during 2 MiB sequential send_chunk")
+	testing.expect(t, srv_check.peak_burst > 0 && srv_check.peak_burst < 256 * mem.Kilobyte, "expected O(max_burst) bounded peak memory during 2 MiB bursty send_chunk")
+	testing.expect(t, server_track.peak_memory_allocated < 256 * mem.Kilobyte, "expected O(1) bounded overall server peak memory across all 2 MiB streams")
 
 	testing.expect_value(t, server_track.current_memory_allocated, 0)
 	testing.expect_value(t, len(server_track.bad_free_array), 0)

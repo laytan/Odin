@@ -5,7 +5,6 @@ import "base:intrinsics"
 import "base:runtime"
 
 import "core:encoding/json"
-import "core:io"
 import "core:log"
 import "core:mem"
 import "core:nbio"
@@ -336,6 +335,26 @@ send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	}
 }
 
+_constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
+	total: int
+	for buf in bufs {
+		total += len(buf)
+	}
+
+	constrained := bufs
+	for n := total; n > max; {
+		last := &constrained[len(constrained)-1]
+		take := min(len(last), n-max)
+		last^ = last[:len(last)-take]
+		if len(last) == 0 {
+			constrained = constrained[:len(constrained)-1]
+		}
+		n -= take
+	}
+
+	return constrained
+}
+
 _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 	bufs := bufs
 	c := connection_of_response(res)
@@ -349,7 +368,7 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 	}
 
 	if max > 0 {
-		bufs = constraint_bufs(bufs, max)
+		bufs = _constraint_bufs(bufs, max)
 	}
 
 	if timeout < 0 {
@@ -359,31 +378,19 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 	res._sends += 1
 	res._last_send = now()
 	nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
+}
 
-	constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
-		total: int
-		for buf in bufs {
-			total += len(buf)
-		}
-
-		constrained := bufs
-		for n := total; n > max; {
-			last := &constrained[len(constrained)-1]
-			take := min(len(last), n-max)
-			last^ = last[:take]
-			if len(last) == 0 {
-				constrained = constrained[:len(constrained)-1]
-			}
-			n -= take
-		}
-
-		return constrained
-	}
+@(private="file")
+_Chunk_Header :: struct {
+	buf:  [20]byte,
+	next: ^_Chunk_Header,
 }
 
 @(private="file")
 _Chunked_State :: struct {
-	hdr: [20]byte,
+	inline_hdr: _Chunk_Header,
+	in_flight:  ^_Chunk_Header,
+	free:       ^_Chunk_Header,
 }
 
 @(private="file")
@@ -419,6 +426,7 @@ _begin_chunked :: proc(res: ^Response) -> ^_Chunked_State {
 		_check_send_done(c, skip_graceful = true)
 		return nil
 	}
+	state.free = &state.inline_hdr
 	return state
 }
 
@@ -509,8 +517,9 @@ respond_html :: proc(res: ^Response, html: string) {
 /*
 Marshals `v` as JSON into the transaction arena and sends the response with `Content-Type: application/json` (if unset).
 Buffering the serialized JSON sets an exact `Content-Length` and returns any marshal error before headers are sent.
-If you need to stream large JSON payloads without buffering the entire body in memory, use `chunked_writer_init`
-with `json.marshal_to_writer` instead.
+For custom streaming or incremental formatting without buffering the whole payload, write into a reusable
+`strings.Builder` (or buffer) and emit chunks with `send_chunk(..., on_sent)`, or build into `transaction_allocator`
+with `strings.to_writer` and finish with `respond_bytes`.
 */
 respond_json :: proc(res: ^Response, v: any, opt: json.Marshal_Options = {}, loc := #caller_location) -> json.Marshal_Error {
 	c := connection_of_response(res)
@@ -520,6 +529,16 @@ respond_json :: proc(res: ^Response, v: any, opt: json.Marshal_Options = {}, loc
 	return nil
 }
 
+/*
+Streams HTTP/1.1 `Transfer-Encoding: chunked` body data.
+
+`bufs` are sent zero-copy (underlying memory must remain valid until `on_sent` runs or the response
+completes; the outer `bufs` slice itself may be temporary). Chunk headers are pooled per response and
+recycled lazily whenever `res._sends == 0` (O(1) memory for sequential `on_sent` streaming and
+O(max_burst) memory for bursty streams that drain between bursts). Pass `on_sent` for async
+backpressure so a producer can wait for the previous chunk to drain before generating or reusing buffers.
+Streaming loops should check `wants_body(request_of_response(res))` to avoid generating bodies for `HEAD`.
+*/
 send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	if res._state == .Error {
 		return
@@ -545,21 +564,31 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 		return
 	}
 
-	hdr: []byte
 	if res._sends == 0 {
-		hdr = _write_chunk_header(state.hdr[:], total)
+		for state.in_flight != nil {
+			node := state.in_flight
+			state.in_flight = node.next
+			node.next = state.free
+			state.free = node
+		}
+	}
+
+	node := state.free
+	if node != nil {
+		state.free = node.next
 	} else {
-		tmp: [20]byte
-		raw := _write_chunk_header(tmp[:], total)
 		alloc_err: runtime.Allocator_Error
-		hdr, alloc_err = make([]byte, len(raw), transaction_allocator(c))
+		node, alloc_err = new(_Chunk_Header, transaction_allocator(c))
 		if alloc_err != nil {
 			res._state = .Error
-			_check_send_done(c)
+			_check_send_done(c, skip_graceful = true)
 			return
 		}
-		copy(hdr, raw)
 	}
+	node.next = state.in_flight
+	state.in_flight = node
+
+	hdr := _write_chunk_header(node.buf[:], total)
 
 	framed_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (non_empty + 2), align_of([]byte)))[:non_empty + 2]
 	framed_bufs[0] = hdr
@@ -573,143 +602,6 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 	framed_bufs[idx] = transmute([]byte)string("\r\n")
 
 	send(res, framed_bufs, on_sent)
-}
-
-DEFAULT_CHUNK_SIZE :: 4 * mem.Kilobyte
-
-Chunked_Writer :: struct {
-	res:        ^Response,
-	buf:        [dynamic]byte,
-	chunk_size: int,
-	ended:      bool,
-}
-
-/*
-Initializes an `io.Writer` that sends HTTP/1.1 `Transfer-Encoding: chunked` body chunks via `send_chunk`.
-Writes smaller than `chunk_size` are buffered in the transaction arena until `chunk_size` is reached or `io.flush`/`io.close`
-is called; pass `chunk_size <= 0` to flush every `.Write` immediately.
-Call `io.close` when finished to flush remaining bytes and finalize the response with `respond`.
-*/
-chunked_writer_init :: proc(cw: ^Chunked_Writer, res: ^Response, chunk_size := DEFAULT_CHUNK_SIZE) -> io.Writer {
-	_begin_chunked(res)
-	cw^ = Chunked_Writer{
-		res        = res,
-		chunk_size = chunk_size,
-	}
-
-	return io.Writer{
-		data = cw,
-		procedure = proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
-			flush_buf :: proc(cw: ^Chunked_Writer) {
-				if len(cw.buf) == 0 { return }
-				send_chunk(cw.res, {cw.buf[:]})
-				// Detach instead of clearing so the in-flight async send buffer is never mutated.
-				cw.buf = {}
-			}
-
-			send_copy :: proc(cw: ^Chunked_Writer, data: []byte, tx_alloc: runtime.Allocator) -> io.Error {
-				copy_buf, alloc_err := make([]byte, len(data), tx_alloc)
-				if alloc_err != nil {
-					return .Buffer_Full
-				}
-				copy(copy_buf, data)
-				send_chunk(cw.res, {copy_buf})
-				return nil
-			}
-
-			cw := (^Chunked_Writer)(stream_data)
-
-			#partial switch mode {
-			case .Write:
-				if cw.ended || cw.res._state == .Error {
-					return 0, .Closed
-				}
-				if len(p) == 0 {
-					return 0, nil
-				}
-
-				tx_alloc := transaction_allocator(connection_of_response(cw.res))
-				if cw.chunk_size <= 0 {
-					send_copy(cw, p, tx_alloc) or_return
-				} else if len(cw.buf) == 0 && len(p) >= cw.chunk_size {
-					send_copy(cw, p, tx_alloc) or_return
-				} else {
-					if len(cw.buf) > 0 && len(cw.buf) + len(p) > cw.chunk_size {
-						flush_buf(cw)
-						if cw.res._state == .Error {
-							return 0, .Closed
-						}
-					}
-
-					if len(p) >= cw.chunk_size {
-						send_copy(cw, p, tx_alloc) or_return
-					} else {
-						if cap(cw.buf) == 0 {
-							buf, alloc_err := make([dynamic]byte, 0, cw.chunk_size, tx_alloc)
-							if alloc_err != nil {
-								return 0, .Buffer_Full
-							}
-							cw.buf = buf
-						}
-						if _, alloc_err := append(&cw.buf, ..p); alloc_err != nil {
-							return 0, .Buffer_Full
-						}
-						if len(cw.buf) >= cw.chunk_size {
-							flush_buf(cw)
-						}
-					}
-				}
-
-				if cw.res._state == .Error {
-					return 0, .Closed
-				}
-				return i64(len(p)), nil
-
-			case .Flush:
-				if cw.ended || cw.res._state == .Error {
-					return 0, .Closed
-				}
-				if len(cw.buf) > 0 {
-					flush_buf(cw)
-				} else if cw.res._state == .None || cw.res._state == .Handling {
-					send_chunk(cw.res, nil)
-				}
-				if cw.res._state == .Error {
-					return 0, .Closed
-				}
-				return 0, nil
-
-			case .Destroy:
-				if !cw.ended {
-					if len(cw.buf) > 0 && cw.res._state != .Error {
-						flush_buf(cw)
-					}
-					cw.ended = true
-				}
-				return 0, nil
-
-			case .Close:
-				if !cw.ended {
-					if len(cw.buf) > 0 && cw.res._state != .Error {
-						flush_buf(cw)
-					}
-					cw.ended = true
-				}
-				if cw.res._state != .Sent && cw.res._state != .Error {
-					respond(cw.res)
-				}
-				if cw.res._state == .Error {
-					return 0, .Closed
-				}
-				return 0, nil
-
-			case .Query:
-				return io.query_utility({.Write, .Flush, .Destroy, .Close})
-			}
-
-			return 0, .Unsupported
-		},
-	}
 }
 
 send_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
