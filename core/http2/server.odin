@@ -9,7 +9,6 @@ import "base:sanitizer"
 import "core:container/xar"
 import "core:io"
 import "core:log"
-import "core:mem/virtual"
 import "core:nbio"
 import "core:os"
 import "core:strings"
@@ -29,8 +28,6 @@ Server :: struct {
 	shutting_down:   bool,
 	shutdown_mutex:  sync.Mutex,
 	_has_event_loop: bool,
-
-	temp_allocator_backing: virtual.Arena,
 }
 
 Endpoint :: nbio.Endpoint
@@ -886,15 +883,11 @@ _destroy :: proc(s: ^Server) {
 		s.socket = {}
 	}
 
-	virtual.arena_destroy(&s.temp_allocator_backing)
-
 	if s._has_event_loop {
 		nbio.release_thread_event_loop()
 		s._has_event_loop = false
 	}
 }
-
-_DEFAULT_BLOCK_SIZE :: runtime.Gigabyte
 
 _setup :: proc(s: ^Server) -> (err: Server_Error) {
 	if s.allocator.procedure == nil {
@@ -914,10 +907,6 @@ _setup :: proc(s: ^Server) -> (err: Server_Error) {
 		case nbio.Create_Socket_Error: return lerr
 		case nbio.Bind_Error:          return lerr
 		}
-	}
-
-	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, _DEFAULT_BLOCK_SIZE); arena_err != nil {
-		return .Allocation_Failed
 	}
 
 	headers_init_hash_secret()

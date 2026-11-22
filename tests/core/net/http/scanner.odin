@@ -3,7 +3,6 @@ package test_core_net_http
 import "core:fmt"
 import "core:io"
 import "core:mem"
-import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 
@@ -11,10 +10,8 @@ import http "core:http2"
 
 @(test)
 test_scanner_reset_frees_transaction_arena_when_empty :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -29,7 +26,7 @@ test_scanner_reset_frees_transaction_arena_when_empty :: proc(t: ^testing.T) {
 	c.transaction_arena.c = &c
 	c.temp_arena.c = &c
 
-	used_after_first: uint
+	allocs_after_first: int
 	for cycle in 0..<5 {
 		tx_alloc := http.transaction_allocator(&c)
 		tmp_alloc := http.temp_allocator(&c)
@@ -52,9 +49,9 @@ test_scanner_reset_frees_transaction_arena_when_empty :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.scanner.write_head, 0)
 
 		if cycle == 0 {
-			used_after_first = s.temp_allocator_backing.total_used
+			allocs_after_first = counter.alloc_count
 		} else {
-			testing.expect_value(t, s.temp_allocator_backing.total_used, used_after_first)
+			testing.expect_value(t, counter.alloc_count, allocs_after_first)
 		}
 	}
 }
@@ -67,10 +64,7 @@ test_scanner_reset_preserves_pipelined_bytes :: proc(t: ^testing.T) {
 		called:   bool,
 	}
 
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -190,10 +184,7 @@ Chunked_Body_Expectation :: struct {
 
 @(test)
 test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -264,10 +255,7 @@ test_scan_temp_line_uses_temp_arena :: proc(t: ^testing.T) {
 		called:   bool,
 	}
 
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -322,10 +310,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 		called: bool,
 	}
 
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -470,9 +455,6 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 @(test)
 test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -598,9 +580,6 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 @(test)
 test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -868,8 +847,6 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: ^http.Handler, payload: string, env: ^Test_Env) {
 		test_handler.user_data = state
 		env.s = http.make_server({handler = test_handler^})
-		err := virtual.arena_init_growing(&env.s.temp_allocator_backing, 64 * mem.Megabyte)
-		testing.expect_value(t, err, nil)
 
 		env.thread = http.Server_Thread{s = &env.s, id = 1}
 		env.prev = http.td
@@ -897,7 +874,6 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		http.transaction_allocator_destroy(&env.c)
 		http._server_thread_free_arenas_destroy(&env.thread)
 		http.td = env.prev
-		virtual.arena_destroy(&env.s.temp_allocator_backing)
 	}
 
 	// 1. Unconsumed Content-Length body requires closing, writes Connection: close, and schedules no body scan.
@@ -1072,9 +1048,6 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		}
 
 		s := http.make_server({handler = handler})
-		err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-		testing.expect_value(t, err, nil)
-		defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
@@ -1096,9 +1069,6 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	}
 
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td

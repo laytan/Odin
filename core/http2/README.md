@@ -8,7 +8,7 @@
 - **Native `core:nbio` integration**: One `nbio.Event_Loop` per worker thread with per-thread connection pools (`xar.Freelist_Array`) and 1-second cached `Date` headers.
 - **Dual per-connection arenas**:
   - `transaction_arena`: Lives for a single HTTP request/response cycle (request line, headers, `Ctx` vars, response headers/buffer).
-  - `temp_arena`: Bound to `context.temp_allocator`; calling `free_all(context.temp_allocator)` automatically preserves unread `Scanner` bytes and recycles arena blocks to thread-local power-of-two freelists (`4 KiB`–`256 MiB`).
+  - `temp_arena`: Bound to `context.temp_allocator`; calling `free_all(context.temp_allocator)` automatically preserves unread `Scanner` bytes and recycles arena blocks to thread-local power-of-two freelists (`4 KiB`–`16 MiB`).
 - **Secure by default**:
   - `Quota` & `Progression` enforce byte caps, minimum/maximum timeouts, and minimum transfer rates (`min_rate` / `rate_add`) to resist Slowloris and resource exhaustion.
   - Strict RFC 9112 parsing and header validation to prevent HTTP/1.1 request smuggling (`CL.TE`, `TE.CL`, `TE.TE`), header injection, and hash-table DoS.
@@ -25,7 +25,7 @@
 | --- | --- |
 | `server.odin` | `Server`, `Server_Options`, `Server_Thread`, `Connection`, `Ctx` (`context_add`/`context_get`), `Request`, `Response`, connection lifecycle, header validation, response heading serialization, shutdown. |
 | `scanner.odin` | Pull-based async `Scanner` (`Scan_Splitter`: `split_line`, `split_n`, `split_at_most`), `Content-Length` and `Transfer-Encoding: chunked` body decoding, trailer parsing. |
-| `arena.odin` | `Arena` and `_Arena_Block` power-of-two bucketed freelists per thread backed by `virtual.Arena`, with ASAN poisoning. |
+| `arena.odin` | `Arena` and `_Arena_Block` power-of-two bucketed freelists per thread backed by `Server.allocator`, with ASAN poisoning. |
 | `quota.odin` | `Quota` and `Progression` state machine tracking transfer limits, min/max durations, and min transfer rate for headers, bodies, and responses. |
 | `respond.odin` | Streaming primitives (`send`, `send_file`) and response finalizers (`respond`, `respond_bytes`, `respond_handle`, `respond_file`, `respond_file_path`), single-range `Range` and `If-Range` handling. |
 | `headers.odin` | Case-insensitive open-addressed hash table using inline-lowercased SipHash (`Headers`), multi-value support (`headers_add`, `headers_get_all_iter`), and readonly protection. |
@@ -115,7 +115,8 @@
 
 ### Memory Management Follow-Ups (For Further Review)
 
-- [ ] **Arena pooling & backing strategy (`arena.odin`, `server.odin`)**: Review `1 GiB` initial `virtual.Arena` reserve, giant-block stealing across `bucket..<BUCKETS` in `_server_thread_get_free_arena`, and unshrinkable per-thread `free_arenas` retention after traffic spikes.
+- [x] **Arena pooling & backing strategy (`arena.odin`, `server.odin`)**: Replaced `1 GiB` `virtual.Arena` (`temp_allocator_backing`) with `Server.allocator` backing (`_arena_backing_allocator` / `_arena_block_free`), narrowed pooled freelists to exact-bucket lookup for `4 KiB`–`16 MiB` (`BUCKETS :: 13`, eliminating cross-bucket giant-block stealing), and freed oversized blocks (`> 16 MiB`) at exact needed size immediately on release.
+- [ ] **Low-watermark idle decay for `free_arenas` (`arena.odin`, `server.odin`)**: Consider periodic low-watermark trimming on `date_update` to reclaim genuinely idle pooled blocks after traffic spikes without hurting steady/bursty high-traffic cache hit rates (revisit later if/when idle retention becomes a problem).
 - [ ] **Streaming `body()` memory usage (`scanner.odin`)**: Review scanning request bodies into `transaction_arena` (~2x geometric `s.buf` growth) vs `temp_arena` / reusable buffers for streaming uploads.
 - [ ] **Streaming response retention (`respond.odin`)**: Review `Chunked_Writer` and `send_chunk` retaining chunks/headers in `transaction_arena` until transaction end (plus `respond_json` doc accuracy and async backpressure).
 - [ ] **Cross-thread arena safety (`arena.odin`)**: Review thread-local `td.free_arenas` assumptions when `Arena` / `transaction_allocator` / `temp_allocator` / `arena_destroy` are touched from user worker threads.

@@ -1,7 +1,6 @@
 package test_core_net_http
 
 import "core:mem"
-import "core:mem/virtual"
 import "core:strings"
 import "core:testing"
 
@@ -70,9 +69,6 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		}
 
 		s := http.make_server({handler = handler})
-		err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-		testing.expect_value(t, err, nil)
-		defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
@@ -91,9 +87,6 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 	}
 
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td
@@ -282,9 +275,6 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 	http.headers_init_hash_secret()
 
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td

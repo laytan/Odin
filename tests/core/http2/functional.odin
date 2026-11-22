@@ -11,7 +11,6 @@ import "core:fmt"
 import "core:io"
 import "core:log"
 import "core:mem"
-import "core:mem/virtual"
 import "core:net"
 import "core:nbio"
 import "core:os"
@@ -1334,10 +1333,6 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 	}
 
 	s := http.make_server({})
-	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
-		return
-	}
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	xar.init(&thread.connections, context.allocator)
@@ -1530,10 +1525,6 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 	}
 
 	s := http.make_server({})
-	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
-		return
-	}
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	xar.init(&thread.connections, context.allocator)
@@ -1921,10 +1912,6 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	}
 
 	s := http.make_server({})
-	if arena_err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte); !testing.expect_value(t, arena_err, nil) {
-		return
-	}
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	xar.init(&thread.connections, context.allocator)
@@ -2137,13 +2124,12 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 		testing.expect(t, res.loop_nil_after_destroy, "expected _destroy after failed _setup to leave event loop released")
 	}
 
-	// 2. _setup OOM during _setup_threads closes s.socket, destroys temp_allocator_backing, and releases loop.
+	// 2. _setup OOM during _setup_threads closes s.socket and releases loop.
 	{
 		OOM_Result :: struct {
 			setup_err:      http.Server_Error,
 			socket_cleared: bool,
 			threads_nil:    bool,
-			backing_nil:    bool,
 			loop_nil:       bool,
 		}
 		res: OOM_Result
@@ -2167,7 +2153,6 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			res.setup_err      = http._setup(&s)
 			res.socket_cleared = s.socket == {}
 			res.threads_nil    = s.threads == nil
-			res.backing_nil    = s.temp_allocator_backing.curr_block == nil
 			res.loop_nil       = nbio.current_thread_event_loop() == nil
 		})
 		testing.expect(t, worker != nil, "expected helper thread created")
@@ -2176,7 +2161,6 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 		testing.expect_value(t, res.setup_err, http.Server_Error(http.General_Error.Allocation_Failed))
 		testing.expect(t, res.socket_cleared, "expected s.socket closed and cleared on _setup_threads OOM")
 		testing.expect(t, res.threads_nil, "expected s.threads nil on _setup_threads OOM")
-		testing.expect(t, res.backing_nil, "expected temp_allocator_backing destroyed on _setup_threads OOM")
 		testing.expect(t, res.loop_nil, "expected thread event loop released on _setup_threads OOM")
 	}
 
@@ -2186,7 +2170,6 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			setup_err:      http.Server_Error,
 			socket_cleared: bool,
 			threads_nil:    bool,
-			backing_nil:    bool,
 			loop_nil:       bool,
 		}
 		res: NoServe_Result
@@ -2202,7 +2185,6 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			http._destroy(&s)
 			res.socket_cleared = s.socket == {}
 			res.threads_nil    = s.threads == nil
-			res.backing_nil    = s.temp_allocator_backing.curr_block == nil
 			res.loop_nil       = nbio.current_thread_event_loop() == nil
 		})
 		testing.expect(t, worker != nil, "expected helper thread created")
@@ -2211,7 +2193,6 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 		testing.expect_value(t, res.setup_err, nil)
 		testing.expect(t, res.socket_cleared, "expected s.socket closed and cleared by _destroy")
 		testing.expect(t, res.threads_nil, "expected s.threads cleaned up and nil after _destroy")
-		testing.expect(t, res.backing_nil, "expected temp_allocator_backing destroyed after _destroy")
 		testing.expect(t, res.loop_nil, "expected event loop released cleanly")
 	}
 }

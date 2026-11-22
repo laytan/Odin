@@ -2,7 +2,6 @@ package test_core_net_http
 
 import "core:log"
 import "core:mem"
-import "core:mem/virtual"
 import "core:testing"
 import "core:time"
 import http "core:http2"
@@ -188,9 +187,6 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 
 	// 3. Body size checks honor request_set_quota overrides in both directions.
 	s := http.make_server({})
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
 
 	thread := http.Server_Thread{s = &s, id = 1}
 	prev_td := http.td

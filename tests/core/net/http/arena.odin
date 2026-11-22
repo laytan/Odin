@@ -3,17 +3,45 @@ package test_core_net_http
 import "base:runtime"
 
 import "core:mem"
-import "core:mem/virtual"
 import "core:testing"
 
 import http "core:http2"
 
+Arena_Counting_Allocator :: struct {
+	backing:     mem.Allocator,
+	alloc_count: int,
+	free_count:  int,
+}
+
+arena_counting_allocator :: proc(c: ^Arena_Counting_Allocator) -> mem.Allocator {
+	return {
+		data = c,
+		procedure = proc(
+			allocator_data: rawptr,
+			mode: mem.Allocator_Mode,
+			size, alignment: int,
+			old_memory: rawptr,
+			old_size: int,
+			location := #caller_location,
+		) -> ([]byte, mem.Allocator_Error) {
+			c := (^Arena_Counting_Allocator)(allocator_data)
+			#partial switch mode {
+			case .Alloc, .Alloc_Non_Zeroed:
+				c.alloc_count += 1
+			case .Free:
+				if old_memory != nil {
+					c.free_count += 1
+				}
+			}
+			return c.backing.procedure(c.backing.data, mode, size, alignment, old_memory, old_size, location)
+		},
+	}
+}
+
 @(test)
 test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -27,9 +55,9 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(bs1), 5000)
 	testing.expect(t, a1.tail != nil, "expected arena block to be allocated")
 	testing.expect_value(t, len(a1.tail.data), 8192)
+	testing.expect_value(t, counter.alloc_count, 1)
 
 	first_block := a1.tail
-	used_after_first := s.temp_allocator_backing.total_used
 
 	http.arena_destroy(&a1)
 	testing.expect(t, thread.free_arenas[1] == first_block, "expected 8 KiB block in bucket 1 freelist")
@@ -40,18 +68,17 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	testing.expect_value(t, alloc_err2, nil)
 	testing.expect_value(t, len(bs2), 5000)
 	testing.expect(t, a2.tail == first_block, "expected bucket 1 block to be reused")
-	testing.expect_value(t, s.temp_allocator_backing.total_used, used_after_first)
+	testing.expect_value(t, counter.alloc_count, 1)
 	testing.expect(t, thread.free_arenas[1] == nil, "expected bucket 1 freelist to be empty after reuse")
 
 	http.arena_destroy(&a2)
+	http._server_thread_free_arenas_destroy(&thread)
+	testing.expect_value(t, counter.free_count, counter.alloc_count)
 }
 
 @(test)
 test_arena_resize_and_free :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -91,55 +118,70 @@ test_arena_resize_and_free :: proc(t: ^testing.T) {
 	testing.expect_value(t, free_all_err, mem.Allocator_Error.Mode_Not_Implemented)
 }
 
-when size_of(uintptr) == 8 {
-	@(test)
-	test_arena_largest_bucket_freelist :: proc(t: ^testing.T) {
-		s: http.Server
-		err := virtual.arena_init_growing(&s.temp_allocator_backing, runtime.Gigabyte)
-		testing.expect_value(t, err, nil)
-		defer virtual.arena_destroy(&s.temp_allocator_backing)
+@(test)
+test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
+	s := http.make_server({})
 
-		thread := http.Server_Thread{s = &s}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+	thread := http.Server_Thread{s = &s}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
 
-		last_bucket := len(thread.free_arenas) - 1
+	a_big := http.get_arena(nil)
+	big_bs, big_err := http.arena_alloc(&a_big, 50_000, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, big_err, nil)
+	testing.expect_value(t, len(big_bs), 50_000)
+	big_block := a_big.tail
+	testing.expect(t, big_block != nil, "expected big block to be allocated")
+	testing.expect_value(t, len(big_block.data), 64 * mem.Kilobyte)
 
-		small := http._server_thread_get_free_arena(256 * mem.Megabyte)
-		large := http._server_thread_get_free_arena(256 * mem.Megabyte + 4096)
+	http.arena_destroy(&a_big)
+	testing.expect(t, thread.free_arenas[4] == big_block, "expected 64 KiB block cached in bucket 4")
 
-		// Push large then small so freelist order is: small -> large -> nil.
-		http._server_thread_put_free_arena(large)
-		http._server_thread_put_free_arena(small)
-		testing.expect(t, thread.free_arenas[last_bucket] == small, "expected small block at head")
-		testing.expect(t, small.prev == large, "expected large block as small.prev")
+	// Small 4 KiB request must NOT steal the cached 64 KiB block from bucket 4.
+	a_small := http.get_arena(nil)
+	defer http.arena_destroy(&a_small)
+	small_bs, small_err := http.arena_alloc(&a_small, 64, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, small_err, nil)
+	testing.expect_value(t, len(small_bs), 64)
+	testing.expect(t, a_small.tail != big_block, "expected small request not to steal cached 64 KiB block")
+	testing.expect_value(t, len(a_small.tail.data), 4096)
+	testing.expect(t, thread.free_arenas[4] == big_block, "expected 64 KiB block to remain in bucket 4")
+}
 
-		// Requesting a size > small and <= large must skip small and return large while keeping small in freelist.
-		got_large := http._server_thread_get_free_arena(256 * mem.Megabyte + 4096)
-		testing.expect(t, got_large == large, "expected large block to be matched from .prev")
-		testing.expect(t, thread.free_arenas[last_bucket] == small, "expected small block to remain in freelist")
+@(test)
+test_arena_oversized_block_not_pooled :: proc(t: ^testing.T) {
+	counter := Arena_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, arena_counting_allocator(&counter))
 
-		// Push large back: freelist is now large -> small -> nil.
-		http._server_thread_put_free_arena(got_large)
-		testing.expect(t, thread.free_arenas[last_bucket] == large, "expected large block at head")
+	thread := http.Server_Thread{s = &s}
+	prev_td := http.td
+	http.td = &thread
+	defer http.td = prev_td
+	defer http._server_thread_free_arenas_destroy(&thread)
 
-		// Requesting <= large must pop large from head and preserve small in freelist.
-		got_head := http._server_thread_get_free_arena(256 * mem.Megabyte)
-		testing.expect(t, got_head == large, "expected head block to be returned when len(data) >= size")
-		testing.expect(t, thread.free_arenas[last_bucket] == small, "expected remaining freelist tail to be preserved")
+	max_pooled := 16 * mem.Megabyte
+	req_size := max_pooled + 4096
+	a := http.get_arena(nil)
+	bs, alloc_err := http.arena_alloc(&a, req_size, mem.DEFAULT_ALIGNMENT)
+	testing.expect_value(t, alloc_err, nil)
+	testing.expect_value(t, len(bs), req_size)
+	testing.expect(t, a.tail != nil, "expected oversized block to be allocated")
+	testing.expect(t, len(a.tail.data) >= req_size + size_of(http._Arena_Block), "expected block to fit overhead + req_size")
+	testing.expect(t, len(a.tail.data) < max_pooled * 2, "expected exact size allocation rather than 2x power-of-two rounding")
+	testing.expect_value(t, counter.alloc_count, 1)
 
-		http._server_thread_put_free_arena(got_head)
+	http.arena_destroy(&a)
+	for head in thread.free_arenas {
+		testing.expect(t, head == nil, "expected oversized block not to be placed in free_arenas")
 	}
+	testing.expect_value(t, counter.free_count, 1)
 }
 
 @(test)
 test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -166,10 +208,7 @@ test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
 
 @(test)
 test_arena_resize_shrink_and_aliasing :: proc(t: ^testing.T) {
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	s := http.make_server({})
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -289,23 +328,27 @@ test_arena_resize_shrink_and_aliasing :: proc(t: ^testing.T) {
 
 @(test)
 test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
-	misalign_next_block_data_start :: proc(t: ^testing.T, s: ^http.Server, target_align: int) {
-		probe, perr := virtual.arena_alloc(&s.temp_allocator_backing, 1, 1)
+	misalign_next_block_data_start :: proc(t: ^testing.T, backing: ^mem.Arena, target_align: int) {
+		probe, perr := mem.arena_alloc_bytes(backing, 1, 1)
 		testing.expect_value(t, perr, nil)
 		next_ptr := int(uintptr(raw_data(probe)) + 1)
 		rem := ((next_ptr % target_align) + target_align) % target_align
 		desired_rem := (target_align - size_of(http._Arena_Block) + align_of(http._Arena_Block)) % target_align
 		pad := (desired_rem - rem + target_align) % target_align
 		if pad > 0 {
-			_, pad_err := virtual.arena_alloc(&s.temp_allocator_backing, uint(pad), 1)
+			_, pad_err := mem.arena_alloc_bytes(backing, pad, 1)
 			testing.expect_value(t, pad_err, nil)
 		}
 	}
 
-	s: http.Server
-	err := virtual.arena_init_growing(&s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
-	defer virtual.arena_destroy(&s.temp_allocator_backing)
+	backing_buf, buf_err := make([]byte, 128 * mem.Kilobyte)
+	testing.expect_value(t, buf_err, nil)
+	defer delete(backing_buf)
+
+	backing_arena: mem.Arena
+	mem.arena_init(&backing_arena, backing_buf)
+
+	s := http.make_server({}, mem.arena_allocator(&backing_arena))
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -315,7 +358,7 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 
 	// 1. Pooled 4 KiB block with worst-case offset for align = 128.
 	{
-		misalign_next_block_data_start(t, &s, 128)
+		misalign_next_block_data_start(t, &backing_arena, 128)
 
 		a1 := http.get_arena(nil)
 		init_bs, init_err := http.arena_alloc(&a1, 64, 8)
@@ -338,7 +381,8 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 	// 2. Pooled 8 KiB block with worst-case offset for align = 4096.
 	{
 		http._server_thread_free_arenas_destroy(&thread)
-		misalign_next_block_data_start(t, &s, 4096)
+		mem.arena_free_all(&backing_arena)
+		misalign_next_block_data_start(t, &backing_arena, 4096)
 
 		a1 := http.get_arena(nil)
 		init_bs, init_err := http.arena_alloc(&a1, 5000, 8)
@@ -361,7 +405,8 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 	// 3. align = 1 first allocation after unaligned offset in backing still yields aligned _Arena_Block.
 	{
 		http._server_thread_free_arenas_destroy(&thread)
-		_, bump_err := virtual.arena_alloc(&s.temp_allocator_backing, 1, 1)
+		mem.arena_free_all(&backing_arena)
+		_, bump_err := mem.arena_alloc_bytes(&backing_arena, 1, 1)
 		testing.expect_value(t, bump_err, nil)
 
 		a := http.get_arena(nil)
@@ -398,9 +443,9 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 @(test)
 test_arena_oom_propagation :: proc(t: ^testing.T) {
 	backing_buf: [1024]byte
-	s: http.Server
-	err := virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:])
-	testing.expect_value(t, err, nil)
+	backing_arena: mem.Arena
+	mem.arena_init(&backing_arena, backing_buf[:])
+	s := http.make_server({}, mem.arena_allocator(&backing_arena))
 
 	thread := http.Server_Thread{s = &s}
 	prev_td := http.td
@@ -411,6 +456,10 @@ test_arena_oom_propagation :: proc(t: ^testing.T) {
 	blk, blk_err := http._server_thread_get_free_arena()
 	testing.expect_value(t, blk_err, mem.Allocator_Error.Out_Of_Memory)
 	testing.expect(t, blk == nil, "expected nil block when backing is exhausted")
+
+	ovf_blk, ovf_err := http._server_thread_get_free_arena(max(int))
+	testing.expect_value(t, ovf_err, mem.Allocator_Error.Out_Of_Memory)
+	testing.expect(t, ovf_blk == nil, "expected nil block on size overflow")
 
 	boot, boot_err := http.bootstrap_arena(nil)
 	testing.expect_value(t, boot_err, mem.Allocator_Error.Out_Of_Memory)

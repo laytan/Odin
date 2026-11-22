@@ -6,7 +6,6 @@ import "base:sanitizer"
 import "core:container/xar"
 import "core:log"
 import "core:mem"
-import "core:mem/virtual"
 import "core:nbio"
 import "core:strings"
 import "core:testing"
@@ -24,8 +23,6 @@ setup_upgrade_env :: proc(t: ^testing.T, env: ^Upgrade_Test_Env) {
 	http.headers_init_hash_secret()
 
 	env.s = http.make_server({})
-	err := virtual.arena_init_growing(&env.s.temp_allocator_backing, 64 * mem.Megabyte)
-	testing.expect_value(t, err, nil)
 
 	env.thread = http.Server_Thread{s = &env.s, id = 1}
 	http.date_write(env.thread.date[:], time.now())
@@ -39,7 +36,6 @@ destroy_upgrade_env :: proc(env: ^Upgrade_Test_Env) {
 	xar.freelist_destroy(&env.thread.connections)
 	http._server_thread_free_arenas_destroy(&env.thread)
 	http.td = env.prev_td
-	virtual.arena_destroy(&env.s.temp_allocator_backing)
 }
 
 push_test_connection :: proc(
@@ -276,6 +272,14 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 	// 1. Transition from transaction_arena into temp_arena and scan 25 frames with
 	//    free_all(context.temp_allocator); memory usage remains flat after warmup.
 	{
+		prev_alloc := env.s.allocator
+		counter := Arena_Counting_Allocator{backing = prev_alloc}
+		env.s.allocator = arena_counting_allocator(&counter)
+		defer {
+			http._server_thread_free_arenas_destroy(&env.thread)
+			env.s.allocator = prev_alloc
+		}
+
 		c := push_test_connection(t, &env, payload = "AAAA" + "BBBB" + "CCCC")
 		defer http._connection_destroy(c)
 
@@ -305,7 +309,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		}
 		testing.expect_value(t, st.frames, 3)
 
-		used_after_warmup := env.s.temp_allocator_backing.total_used
+		allocs_after_warmup := counter.alloc_count
 
 		for round in 0 ..< 22 {
 			if c.scanner.buf == nil {
@@ -323,7 +327,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 
 			scan_next_frame(c)
 			testing.expect_value(t, st.last_byte, frame_tag)
-			testing.expect_value(t, env.s.temp_allocator_backing.total_used, used_after_warmup)
+			testing.expect_value(t, counter.alloc_count, allocs_after_warmup)
 		}
 		testing.expect_value(t, st.frames, 25)
 	}
@@ -598,6 +602,34 @@ test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
 
 @(test)
 test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
+	Fail_Toggle_Allocator :: struct {
+		backing: mem.Allocator,
+		fail:    bool,
+	}
+
+	fail_toggle_allocator :: proc(ft: ^Fail_Toggle_Allocator) -> mem.Allocator {
+		return {
+			data = ft,
+			procedure = proc(
+				allocator_data: rawptr,
+				mode: mem.Allocator_Mode,
+				size, alignment: int,
+				old_memory: rawptr,
+				old_size: int,
+				location := #caller_location,
+			) -> ([]byte, mem.Allocator_Error) {
+				ft := (^Fail_Toggle_Allocator)(allocator_data)
+				if ft.fail {
+					#partial switch mode {
+					case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
+						return nil, .Out_Of_Memory
+					}
+				}
+				return ft.backing.procedure(ft.backing.data, mode, size, alignment, old_memory, old_size, location)
+			},
+		}
+	}
+
 	make_oom_conn :: proc(t: ^testing.T, s: ^http.Server, thread: ^http.Server_Thread) -> ^http.Connection {
 		c, err := xar.push(&thread.connections, http.Connection{
 			transaction_arena = http.get_arena(nil),
@@ -624,27 +656,10 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		return c
 	}
 
-	exhaust_backing :: proc(s: ^http.Server, thread: ^http.Server_Thread) {
-		http._server_thread_free_arenas_destroy(thread)
-		for {
-			_, aerr := virtual.arena_alloc(&s.temp_allocator_backing, 64, 8)
-			if aerr != nil {
-				break
-			}
-		}
-		for {
-			_, aerr := virtual.arena_alloc(&s.temp_allocator_backing, 1, 1)
-			if aerr != nil {
-				break
-			}
-		}
-	}
-
 	// 1. context_add, response_defer, mid-heading write_response_heading OOM, and send_heading teardown.
 	{
-		backing_buf: [24 * mem.Kilobyte]byte
-		s := http.make_server({})
-		testing.expect_value(t, virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:]), nil)
+		ft := Fail_Toggle_Allocator{backing = context.allocator}
+		s := http.make_server({}, fail_toggle_allocator(&ft))
 
 		thread := http.Server_Thread{s = &s, id = 1}
 		http.date_write(thread.date[:], time.now())
@@ -657,7 +672,8 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		defer http._server_thread_free_arenas_destroy(&thread)
 
 		c := make_oom_conn(t, &s, &thread)
-		exhaust_backing(&s, &thread)
+		http._server_thread_free_arenas_destroy(&thread)
+		ft.fail = true
 
 		ptr, add_err := http.context_add(&c.ctx, int(42))
 		testing.expect_value(t, add_err, runtime.Allocator_Error.Out_Of_Memory)
@@ -690,9 +706,8 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 
 	// 2. scanner_reset OOM, _scanner_free_all OOM fallback pinning, and scanner_pump OOM teardown.
 	{
-		backing_buf: [24 * mem.Kilobyte]byte
-		s := http.make_server({})
-		testing.expect_value(t, virtual.arena_init_buffer(&s.temp_allocator_backing, backing_buf[:]), nil)
+		ft := Fail_Toggle_Allocator{backing = context.allocator}
+		s := http.make_server({}, fail_toggle_allocator(&ft))
 
 		thread := http.Server_Thread{s = &s, id = 1}
 		http.date_write(thread.date[:], time.now())
@@ -720,7 +735,8 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		overflow[0] = 1
 		testing.expect(t, c.temp_arena.tail != orig_block, "expected overflow block in temp_arena")
 
-		exhaust_backing(&s, &thread)
+		http._server_thread_free_arenas_destroy(&thread)
+		ft.fail = true
 
 		reset_err := http.scanner_reset(&c.scanner, c)
 		testing.expect_value(t, reset_err, runtime.Allocator_Error.Out_Of_Memory)

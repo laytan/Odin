@@ -8,7 +8,6 @@ import "base:sanitizer"
 import "core:math"
 import "core:math/bits"
 import "core:mem"
-import "core:mem/virtual"
 
 Arena :: struct {
 	c:    ^Connection,
@@ -139,11 +138,11 @@ ARENA_SIZE :: 4096
 @(private)
 SHIFT      :: 12   // First bucket starts at 4 KiB
 @(private)
-BUCKETS    :: 17   // Last bucket starts at 256 MiB
+BUCKETS    :: 13   // Last bucket starts at 16 MiB
 
 @(private)
-LAST_BUCKET_FROM_SIZE :: 1 << (SHIFT + BUCKETS-1)
-#assert(LAST_BUCKET_FROM_SIZE == 256 * mem.Megabyte)
+MAX_POOLED_BLOCK_SIZE :: 1 << (SHIFT + BUCKETS - 1)
+#assert(MAX_POOLED_BLOCK_SIZE == 16 * mem.Megabyte)
 
 _bucket_for :: proc(min_size: int) -> int {
 	assert(min_size > 0)
@@ -157,6 +156,21 @@ _bucket_to_put :: proc(size: uint) -> int {
 }
 
 @(private="file")
+_arena_backing_allocator :: proc(s: ^Server) -> mem.Allocator {
+	if s != nil && s.allocator.procedure != nil {
+		return s.allocator
+	}
+	return context.allocator
+}
+
+@(private="file")
+_arena_block_free :: proc(arena: ^_Arena_Block, backing: mem.Allocator) {
+	data := arena.data
+	sanitizer.address_unpoison(data[size_of(_Arena_Block):])
+	_ = mem.free_bytes(data, backing)
+}
+
+@(private="file")
 _arena_block_reset :: proc(arena: ^_Arena_Block) -> ^_Arena_Block {
 	arena.offset = size_of(_Arena_Block)
 	arena.peak_used, arena.temp_count = 0, 0
@@ -167,43 +181,28 @@ _arena_block_reset :: proc(arena: ^_Arena_Block) -> ^_Arena_Block {
 }
 
 _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNMENT) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) #optional_allocator_error {
+	if size < 0 {
+		return nil, .Invalid_Argument
+	}
 	align     := align == 0 ? mem.DEFAULT_ALIGNMENT : align
 	align_pad := max(0, align - align_of(_Arena_Block))
-	size      := max(ARENA_SIZE, size_of(_Arena_Block) + align_pad + size)
-	bucket    := _bucket_for(size)
+	overhead  := size_of(_Arena_Block) + align_pad
+	if size > max(int) - overhead {
+		return nil, .Out_Of_Memory
+	}
+	needed     := max(ARENA_SIZE, overhead + size)
+	alloc_size := needed
 
-	if bucket == BUCKETS-1 {
-		blk := td.free_arenas[bucket]
-		if blk != nil {
-			if len(blk.data) >= size {
-				td.free_arenas[bucket] = blk.prev
-				return _arena_block_reset(blk), nil
-			}
-
-			for prev := blk.prev; prev != nil; blk, prev = prev, prev.prev {
-				if len(prev.data) < size {
-					continue
-				}
-
-				blk.prev = prev.prev
-				return _arena_block_reset(prev), nil
-			}
-		}
-	} else {
-		for check in bucket..<BUCKETS {
-			free_arena := td.free_arenas[check]
-			if free_arena == nil {
-				continue
-			}
-
-			td.free_arenas[check] = free_arena.prev
+	if needed <= MAX_POOLED_BLOCK_SIZE {
+		bucket := _bucket_for(needed)
+		if free_arena := td.free_arenas[bucket]; free_arena != nil {
+			td.free_arenas[bucket] = free_arena.prev
 			return _arena_block_reset(free_arena), nil
 		}
-
-		size = 1 << (uint(bucket) + SHIFT)
+		alloc_size = 1 << (uint(bucket) + SHIFT)
 	}
 
-	data := virtual.arena_alloc(&td.s.temp_allocator_backing, uint(size), align_of(_Arena_Block)) or_return
+	data := mem.alloc_bytes_non_zeroed(alloc_size, align_of(_Arena_Block), _arena_backing_allocator(td.s)) or_return
 	sanitizer.address_unpoison(data)
 
 	arena = (^_Arena_Block)(raw_data(data))
@@ -218,17 +217,25 @@ _server_thread_get_free_arena :: proc(size: int = 0, align := mem.DEFAULT_ALIGNM
 }
 
 _server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
+	if len(arena.data) > MAX_POOLED_BLOCK_SIZE {
+		_arena_block_free(arena, _arena_backing_allocator(td.s))
+		return
+	}
+
 	sanitizer.address_poison(arena.data[size_of(_Arena_Block):])
 
-	bucket := _bucket_to_put(len(arena.data))
+	bucket := _bucket_to_put(uint(len(arena.data)))
 	arena.prev = td.free_arenas[bucket]
 	td.free_arenas[bucket] = arena
 }
 
 _server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
+	backing := _arena_backing_allocator(t.s)
 	for &head in t.free_arenas {
-		for block := head; block != nil; block = block.prev {
-			sanitizer.address_unpoison(block.data[size_of(_Arena_Block):])
+		for block := head; block != nil; {
+			prev := block.prev
+			_arena_block_free(block, backing)
+			block = prev
 		}
 		head = nil
 	}
