@@ -3426,3 +3426,111 @@ test_http2_range_requests_with_curl :: proc(t: ^testing.T) {
 	check_range(t, "no_range",         &ctx.no_range,         200, "none",  "",             CONTENT)
 	check_range(t, "post_range",       &ctx.post_range,       200, "bytes", "",             CONTENT)
 }
+
+@(test)
+test_http2_response_defer_sees_socket_on_destroy :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	Defer_Socket_State :: struct {
+		handler_socket: nbio.TCP_Socket,
+		defer_socket:   nbio.TCP_Socket,
+		defer_ran:      bool,
+	}
+
+	state: Defer_Socket_State
+	handler := http.Handler{
+		user_data = &state,
+		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
+			st := (^Defer_Socket_State)(h.user_data)
+			c := http.connection_of_response(&ctx.res)
+			st.handler_socket = c.socket
+
+			http.context_add(ctx, st)
+			http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+				st := http.context_get(ctx, ^Defer_Socket_State)^
+				c := http.connection_of_response(&ctx.res)
+				st.defer_socket = c.socket
+				st.defer_ran = true
+			})
+
+			http.set_header(&ctx.res, "Connection", "close")
+			http.respond_plain(&ctx.res, "bye")
+		},
+	}
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 1,
+		handler      = handler,
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Client_Ctx :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		handle_ok:    bool,
+		setopt_ok:    bool,
+		perform_err:  curl.code,
+		getinfo_err:  curl.code,
+		response:     Curl_Response,
+	}
+
+	ctx := Client_Ctx{server = &server}
+	defer delete(ctx.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Client_Ctx)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		url := fmt.ctprintf("http://127.0.0.1:%d/", endpoint.port)
+		hdrs := curl.slist_append(nil, "Connection: close")
+		defer curl.slist_free_all(hdrs)
+
+		ctx.setopt_ok =
+			curl.easy_setopt(handle, .URL, url) == .E_OK &&
+			curl.easy_setopt(handle, .HTTPHEADER, hdrs) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.response) == .E_OK
+		if !ctx.setopt_ok {
+			return
+		}
+
+		ctx.perform_err = curl.easy_perform(handle)
+		ctx.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.response.status)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+	testing.expect(t, ctx.setopt_ok, "curl.easy_setopt failed")
+	testing.expectf(t, ctx.perform_err == .E_OK, "curl failed: %s", curl.easy_strerror(ctx.perform_err))
+	testing.expect_value(t, ctx.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.response.status, 200)
+	testing.expect_value(t, string(ctx.response.body[:]), "bye")
+	testing.expect(t, state.defer_ran, "expected response_defer to run before server stop")
+	testing.expect(t, state.handler_socket != {}, "expected non-zero socket in handler")
+	testing.expect_value(t, state.defer_socket, state.handler_socket)
+}

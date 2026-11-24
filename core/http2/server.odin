@@ -609,13 +609,11 @@ _connection_release :: proc(c: ^Connection) {
 _connection_destroy :: proc(c: ^Connection) {
 	assert(c.res._sends == 0, "cannot destroy connection while sends are in flight")
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
-	nbio.remove(c.curr_recv)
-	c.curr_recv = nil
-	if c.socket != {} {
-		nbio.close(c.socket)
-		c.socket = {}
-	}
+	sock := c.socket
 	_connection_release(c)
+	if sock != {} {
+		nbio.close(sock)
+	}
 }
 
 // Removes the connection from the server pool without closing the socket, returning the underlying
