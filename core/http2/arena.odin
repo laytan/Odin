@@ -123,13 +123,18 @@ arena_free :: proc(a: ^Arena, ptr: rawptr, size: int) -> mem.Allocator_Error {
 	if ptr == nil { return nil }
 
 	arena := a.tail
-	if arena == nil || size <= 0 { return .Invalid_Argument }
+	if arena == nil || size < 0 { return .Invalid_Argument }
 
 	if ptr != arena.last { return .Mode_Not_Implemented }
 
-	arena.last    = nil
-	arena.offset -= size
-	return nil 
+	new_offset := int(uintptr(ptr) - uintptr(raw_data(arena.data)))
+	if new_offset < size_of(_Arena_Block) || new_offset > arena.offset {
+		return .Invalid_Pointer
+	}
+
+	arena.last   = nil
+	arena.offset = new_offset
+	return nil
 }
 
 arena_destroy :: proc(a: ^Arena) {
