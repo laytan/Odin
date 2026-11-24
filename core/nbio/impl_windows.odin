@@ -157,16 +157,18 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> (err: General_Error) {
 		}
 	}
 
+	oob_n := 0
 	for {
 		op := (^Operation)(mpsc_dequeue(&l.completed_oob))
 		if op == nil { break }
+		oob_n += 1
 		handle_completed(op)
 	}
 
 	if pool.num_outstanding(&l.operation_pool) == 0 { return nil }
 
 	actual_timeout := win.INFINITE
-	if queue.len(l.completed) > 0 || mpsc_count(&l.completed_oob) > 0 {
+	if n > 0 || oob_n > 0 || queue.len(l.completed) > 0 || mpsc_count(&l.completed_oob) > 0 {
 		actual_timeout = 0
 	} else if timeout >= 0 {
 		actual_timeout = win.DWORD(timeout / time.Millisecond)
@@ -192,6 +194,11 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> (err: General_Error) {
 			op := (^Operation)(mpsc_dequeue(&l.completed_oob))
 			if op == nil { break }
 			handle_completed(op)
+		}
+
+		if queue.len(l.completed) > 0 {
+			sync.atomic_store_explicit(&l.state, .Working, .Relaxed)
+			actual_timeout = 0
 		}
 	}
 
@@ -769,7 +776,7 @@ _associate_socket :: proc(socket: Any_Socket, l: ^Event_Loop) -> Association_Err
 }
 
 @(private="package")
-_wake_up :: proc(l: ^Event_Loop) {
+_wake_up :: proc "contextless" (l: ^Event_Loop) {
 	_, exchanged := sync.atomic_compare_exchange_strong(&l.state, .Sleeping, .Waking)
 	if exchanged {
 		win.QueueUserAPC(proc "system" (Parameter: win.ULONG_PTR) {}, l.thread, 0)

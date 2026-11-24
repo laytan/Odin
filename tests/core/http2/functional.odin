@@ -3534,3 +3534,94 @@ test_http2_response_defer_sees_socket_on_destroy :: proc(t: ^testing.T) {
 	testing.expect(t, state.handler_socket != {}, "expected non-zero socket in handler")
 	testing.expect_value(t, state.defer_socket, state.handler_socket)
 }
+
+@(test)
+test_http2_server_shutdown_async :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 2,
+		handler      = http.handler(proc(ctx: ^http.Ctx) {
+			http.set_header(&ctx.res, "Connection", "close")
+			http.respond_plain(&ctx.res, "ok")
+		}),
+	})
+
+	// Before _serve starts, server_shutdown_async returns false.
+	testing.expect(t, !http.server_shutdown_async(&server), "expected false before _serve")
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Client_Ctx :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		handle_ok:    bool,
+		setopt_ok:    bool,
+		perform_err:  curl.code,
+		getinfo_err:  curl.code,
+		first_async:  bool,
+		second_async: bool,
+		response:     Curl_Response,
+	}
+
+	ctx := Client_Ctx{server = &server}
+	defer delete(ctx.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Client_Ctx)(data)
+		defer {
+			ctx.first_async  = http.server_shutdown_async(ctx.server)
+			ctx.second_async = http.server_shutdown_async(ctx.server)
+			if !ctx.first_async {
+				http.server_shutdown(ctx.server)
+			}
+		}
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		url := fmt.ctprintf("http://127.0.0.1:%d/", endpoint.port)
+		ctx.setopt_ok =
+			curl.easy_setopt(handle, .URL, url) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.response) == .E_OK
+		if !ctx.setopt_ok {
+			return
+		}
+
+		ctx.perform_err = curl.easy_perform(handle)
+		ctx.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.response.status)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+	testing.expect(t, ctx.setopt_ok, "curl.easy_setopt failed")
+	testing.expectf(t, ctx.perform_err == .E_OK, "curl failed: %s", curl.easy_strerror(ctx.perform_err))
+	testing.expect_value(t, ctx.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.response.status, 200)
+	testing.expect_value(t, string(ctx.response.body[:]), "ok")
+	testing.expect(t, ctx.first_async, "expected first server_shutdown_async to return true")
+	testing.expect(t, !ctx.second_async, "expected second server_shutdown_async to return false")
+	testing.expect(t, !http.server_shutdown_async(&server), "expected false after _serve completes")
+}

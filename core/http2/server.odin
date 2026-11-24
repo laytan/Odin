@@ -27,6 +27,7 @@ Server :: struct {
 	running_threads: sync.Wait_Group,
 	shutting_down:   bool,
 	shutdown_mutex:  sync.Mutex,
+	_shutdown_op:    ^nbio.Operation,
 	_has_event_loop: bool,
 }
 
@@ -213,8 +214,17 @@ transaction_allocator :: proc {
 	transaction_allocator_from_ctx,
 }
 
-temp_allocator :: proc(c: ^Connection) -> runtime.Allocator {
+temp_allocator_from_connection :: proc(c: ^Connection) -> runtime.Allocator {
 	return arena_allocator(&c.temp_arena)
+}
+
+temp_allocator_from_ctx :: proc(ctx: ^Ctx) -> runtime.Allocator {
+	return temp_allocator_from_connection(connection_of_context(ctx))
+}
+
+temp_allocator :: proc {
+	temp_allocator_from_connection,
+	temp_allocator_from_ctx,
 }
 
 Ctx :: struct {
@@ -449,6 +459,36 @@ _server_thread_shutdown :: proc(thread: ^Server_Thread) {
 	sync.mutex_unlock(&thread.s.shutdown_mutex)
 }
 
+/*
+Initiates a graceful shutdown of `s`: stops accepting new connections, closes idle keep-alive
+connections immediately, drains in-flight requests, and runs each server thread's
+`thread_deinitializer` before `listen_and_serve` returns.
+
+Safe to call from any normal thread, including a request handler or worker thread.
+Not safe to call directly from a POSIX signal handler because it acquires `s.shutdown_mutex`;
+use `server_shutdown_async` from signal handlers instead.
+
+Example (graceful shutdown on Ctrl-C / SIGTERM):
+	server: http.Server
+
+	when ODIN_OS == .Windows {
+		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
+			return win.BOOL(http.server_shutdown_async(&server))
+		}, win.TRUE)
+	} else {
+		on_signal :: proc "c" (sig: libc.int) {
+			if !http.server_shutdown_async(&server) {
+				libc.signal(sig, cast(proc "c" (libc.int))libc.SIG_DFL)
+				libc.raise(sig)
+			}
+		}
+		libc.signal(libc.SIGINT, on_signal)
+		libc.signal(libc.SIGTERM, on_signal)
+	}
+
+	server = http.make_server(opts)
+	err := http.listen_and_serve(&server)
+*/
 server_shutdown :: proc(s: ^Server) {
 	sync.mutex_lock(&s.shutdown_mutex)
 	defer sync.mutex_unlock(&s.shutdown_mutex)
@@ -459,6 +499,26 @@ server_shutdown :: proc(s: ^Server) {
 			nbio.wake_up(thread.event_loop)
 		}
 	}
+}
+
+/*
+Contextless, async-signal-safe version of `server_shutdown`.
+
+Enqueues a graceful shutdown onto the server's main event loop via `nbio.exec_urgent` without
+locking mutexes or allocating, making it safe to call from a POSIX `libc.signal` handler or a
+Windows `SetConsoleCtrlHandler` callback.
+
+Returns `true` if shutdown was triggered by this call, or `false` if the server is not currently
+serving, shutdown was already requested (e.g. a second Ctrl-C), or the event loop queue is full.
+*/
+server_shutdown_async :: proc "contextless" (s: ^Server) -> bool {
+	if sync.atomic_load(&s.shutting_down) {
+		return false
+	}
+	if op := sync.atomic_exchange(&s._shutdown_op, nil); op != nil {
+		return nbio.exec_urgent(op)
+	}
+	return false
 }
 
 ACCEPT_RETRY_DELAY :: 50 * time.Millisecond
@@ -859,8 +919,17 @@ validate_headers :: proc(c: ^Connection) -> bool {
 }
 
 _serve :: proc(s: ^Server) {
+	shutdown_op := nbio.prep_next_tick(proc(op: ^nbio.Operation) {
+		server_shutdown((^Server)(op.user_data[0]))
+	})
+	shutdown_op.user_data[0] = s
+	sync.atomic_store(&s._shutdown_op, shutdown_op)
+
 	sync.one_shot_event_signal(&s.serve)
 	_server_thread_serve(td)
+	if op := sync.atomic_exchange(&s._shutdown_op, nil); op != nil {
+		nbio.reattach(op)
+	}
 	sync.wait(&s.running_threads)
 }
 

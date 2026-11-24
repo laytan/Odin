@@ -14,7 +14,7 @@ import "core:sys/posix"
 
 KQ :: posix.FD
 
-kqueue :: proc() -> (kq: KQ, err: posix.Errno) {
+kqueue :: proc "contextless" () -> (kq: KQ, err: posix.Errno) {
 	kq = _kqueue()
 	if kq == -1 {
 		err = posix.errno()
@@ -22,7 +22,7 @@ kqueue :: proc() -> (kq: KQ, err: posix.Errno) {
 	return
 }
 
-kevent :: proc(kq: KQ, change_list: []KEvent, event_list: []KEvent, timeout: ^posix.timespec) -> (n_events: c.int, err: posix.Errno) {
+kevent :: proc "contextless" (kq: KQ, change_list: []KEvent, event_list: []KEvent, timeout: ^posix.timespec) -> (n_events: c.int, err: posix.Errno) {
 	n_events = _kevent(
 		kq,
 		raw_data(change_list),

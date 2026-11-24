@@ -211,7 +211,8 @@ _associate_socket :: proc(socket: Any_Socket, l: ^Event_Loop) -> Association_Err
 	return nil
 }
 
-_wake_up :: proc(l: ^Event_Loop) {
+@(private="package")
+_wake_up :: proc "contextless" (l: ^Event_Loop) {
 }
 
 _yield :: proc() {

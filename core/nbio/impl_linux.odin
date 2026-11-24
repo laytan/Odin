@@ -232,7 +232,7 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 		}
 	}
 
-	err := _flush_submissions(l, timeout)
+	err := _flush_submissions(l, 0 if n > 0 || queue.len(l.completed) > 0 else timeout)
 	if err != nil { return General_Error(err) }
 
 	l.now = time.now()
@@ -467,14 +467,13 @@ _associate_socket :: proc(socket: Any_Socket, l: ^Event_Loop) -> Association_Err
 }
 
 @(private="package")
-_wake_up :: proc(l: ^Event_Loop) {
-	assert(l != &_tls_event_loop)
+_wake_up :: proc "contextless" (l: ^Event_Loop) {
 	one: u64 = 1
-	// Called from another thread, in which we can't use the uring.
+	// Called from another thread or a signal handler, in which we can't use the uring.
 	n, err := linux.write(l.wake.read.handle, ([^]byte)(&one)[:size_of(one)])
 	// Shouldn't fail.
-	assert(err == nil)
-	assert(n == 8)
+	assert_contextless(err == nil)
+	assert_contextless(n == 8)
 }
 
 @(private="package")

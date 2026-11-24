@@ -137,11 +137,12 @@ _destroy :: proc(l: ^Event_Loop) {
 __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 	debug("tick")
 
-	if n := queue.len(l.completed); n > 0 {
+	completed_n := queue.len(l.completed)
+	if completed_n > 0 {
 		l.now = time.now()
-		debug("processing", n, "already completed")
+		debug("processing", completed_n, "already completed")
 
-		for _ in 0 ..< n {
+		for _ in 0 ..< completed_n {
 			op := queue.pop_front(&l.completed)
 			handle_completed(op)
 		}
@@ -160,7 +161,7 @@ __tick :: proc(l: ^Event_Loop, timeout: time.Duration) -> General_Error {
 
 	ts_backing: posix.timespec
 	ts_pointer: ^posix.timespec // nil means forever.
-	if queue.len(l.completed) == 0 && len(l.submitted) > 0 {
+	if completed_n == 0 && queue.len(l.completed) == 0 && len(l.submitted) > 0 {
 		if timeout >= 0 {
 			debug("timeout", timeout)
 			ts_backing = {tv_sec=posix.time_t(timeout/time.Second), tv_nsec=c.long(timeout%time.Second)}
@@ -512,7 +513,7 @@ _associate_socket :: proc(socket: Any_Socket, l: ^Event_Loop) -> Association_Err
 }
 
 @(private="package")
-_wake_up :: proc(l: ^Event_Loop) {
+_wake_up :: proc "contextless" (l: ^Event_Loop) {
 	// TODO: only if we are sleeping (like Windows).
 	ev := [1]kq.KEvent{
 		{
@@ -525,9 +526,15 @@ _wake_up :: proc(l: ^Event_Loop) {
 		},
 	}
 	t: posix.timespec
-	n, err := kq.kevent(l.kqueue, ev[:], nil, &t)
-	assert(err == nil)
-	assert(n == 0)
+	for {
+		n, err := kq.kevent(l.kqueue, ev[:], nil, &t)
+		if err == .EINTR {
+			continue
+		}
+		assert_contextless(err == nil)
+		assert_contextless(n == 0)
+		break
+	}
 }
 
 @(private="package")

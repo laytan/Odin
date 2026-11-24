@@ -406,7 +406,7 @@ exec :: proc(op: ^Operation, trigger_wake_up := true) {
 	if op.l == &_tls_event_loop {
 		_exec(op)
 	} else {
-		for !mpsc_enqueue(&op.l.queue, op) {
+		for !mpsc_enqueue(&op.l.queue, op, reserve = 4) {
 			warn("operation queue on event loop filled up")
 			wake_up(op.l)
 			_yield()
@@ -418,14 +418,28 @@ exec :: proc(op: ^Operation, trigger_wake_up := true) {
 }
 
 /*
-Wake up an event loop on another thread which may be blocking for completed operations.
+Non-blocking, contextless, and async-signal-safe variant of `exec`.
 
-Commonly used with `exec` from a worker thread to have the event loop pick up that work.
-Note that by default `exec` already calls this procedure.
+Always enqueues a pre-prepared operation (e.g. from `prep_next_tick`) onto its event loop's queue
+to be executed on the next tick, rather than executing immediately on the calling thread or spinning
+when the queue is full. Can use slots in the event loop queue reserved from normal `exec` calls so
+worker-thread traffic cannot starve urgent wakeups (such as signal handlers). Returns `false` only
+if all slots (including reserved ones) are currently occupied.
 */
-wake_up :: proc(l: ^Event_Loop) {
-	if l == &_tls_event_loop {
-		return
+exec_urgent :: proc "contextless" (op: ^Operation, trigger_wake_up := true) -> (ok: bool) {
+	ok = mpsc_enqueue(&op.l.queue, op)
+	if ok && trigger_wake_up {
+		_wake_up(op.l)
 	}
+	return
+}
+
+/*
+Wake up an event loop which may be blocking for completed operations.
+
+Commonly used with `exec` from a worker thread (which calls this by default) or from a signal
+handler. Contextless and safe to call even when `l` is the current thread's event loop.
+*/
+wake_up :: proc "contextless" (l: ^Event_Loop) {
 	_wake_up(l)
 }

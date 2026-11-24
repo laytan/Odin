@@ -25,17 +25,17 @@ mpsc_destroy :: proc(mpscq: ^Multi_Producer_Single_Consumer, allocator: runtime.
 	delete(mpscq.buffer, allocator)
 }
 
-mpsc_enqueue :: proc(mpscq: ^Multi_Producer_Single_Consumer, obj: rawptr) -> bool {
+mpsc_enqueue :: proc "contextless" (mpscq: ^Multi_Producer_Single_Consumer, obj: rawptr, reserve := 0) -> bool {
 	count := sync.atomic_add_explicit(&mpscq.count, 1, .Acquire)
-	if count >= len(mpscq.buffer) {
+	if count >= len(mpscq.buffer) - reserve {
 		sync.atomic_sub_explicit(&mpscq.count, 1, .Release)
 		return false
 	}
 
 	head := sync.atomic_add_explicit(&mpscq.head, 1, .Acquire)
-	assert(mpscq.buffer[head & mpscq.mask] == nil)
+	assert_contextless(mpscq.buffer[head & mpscq.mask] == nil)
 	rv := sync.atomic_exchange_explicit(&mpscq.buffer[head & mpscq.mask], obj, .Release)
-	assert(rv == nil)
+	assert_contextless(rv == nil)
 	return true
 }
 

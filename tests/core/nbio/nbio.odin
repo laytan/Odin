@@ -303,3 +303,55 @@ still_pending :: proc(t: ^testing.T) {
 		ev(t, state.accepted, N)
  	}
  }
+
+@(test)
+exec_urgent :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, time.Minute)
+	if event_loop_guard(t) {
+		// 1. Same-thread exec_urgent enqueues onto l.queue (does not execute synchronously) and runs on tick.
+		{
+			@static ran: bool
+			ran = false
+
+			op := nbio.prep_next_tick(proc(_: ^nbio.Operation) {
+				ran = true
+			})
+			e(t, nbio.exec_urgent(op))
+			e(t, !ran)
+			ev(t, nbio.tick(timeout=0), nil)
+			e(t, ran)
+		}
+
+		// 2. Cross-thread exec_urgent wakes a blocked event loop and executes the pre-prepared op.
+		{
+			sock, _ := open_next_available_local_port(t)
+
+			accept := nbio.accept(sock, proc(_: ^nbio.Operation) {
+				log.error("shouldn't be called")
+			})
+			ev(t, nbio.tick(timeout=0), nil)
+
+			@static ran: bool
+			ran = false
+
+			op := nbio.prep_next_tick(proc(_: ^nbio.Operation) {
+				ran = true
+			})
+
+			thr := thread.create_and_start_with_poly_data(op, proc(op: ^nbio.Operation) {
+				time.sleep(20 * time.Millisecond)
+				nbio.exec_urgent(op)
+			}, context)
+			defer thread.destroy(thr)
+
+			for !ran {
+				ev(t, nbio.tick(), nil)
+			}
+			e(t, ran)
+
+			nbio.remove(accept)
+			nbio.close(sock)
+			ev(t, nbio.run(), nil)
+		}
+	}
+}
