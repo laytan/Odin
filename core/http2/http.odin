@@ -2,13 +2,16 @@
 package http
 
 import "base:intrinsics"
+import "base:runtime"
 
+import "core:encoding/hex"
 import "core:io"
 import "core:net"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "core:unicode/utf8"
 
 Version :: struct {
 	major: u8,
@@ -180,73 +183,73 @@ Status :: enum {
 
 @(private)
 _status_strings: #sparse [Status]string = {
-    .Continue                        = "100 Continue\r\n",
-    .Switching_Protocols             = "101 Switching Protocols\r\n",
-    .Processing                      = "102 Processing\r\n",
-    .Early_Hints                     = "103 Early Hints\r\n",
+    .Continue                        = "100 Continue",
+    .Switching_Protocols             = "101 Switching Protocols",
+    .Processing                      = "102 Processing",
+    .Early_Hints                     = "103 Early Hints",
 
-    .OK                              = "200 OK\r\n",
-    .Created                         = "201 Created\r\n",
-    .Accepted                        = "202 Accepted\r\n",
-    .Non_Authoritative_Information   = "203 Non-Authoritative Information\r\n",
-    .No_Content                      = "204 No Content\r\n",
-    .Reset_Content                   = "205 Reset Content\r\n",
-    .Partial_Content                 = "206 Partial Content\r\n",
-    .Multi_Status                    = "207 Multi-Status\r\n",
-    .Already_Reported                = "208 Already Reported\r\n",
-    .IM_Used                         = "226 IM Used\r\n",
+    .OK                              = "200 OK",
+    .Created                         = "201 Created",
+    .Accepted                        = "202 Accepted",
+    .Non_Authoritative_Information   = "203 Non-Authoritative Information",
+    .No_Content                      = "204 No Content",
+    .Reset_Content                   = "205 Reset Content",
+    .Partial_Content                 = "206 Partial Content",
+    .Multi_Status                    = "207 Multi-Status",
+    .Already_Reported                = "208 Already Reported",
+    .IM_Used                         = "226 IM Used",
 
-    .Multiple_Choices                = "300 Multiple Choices\r\n",
-    .Moved_Permanently               = "301 Moved Permanently\r\n",
-    .Found                           = "302 Found\r\n",
-    .See_Other                       = "303 See Other\r\n",
-    .Not_Modified                    = "304 Not Modified\r\n",
-    .Use_Proxy                       = "305 Use Proxy\r\n",
-    .Unused                          = "306 (Unused)\r\n",
-    .Temporary_Redirect              = "307 Temporary Redirect\r\n",
-    .Permanent_Redirect              = "308 Permanent Redirect\r\n",
+    .Multiple_Choices                = "300 Multiple Choices",
+    .Moved_Permanently               = "301 Moved Permanently",
+    .Found                           = "302 Found",
+    .See_Other                       = "303 See Other",
+    .Not_Modified                    = "304 Not Modified",
+    .Use_Proxy                       = "305 Use Proxy",
+    .Unused                          = "306 (Unused)",
+    .Temporary_Redirect              = "307 Temporary Redirect",
+    .Permanent_Redirect              = "308 Permanent Redirect",
 
-    .Bad_Request                     = "400 Bad Request\r\n",
-    .Unauthorized                    = "401 Unauthorized\r\n",
-    .Payment_Required                = "402 Payment Required\r\n",
-    .Forbidden                       = "403 Forbidden\r\n",
-    .Not_Found                       = "404 Not Found\r\n",
-    .Method_Not_Allowed              = "405 Method Not Allowed\r\n",
-    .Not_Acceptable                  = "406 Not Acceptable\r\n",
-    .Proxy_Authentication_Required   = "407 Proxy Authentication Required\r\n",
-    .Request_Timeout                 = "408 Request Timeout\r\n",
-    .Conflict                        = "409 Conflict\r\n",
-    .Gone                            = "410 Gone\r\n",
-    .Length_Required                 = "411 Length Required\r\n",
-    .Precondition_Failed             = "412 Precondition Failed\r\n",
-    .Payload_Too_Large               = "413 Payload Too Large\r\n",
-    .URI_Too_Long                    = "414 URI Too Long\r\n",
-    .Unsupported_Media_Type          = "415 Unsupported Media Type\r\n",
-    .Range_Not_Satisfiable           = "416 Range Not Satisfiable\r\n",
-    .Expectation_Failed              = "417 Expectation Failed\r\n",
-    .Im_A_Teapot                     = "418 I'm a teapot\r\n",
-    .Misdirected_Request             = "421 Misdirected Request\r\n",
-    .Unprocessable_Content           = "422 Unprocessable Content\r\n",
-    .Locked                          = "423 Locked\r\n",
-    .Failed_Dependency               = "424 Failed Dependency\r\n",
-    .Too_Early                       = "425 Too Early\r\n",
-    .Upgrade_Required                = "426 Upgrade Required\r\n",
-    .Precondition_Required           = "428 Precondition Required\r\n",
-    .Too_Many_Requests               = "429 Too Many Requests\r\n",
-    .Request_Header_Fields_Too_Large = "431 Request Header Fields Too Large\r\n",
-    .Unavailable_For_Legal_Reasons   = "451 Unavailable For Legal Reasons\r\n",
+    .Bad_Request                     = "400 Bad Request",
+    .Unauthorized                    = "401 Unauthorized",
+    .Payment_Required                = "402 Payment Required",
+    .Forbidden                       = "403 Forbidden",
+    .Not_Found                       = "404 Not Found",
+    .Method_Not_Allowed              = "405 Method Not Allowed",
+    .Not_Acceptable                  = "406 Not Acceptable",
+    .Proxy_Authentication_Required   = "407 Proxy Authentication Required",
+    .Request_Timeout                 = "408 Request Timeout",
+    .Conflict                        = "409 Conflict",
+    .Gone                            = "410 Gone",
+    .Length_Required                 = "411 Length Required",
+    .Precondition_Failed             = "412 Precondition Failed",
+    .Payload_Too_Large               = "413 Payload Too Large",
+    .URI_Too_Long                    = "414 URI Too Long",
+    .Unsupported_Media_Type          = "415 Unsupported Media Type",
+    .Range_Not_Satisfiable           = "416 Range Not Satisfiable",
+    .Expectation_Failed              = "417 Expectation Failed",
+    .Im_A_Teapot                     = "418 I'm a teapot",
+    .Misdirected_Request             = "421 Misdirected Request",
+    .Unprocessable_Content           = "422 Unprocessable Content",
+    .Locked                          = "423 Locked",
+    .Failed_Dependency               = "424 Failed Dependency",
+    .Too_Early                       = "425 Too Early",
+    .Upgrade_Required                = "426 Upgrade Required",
+    .Precondition_Required           = "428 Precondition Required",
+    .Too_Many_Requests               = "429 Too Many Requests",
+    .Request_Header_Fields_Too_Large = "431 Request Header Fields Too Large",
+    .Unavailable_For_Legal_Reasons   = "451 Unavailable For Legal Reasons",
 
-    .Internal_Server_Error           = "500 Internal Server Error\r\n",
-    .Not_Implemented                 = "501 Not Implemented\r\n",
-    .Bad_Gateway                     = "502 Bad Gateway\r\n",
-    .Service_Unavailable             = "503 Service Unavailable\r\n",
-    .Gateway_Timeout                 = "504 Gateway Timeout\r\n",
-    .HTTP_Version_Not_Supported      = "505 HTTP Version Not Supported\r\n",
-    .Variant_Also_Negotiates         = "506 Variant Also Negotiates\r\n",
-    .Insufficient_Storage            = "507 Insufficient Storage\r\n",
-    .Loop_Detected                   = "508 Loop Detected\r\n",
-    .Not_Extended                    = "510 Not Extended\r\n",
-    .Network_Authentication_Required = "511 Network Authentication Required\r\n",
+    .Internal_Server_Error           = "500 Internal Server Error",
+    .Not_Implemented                 = "501 Not Implemented",
+    .Bad_Gateway                     = "502 Bad Gateway",
+    .Service_Unavailable             = "503 Service Unavailable",
+    .Gateway_Timeout                 = "504 Gateway Timeout",
+    .HTTP_Version_Not_Supported      = "505 HTTP Version Not Supported",
+    .Variant_Also_Negotiates         = "506 Variant Also Negotiates",
+    .Insufficient_Storage            = "507 Insufficient Storage",
+    .Loop_Detected                   = "508 Loop Detected",
+    .Not_Extended                    = "510 Not Extended",
+    .Network_Authentication_Required = "511 Network Authentication Required",
 }
 
 status_string :: proc(s: Status) -> string {
@@ -496,35 +499,32 @@ Query_Entry :: struct {
 }
 
 query_iter :: proc(query: ^string) -> (entry: Query_Entry, ok: bool) {
-	if len(query) == 0 { return }
+	for len(query) > 0 {
+		pair: string
+		if amp := strings.index_byte(query^, '&'); amp < 0 {
+			pair   = query^
+			query^ = ""
+		} else {
+			pair   = query[:amp]
+			query^ = query[amp+1:]
+		}
+		if len(pair) == 0 { continue }
 
-	ok = true
-
-	i := strings.index(query^, "=")
-	if i < 0 {
-		entry.key = query^
-		query^ = ""
-		return
+		if eq := strings.index_byte(pair, '='); eq < 0 {
+			entry.key   = pair
+			entry.value = ""
+		} else {
+			entry.key   = pair[:eq]
+			entry.value = pair[eq+1:]
+		}
+		return entry, true
 	}
-
-	entry.key = query[:i]
-	query^ = query[i+1:]
-
-	i = strings.index(query^, "&")
-	if i < 0 {
-		entry.value = query^
-		query^ = ""
-		return
-	}
-
-	entry.value = query[:i]
-	query^ = query[i+1:]
 	return
 }
 
 query_of_url :: proc(url: string) -> string {
 	idx := strings.index_byte(url, '?')
-	if idx <= 0 || idx == len(url) {
+	if idx < 0 {
 		return ""
 	}
 
@@ -569,6 +569,94 @@ query_get_uint :: proc(url: string, key: string, base := 0) -> (result: uint, ok
 	set = true
 	result, ok = strconv.parse_uint(str, base)
 	return
+}
+
+/*
+Decodes an `application/x-www-form-urlencoded` key or value (`+` -> `' '`, `%XX` -> byte).
+
+Returns `s` directly without allocating when no decoding is needed.
+*/
+url_encoded_decode :: proc(s: string, allocator := context.temp_allocator) -> (decoded: string, ok: bool) {
+	if strings.index_any(s, "%+") < 0 {
+		utf8.valid_string(s) or_return
+		return s, true
+	}
+
+	buf, err := make([]byte, len(s), allocator)
+	if err != nil { return }
+	defer if !ok { delete(buf, allocator) }
+
+	n := 0
+	for i := 0; i < len(s); {
+		switch s[i] {
+		case '+':
+			buf[n] = ' '
+			n += 1
+			i += 1
+		case '%':
+			if i+2 >= len(s) { return }
+			val := hex.decode_sequence(s[i+1:i+3]) or_return
+			buf[n] = val
+			n += 1
+			i += 3
+		case:
+			buf[n] = s[i]
+			n += 1
+			i += 1
+		}
+	}
+
+	decoded = string(buf[:n])
+	utf8.valid_string(decoded) or_return
+	return decoded, true
+}
+
+/*
+Parses an `application/x-www-form-urlencoded` body into a map of decoded key/value pairs
+(last value wins on duplicate keys; use `query_iter` + `url_encoded_decode` to preserve duplicates).
+
+Intended for arena/temp allocators (such as `transaction_allocator` or `context.temp_allocator`),
+since undecoded keys and values alias `plain` while decoded ones are allocated with `allocator`.
+*/
+body_url_encoded :: proc(plain: string, allocator := context.temp_allocator) -> (res: map[string]string, ok: bool) {
+	if len(plain) == 0 {
+		res.allocator = allocator
+		return res, true
+	}
+
+	plain_start := uintptr(raw_data(plain))
+	plain_end   := plain_start + uintptr(len(plain))
+	free_if_alloc :: #force_inline proc(s: string, plain_start, plain_end: uintptr, allocator: runtime.Allocator) {
+		if len(s) == 0 { return }
+		if p := uintptr(raw_data(s)); p < plain_start || p >= plain_end {
+			delete(s, allocator)
+		}
+	}
+
+	count := 1 + strings.count(plain, "&")
+	alloc_err: runtime.Allocator_Error
+	res, alloc_err = make(map[string]string, count, allocator)
+	if alloc_err != nil { return }
+	defer if !ok {
+		for k, v in res {
+			free_if_alloc(k, plain_start, plain_end, allocator)
+			free_if_alloc(v, plain_start, plain_end, allocator)
+		}
+		delete(res)
+	}
+
+	s := plain
+	for entry in query_iter(&s) {
+		k := url_encoded_decode(entry.key, allocator) or_return
+		v, vok := url_encoded_decode(entry.value, allocator)
+		if !vok {
+			free_if_alloc(k, plain_start, plain_end, allocator)
+			return
+		}
+		res[k] = v
+	}
+
+	return res, true
 }
 
 @(private)

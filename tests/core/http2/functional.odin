@@ -82,7 +82,7 @@ test_http2_server_with_curl :: proc(t: ^testing.T) {
 	state: Functional_Server
 	state.server = http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18080,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		handler      = http.handler(http2_test_handler),
 	})
@@ -206,7 +206,7 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18082,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		body_quota   = {max_size = 4096, min = 5 * time.Second},
 		handler      = http.router(&r),
@@ -379,7 +379,7 @@ test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18083,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		handler      = http.router(&r),
 	})
@@ -560,7 +560,7 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address              = nbio.IP4_Loopback,
-		port                 = 18084,
+		port                 = http.OS_ASSIGNED_PORT,
 		thread_count         = 1,
 		request_quota        = http.Quota{max_size = 64 * mem.Kilobyte, min = 200 * time.Millisecond, max = 250 * time.Millisecond},
 		handler              = http.router(&r),
@@ -820,7 +820,7 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18085,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		handler      = http.router(&r),
 	})
@@ -991,7 +991,7 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18086,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		handler      = http.router(&r),
 	})
@@ -1117,7 +1117,7 @@ test_http2_accept_error_recovery_and_oom_cleanup :: proc(t: ^testing.T) {
 	}
 	defer nbio.release_thread_event_loop()
 
-	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18087})
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 0})
 	if !testing.expect_value(t, listen_err, nil) {
 		return
 	}
@@ -1281,7 +1281,7 @@ test_http2_dead_socket_send_error_skips_graceful_close :: proc(t: ^testing.T) {
 	}
 	defer nbio.release_thread_event_loop()
 
-	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18088})
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 0})
 	if !testing.expect_value(t, listen_err, nil) {
 		return
 	}
@@ -1473,7 +1473,7 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 	}
 	defer nbio.release_thread_event_loop()
 
-	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 18094})
+	listen_sock, listen_err := nbio.listen_tcp(nbio.Endpoint{nbio.IP4_Loopback, 0})
 	if !testing.expect_value(t, listen_err, nil) {
 		return
 	}
@@ -1731,7 +1731,7 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 
 		s := http.make_server(http.Server_Options{
 			address      = nbio.IP4_Loopback,
-			port         = 0,
+			port         = http.OS_ASSIGNED_PORT,
 			thread_count = 1,
 			handler      = http.router(&r),
 		})
@@ -1796,7 +1796,7 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 	{
 		s2 := http.make_server(http.Server_Options{
 			address      = nbio.IP4_Loopback,
-			port         = 0,
+			port         = http.OS_ASSIGNED_PORT,
 			thread_count = 2,
 			handler      = http.handler(proc(ctx: ^http.Ctx) {
 				http.set_header(&ctx.res, "connection", "close")
@@ -2114,7 +2114,7 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			}
 			s := http.make_server(http.Server_Options{
 				address      = nbio.IP4_Loopback,
-				port         = 18096,
+				port         = http.OS_ASSIGNED_PORT,
 				thread_count = 1,
 			}, oom_alloc)
 
@@ -2148,7 +2148,7 @@ test_http2_setup_failure_cleanup_and_worker_join :: proc(t: ^testing.T) {
 			context.allocator = res.allocator
 			s := http.make_server(http.Server_Options{
 				address      = nbio.IP4_Loopback,
-				port         = 18097,
+				port         = http.OS_ASSIGNED_PORT,
 				thread_count = 2,
 			})
 			res.setup_err = http._setup(&s)
@@ -2346,7 +2346,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
-		port         = 18098,
+		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		body_quota   = {max_size = 4 * mem.Megabyte, min = 5 * time.Second},
 		handler      = http.router(&r),
@@ -2705,7 +2705,7 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address        = nbio.IP4_Loopback,
-		port           = 18099,
+		port           = http.OS_ASSIGNED_PORT,
 		thread_count   = 1,
 		response_quota = http.UNLIMITED_QUOTA,
 		handler        = http.router(&r),
@@ -2962,7 +2962,7 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 
 	server := http.make_server(http.Server_Options{
 		address        = nbio.IP4_Loopback,
-		port           = 18100,
+		port           = http.OS_ASSIGNED_PORT,
 		thread_count   = 1,
 		body_quota     = http.UNLIMITED_QUOTA,
 		response_quota = http.UNLIMITED_QUOTA,
@@ -3146,4 +3146,22 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, server_track.current_memory_allocated, 0)
 	testing.expect_value(t, len(server_track.bad_free_array), 0)
+}
+
+@(test)
+test_http2_os_assigned_port :: proc(t: ^testing.T) {
+	s := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 1,
+	})
+	defer http._destroy(&s)
+
+	setup_err := http._setup(&s)
+	testing.expect_value(t, setup_err, nil)
+	if setup_err != nil { return }
+
+	ep, ep_err := nbio.bound_endpoint(s.socket)
+	testing.expect_value(t, ep_err, nil)
+	testing.expect(t, ep.port > 0, "expected OS to assign a non-zero port")
 }

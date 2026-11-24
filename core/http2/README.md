@@ -105,6 +105,7 @@
   - **Enforce `GET` method in `_prepare_upgrade`**: Rejected non-`GET` methods (`405 Method Not Allowed` with `Allow: GET`) and non-`HTTP/1.1` versions (`400 Bad Request`) per RFC 6455 §4.2.1.
 - [ ] **Testing, docs & package relocation**:
   - [ ] Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
+  - [ ] Remove all (/most) of the logging. Trying to make sure errors are still debuggable.
   - [x] Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
   - [ ] Rewrite usage examples and overview into `doc.odin`, and document key lifetime contracts:
     - Zero-copy async slice lifetimes (`respond_bytes`, `respond_plain`, `respond_html`, `send`, `send_chunk`, `set_header`, `respond_file_path` — do not pass stack buffers or prematurely freed `temp_allocator` memory).
@@ -112,6 +113,7 @@
     - `request_set_quota` / `response_set_quota` `^Quota` pointer lifetime (must outlive the transaction).
     - Transaction-scoped lifetime of request/route/cookie/`body_parser` (and `body(..., retain = true)`) slices across keep-alive requests (clone if retaining beyond the request), vs callback-scoped `Body_Cb` `body` slices when using the default `body(..., retain = false)` — warn explicitly that `retain = false` overwrites the live reusable buffer **in place** (undetectable by ASAN), so async consumers (`send`, `send_chunk`, `nbio.write`, etc.) must either copy `body` or pause via `body_pause`/`body_resume` (which keeps `body` valid zero-copy until `body_resume` runs; `is_partial == false` is always the `(nil, false)` EOF signal).
     - Worker-thread-pool request offloading & cross-thread arena contract: while only one thread touches `c` at a time, worker threads may read request state, allocate/build responses and headers on `transaction_allocator`/`temp_allocator`, and destroy detached arenas (`arena_destroy`); `nbio`-bound I/O calls (`respond`/`respond_*`, `send`, `send_chunk`, `body`, `connection_close`) must be posted back to the owning server thread via `nbio.current_thread_event_loop()` + `nbio.next_tick_poly(..., l = loop)` / `nbio.wake_up(loop)`.
+  - [ ] Write a few good examples of common use-cases to go into the examples repository
   - [ ] Move `core/http2` into `core/net/http`.
 
 ### Memory Management Follow-Ups (For Further Review)

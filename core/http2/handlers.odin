@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:io"
 import "core:log"
 import "core:net"
-import "core:strings"
 import "core:time"
 import "core:fmt"
 
@@ -77,7 +76,7 @@ logged :: proc(next: ^Handler) -> Handler {
 						ctx.req.line.target,
 						ctx.req.line.version.major,
 						ctx.req.line.version.minor,
-						strings.trim_right_space(status_string(ctx.res.status)),
+						status_string(ctx.res.status),
 						ctx.res.sent,
 						since(logger_ctx.start),
 					)
@@ -90,7 +89,7 @@ logged :: proc(next: ^Handler) -> Handler {
 						ctx.req.line.target,
 						ctx.req.line.version.major,
 						ctx.req.line.version.minor,
-						strings.trim_right_space(status_string(ctx.res.status)),
+						status_string(ctx.res.status),
 						ctx.res.sent,
 						since(logger_ctx.start),
 					)

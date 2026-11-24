@@ -34,7 +34,8 @@ Endpoint :: nbio.Endpoint
 
 Server_Options :: struct {
 	address:              nbio.Address,
-	port:                 int,
+	// nil defaults to DEFAULT_PORT; use OS_ASSIGNED_PORT (0) for an ephemeral OS-assigned port.
+	port:                 Maybe(int),
 	backlog:              int,
 	thread_count:         int,
 	handler:              Handler,
@@ -51,6 +52,7 @@ Server_Options :: struct {
 DEFAULT_BACKLOG     :: 1000
 DEFAULT_ADDRESS     :: nbio.IP4_Loopback
 DEFAULT_PORT        :: 8080
+OS_ASSIGNED_PORT    :: 0
 DEFAULT_MAX_HEADERS :: 128
 
 General_Error :: enum i32 {
@@ -117,8 +119,8 @@ _acquire_event_loop :: proc(s: ^Server) -> General_Error {
 _listen :: proc(s: ^Server) -> Listen_Error {
 	socket, net_err := nbio.listen_tcp(
 		nbio.Endpoint{
-			s.opts.address != nil ? s.opts.address  : DEFAULT_ADDRESS,
-			s.opts.port > 0       ? s.opts.port     : DEFAULT_PORT,
+			s.opts.address != nil ? s.opts.address : DEFAULT_ADDRESS,
+			s.opts.port.? or_else DEFAULT_PORT,
 		},
 		s.opts.backlog > 0        ? s.opts.backlog  : DEFAULT_BACKLOG,
 	)
@@ -994,6 +996,7 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 	status := status_string(res.status)
 	if len(status) > 0 {
 		append_str(&res._buf, status) or_return
+		append_str(&res._buf, "\r\n") or_return
 	} else {
 		if _, write_err := io.write_int(w, int(res.status)); write_err != nil {
 			return .Out_Of_Memory
