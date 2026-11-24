@@ -467,27 +467,6 @@ connections immediately, drains in-flight requests, and runs each server thread'
 Safe to call from any normal thread, including a request handler or worker thread.
 Not safe to call directly from a POSIX signal handler because it acquires `s.shutdown_mutex`;
 use `server_shutdown_async` from signal handlers instead.
-
-Example (graceful shutdown on Ctrl-C / SIGTERM):
-	server: http.Server
-
-	when ODIN_OS == .Windows {
-		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
-			return win.BOOL(http.server_shutdown_async(&server))
-		}, win.TRUE)
-	} else {
-		on_signal :: proc "c" (sig: libc.int) {
-			if !http.server_shutdown_async(&server) {
-				libc.signal(sig, cast(proc "c" (libc.int))libc.SIG_DFL)
-				libc.raise(sig)
-			}
-		}
-		libc.signal(libc.SIGINT, on_signal)
-		libc.signal(libc.SIGTERM, on_signal)
-	}
-
-	server = http.make_server(opts)
-	err := http.listen_and_serve(&server)
 */
 server_shutdown :: proc(s: ^Server) {
 	sync.mutex_lock(&s.shutdown_mutex)
@@ -510,6 +489,36 @@ Windows `SetConsoleCtrlHandler` callback.
 
 Returns `true` if shutdown was triggered by this call, or `false` if the server is not currently
 serving, shutdown was already requested (e.g. a second Ctrl-C), or the event loop queue is full.
+
+Example:
+	import win "core:sys/windows"
+	import "core:sys/posix"
+
+	server: http.Server
+
+	when ODIN_OS == .Windows {
+		// Satisfy -vet
+		_ :: posix
+
+		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
+			return win.BOOL(http.server_shutdown_async(&server))
+		}, win.TRUE)
+	} else {
+		// Satisfy -vet
+		_ :: win
+
+		// `server_shutdown_async` is contextless and async-signal-safe; a second signal restores the
+		// default handler to force-exit immediately.
+		on_signal :: proc "c" (sig: posix.Signal) {
+			if !http.server_shutdown_async(&server) {
+				posix.signal(sig, auto_cast posix.SIG_DFL)
+				posix.raise(sig)
+			}
+		}
+
+		posix.signal(.SIGINT, on_signal)
+		posix.signal(.SIGTERM, on_signal)
+	}
 */
 server_shutdown_async :: proc "contextless" (s: ^Server) -> bool {
 	if sync.atomic_load(&s.shutting_down) {

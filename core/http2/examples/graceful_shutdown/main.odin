@@ -12,8 +12,8 @@ import "core:nbio"
 import "core:sync"
 import "core:time"
 
-import "core:c/libc"
 import win "core:sys/windows"
+import "core:sys/posix"
 
 import http "core:http2"
 
@@ -39,7 +39,7 @@ main :: proc() {
 
 	when ODIN_OS == .Windows {
 		// Satisfy -vet
-		_ :: libc
+		_ :: posix
 
 		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
 			return win.BOOL(http.server_shutdown_async(&server))
@@ -50,14 +50,15 @@ main :: proc() {
 
 		// `server_shutdown_async` is contextless and async-signal-safe; a second signal restores the
 		// default handler to force-exit immediately.
-		on_signal :: proc "c" (sig: libc.int) {
+		on_signal :: proc "c" (sig: posix.Signal) {
 			if !http.server_shutdown_async(&server) {
-				libc.signal(sig, cast(proc "c" (libc.int))libc.SIG_DFL)
-				libc.raise(sig)
+				posix.signal(sig, auto_cast posix.SIG_DFL)
+				posix.raise(sig)
 			}
 		}
-		libc.signal(libc.SIGINT, on_signal)
-		libc.signal(libc.SIGTERM, on_signal)
+
+		posix.signal(.SIGINT, on_signal)
+		posix.signal(.SIGTERM, on_signal)
 	}
 
 	server = http.make_server(http.Server_Options{
