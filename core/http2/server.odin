@@ -600,6 +600,7 @@ _connection_release :: proc(c: ^Connection) {
 	// 	log.debugf("http[t=%v][c=%v]: msg=\"request cleaned up\", mem_use=%M", td.id, c.socket, mem_use)
 	// }
 
+	// `xar.linear_search` checks chunk pointer ranges (O(log N)), not individual connections.
 	idx, ok := xar.linear_search(&td.connections, c)
 	assert(ok)
 	xar.release(&td.connections, idx)
