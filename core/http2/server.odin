@@ -145,8 +145,9 @@ Server_Thread :: struct {
 	curr_date:   ^nbio.Operation,
 	id:          int,
 	connections: xar.Freelist_Array(Connection, 8),
-	date:        [DATE_LENGTH]byte,
-	free_arenas: [BUCKETS]^_Arena_Block,
+	date:             [DATE_LENGTH]byte,
+	free_arenas:      [BUCKETS]_Arena_Bucket,
+	arena_trim_ticks: u8,
 }
 
 /*
@@ -1190,6 +1191,11 @@ response_must_close :: proc(c: ^Connection) -> bool {
 date_update :: proc(_: ^nbio.Operation) {
 	td.curr_date = nbio.timeout(time.Second, date_update)
 	date_write(td.date[:], nbio.now())
+	td.arena_trim_ticks += 1
+	if td.arena_trim_ticks >= ARENA_TRIM_INTERVAL {
+		td.arena_trim_ticks = 0
+		_server_thread_free_arenas_trim(td)
+	}
 }
 
 now :: nbio.now

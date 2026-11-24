@@ -181,6 +181,12 @@ _Arena_Block :: struct {
 	prev: ^_Arena_Block,
 }
 
+_Arena_Bucket :: struct {
+	head:      ^_Arena_Block,
+	count:     u32,
+	min_count: u32,
+}
+
 @(private)
 ARENA_SIZE :: 4096
 @(private)
@@ -191,6 +197,11 @@ BUCKETS    :: 13   // Last bucket starts at 16 MiB
 @(private)
 MAX_POOLED_BLOCK_SIZE :: 1 << (SHIFT + BUCKETS - 1)
 #assert(MAX_POOLED_BLOCK_SIZE == 16 * mem.Megabyte)
+
+@(private)
+ARENA_TRIM_INTERVAL     :: 15 // Seconds between free_arenas idle-decay trims.
+@(private)
+MAX_ARENA_TRIM_PER_TICK :: 64 // Cap blocks freed per trim to avoid event-loop stalls.
 
 /*
 Returns a size `>= size` (at least `MULTIPLIER`) that makes full use of the block it ends up in when
@@ -293,8 +304,14 @@ _arena_block_acquire :: proc(backing: mem.Allocator, size: int = 0, align := mem
 	if needed <= MAX_POOLED_BLOCK_SIZE {
 		bucket := _bucket_for(needed)
 		if td != nil && _arena_backing_allocator(td.s) == backing {
-			if free_arena := td.free_arenas[bucket]; free_arena != nil {
-				td.free_arenas[bucket] = free_arena.prev
+			b := &td.free_arenas[bucket]
+			if free_arena := b.head; free_arena != nil {
+				assert(b.count > 0)
+				b.head = free_arena.prev
+				b.count -= 1
+				if b.count < b.min_count {
+					b.min_count = b.count
+				}
 				return _arena_block_reset(free_arena), nil
 			}
 		}
@@ -325,8 +342,10 @@ _arena_block_release :: proc(backing: mem.Allocator, arena: ^_Arena_Block) {
 		sanitizer.address_poison(arena.data[size_of(_Arena_Block):])
 
 		bucket := _bucket_to_put(uint(len(arena.data)))
-		arena.prev = td.free_arenas[bucket]
-		td.free_arenas[bucket] = arena
+		b := &td.free_arenas[bucket]
+		arena.prev = b.head
+		b.head = arena
+		b.count += 1
 		return
 	}
 
@@ -345,13 +364,33 @@ _server_thread_put_free_arena :: proc(arena: ^_Arena_Block) {
 
 _server_thread_free_arenas_destroy :: proc(t: ^Server_Thread) {
 	backing := _arena_backing_allocator(t.s)
-	for &head in t.free_arenas {
-		for block := head; block != nil; {
+	for &b in t.free_arenas {
+		for block := b.head; block != nil; {
 			prev := block.prev
 			_arena_block_free(block, backing)
 			block = prev
 		}
-		head = nil
+		b = {}
+	}
+}
+
+_server_thread_free_arenas_trim :: proc(t: ^Server_Thread) {
+	backing := _arena_backing_allocator(t.s)
+	budget := u32(MAX_ARENA_TRIM_PER_TICK)
+	// Walk largest buckets first so big idle blocks are reclaimed before small ones.
+	#reverse for &b in t.free_arenas {
+		if b.min_count > 0 && budget > 0 {
+			to_free := min((b.min_count + 1) / 2, budget)
+			for _ in 0 ..< to_free {
+				if b.head == nil { break }
+				block := b.head
+				b.head = block.prev
+				b.count -= 1
+				budget -= 1
+				_arena_block_free(block, backing)
+			}
+		}
+		b.min_count = b.count
 	}
 }
 

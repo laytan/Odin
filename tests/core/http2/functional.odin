@@ -1984,7 +1984,7 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	testing.expect(t, raw_data(c.scanner.buf) == orig_buf_ptr, "expected scanner buffer pointer preserved across free_all")
 	testing.expect(t, c.temp_arena.tail == orig_block, "expected pinned block retained as tail")
 	testing.expect(t, orig_block.prev == nil, "expected overflow block unlinked")
-	testing.expect(t, thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+	testing.expect(t, thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
 	testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected scanner buffer unpoisoned")
 
 	Send_State :: struct {
