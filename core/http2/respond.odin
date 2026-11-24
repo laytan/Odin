@@ -58,17 +58,14 @@ get_range_header :: proc(req: ^Request) -> (range: Range, ok: bool) {
 	str := get_header(req, "range") or_return
 
 	PREFIX :: "bytes="
-	if !strings.has_prefix(str, PREFIX) {
+	if len(str) < len(PREFIX) || !_headers_eq(str[:len(PREFIX)], PREFIX) {
 		return
 	}
 	str = str[len(PREFIX):]
 
-	comma_idx := strings.index_byte(str, ',')
-	if comma_idx >= 0 {
-		str = str[:comma_idx]
-
-		c := connection_of_request(req)
-		log.warnf("http[t=%v][c=%v]: msg=\"unimplemented: multi-range requests, falling back to first range\"", td.id, c.socket)
+	// RFC 9110 §14.2: Ignore multi-range requests (no multipart/byteranges support).
+	if strings.index_byte(str, ',') >= 0 {
+		return
 	}
 
 	start, dash, end := strings.partition(str, "-")
@@ -94,6 +91,10 @@ get_range_header :: proc(req: ^Request) -> (range: Range, ok: bool) {
 }
 
 apply_range_to_size :: proc(range: Range, size: int) -> (offset, nbytes: int, ok: bool) {
+	if size <= 0 {
+		return
+	}
+
 	nbytes = size
 
 	start, has_start := range.start.?
@@ -109,14 +110,17 @@ apply_range_to_size :: proc(range: Range, size: int) -> (offset, nbytes: int, ok
 	if end, has_end := range.end.?; has_end {
 		if has_start {
 			assert(end >= 0)
-			end = min(end, size-1)
 			if start > end {
 				return
 			}
+			end = min(end, size-1)
 			nbytes = end - start + 1
 		} else {
 			suffix_length := -end
 			assert(suffix_length >= 0)
+			if suffix_length == 0 {
+				return
+			}
 			if suffix_length < size {
 				offset = size - suffix_length
 				nbytes = suffix_length
@@ -190,19 +194,93 @@ set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) -> mem.Al
 	return headers_add(&res.headers, "Set-Cookie", strings.to_string(b), loc)
 }
 
-// TODO: prob want some configuration for the range handling, if it should be done at all, how to handle if-range
-// custom etag maybe
+@(private="file")
+_is_strong_etag :: proc(etag: string) -> bool {
+	return len(etag) >= 2 && etag[0] == '"' && etag[len(etag)-1] == '"'
+}
+
+@(private="file")
+_if_range_matches :: proc(res: ^Response, condition: string, last_modified: Maybe(time.Time)) -> bool {
+	if len(condition) == 0 {
+		return false
+	}
+
+	if condition[0] == '"' || strings.has_prefix(condition, "W/") || strings.has_prefix(condition, "w/") {
+		if !_is_strong_etag(condition) {
+			return false
+		}
+
+		// User can set etag header in their handler and we will check it.
+		etag := headers_get(res.headers, "etag") or_return
+		return _is_strong_etag(etag) && condition == etag
+	}
+
+	condition_time := date_parse(condition) or_return
+
+	lm_time: time.Time
+	if lm_hdr, has_lm := headers_get(res.headers, "last-modified"); has_lm {
+		lm_time = date_parse(lm_hdr) or_return
+	} else {
+		lm_time = last_modified.? or_return
+	}
+
+	return time.to_unix_seconds(condition_time) == time.to_unix_seconds(lm_time)
+}
+
+@(private="file")
+_apply_request_range :: proc(res: ^Response, size: int, last_modified: Maybe(time.Time) = nil) -> (offset, nbytes: int, responded: bool) {
+	nbytes = size
+
+	if res.status != .OK {
+		return
+	}
+
+	if accept_ranges, has_ar := headers_get(res.headers, "accept-ranges"); has_ar {
+		// User can set this to none in their handler to disable our ranges functionality.
+		if _headers_eq(accept_ranges, "none") {
+			return
+		}
+	} else {
+		set_header(res, "Accept-Ranges", "bytes")
+	}
+
+	c := connection_of_response(res)
+	if c.req.line.method != .Get && c.req.line.method != .Head {
+		return
+	}
+
+	if condition, has_condition := headers_get(c.req.headers, "if-range"); has_condition {
+		if !_if_range_matches(res, condition, last_modified) {
+			return
+		}
+	}
+
+	range, has_range := get_range_header(&c.req)
+	if !has_range {
+		return
+	}
+
+	log.debugf("http[t=%v][c=%v]: range=%v", td.id, c.socket, range)
+	range_ok: bool
+	if offset, nbytes, range_ok = apply_range_to_size(range, size); !range_ok {
+		log.debugf("http[t=%v][c=%v]: range=%v, size=%v, status=%v", td.id, c.socket, range, size, Status.Range_Not_Satisfiable)
+		res.status = .Range_Not_Satisfiable
+		set_content_range_header(res, nil, size)
+		respond(res)
+		return 0, 0, true
+	}
+
+	res.status = .Partial_Content
+	set_content_range_header(res, [2]int{offset, offset + max(0, nbytes - 1)}, size)
+	return offset, nbytes, false
+}
 
 _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, last_modified: time.Time) {
 	assert(size > 0)
 
 	c := connection_of_response(res)
-	allocator := transaction_allocator(c)
-
-	set_header(res, "Accept-Ranges", "bytes")
-
-	{
-		last_modified_buf, err := make([]byte, DATE_LENGTH, allocator)
+	if !headers_has(res.headers, "last-modified") {
+		last_modified_buf, err := make([]byte, DATE_LENGTH, transaction_allocator(c))
 		if err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Last-Modified buffer\", err=%v", td.id, c.socket, err)
 			res._state = .Error
@@ -213,37 +291,9 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 		set_header(res, "Last-Modified", string(last_modified_buf))
 	}
 
-	nbytes := size
-	offset := 0
-
-	condition_met := true
-	if condition, has_condition := headers_get(c.req.headers, "if-range"); has_condition {
-		condition_met = false
-		if condition_time, ok_time := date_parse(condition); ok_time {
-			last_modified_secs  := time.to_unix_seconds(last_modified)
-			condition_time_secs := time.to_unix_seconds(condition_time)
-			log.debugf("http[t=%v][d=%v]: if_range=%v, last_modified=%v", td.id, c.socket, condition_time_secs, last_modified_secs)
-			condition_met = condition_time_secs >= last_modified_secs
-		} else {
-			log.infof("http[t=%v][d=%v]: if_range=%q, ok=false", td.id, c.socket, condition)
-		}
-	}
-
-	if condition_met {
-		if range, has_range := get_range_header(&c.req); has_range {
-			log.debugf("http[t=%v][c=%v]: range=%v", td.id, c.socket, range)
-			range_ok: bool
-			if offset, nbytes, range_ok = apply_range_to_size(range, size); !range_ok {
-				log.debugf("http[t=%v][c=%v]: range=%v, size=%v, status=%v", td.id, c.socket, range, size, Status.Range_Not_Satisfiable)
-				res.status = .Range_Not_Satisfiable
-				set_content_range_header(res, nil, size)
-				respond(res)
-				return
-			}
-
-			res.status = .Partial_Content
-			set_content_range_header(res, [2]int{offset, offset+max(0, nbytes-1)}, size)
-		}
+	offset, nbytes, responded := _apply_request_range(res, size, last_modified)
+	if responded {
+		return
 	}
 
 	set_content_length_header(res, nbytes)
@@ -744,13 +794,23 @@ respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
 
 /*
 Responds with the given content, automatically setting `Content-Type` from `file`'s extension if not already set.
+Supports `Range` and `If-Range` requests (disable with `Accept-Ranges: none`, or pre-set `ETag`/`Last-Modified`).
 Useful when serving files embedded at compile time with `#load(path)`.
+
+You can set the Last-Modified header before calling this (for example with the compilation timestamp)
+to add last modified ranges support.
 */
 respond_file_content :: proc(res: ^Response, file: string, content: []byte) {
 	if mime, ok := mime_from_extension(file); ok {
 		_set_default_content_type(res, mime)
 	}
-	respond_bytes(res, content)
+
+	offset, nbytes, responded := _apply_request_range(res, len(content))
+	if responded {
+		return
+	}
+
+	respond_bytes(res, content[offset:offset+nbytes])
 }
 
 _resolve_dir_path :: proc(target, path: string, allocator: runtime.Allocator) -> (resolved: string, is_dir_redirect: bool, ok: bool) {

@@ -3165,3 +3165,264 @@ test_http2_os_assigned_port :: proc(t: ^testing.T) {
 	testing.expect_value(t, ep_err, nil)
 	testing.expect(t, ep.port > 0, "expected OS to assign a non-zero port")
 }
+
+@(test)
+test_http2_range_requests_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	Range_Case_Result :: struct {
+		setopt_ok:          bool,
+		perform_err:        curl.code,
+		getinfo_err:        curl.code,
+		accept_ranges_buf:  [64]byte,
+		accept_ranges_len:  int,
+		content_range_buf:  [64]byte,
+		content_range_len:  int,
+		last_modified_buf:  [64]byte,
+		last_modified_len:  int,
+		content_length_buf: [32]byte,
+		content_length_len: int,
+		response:           Curl_Response,
+	}
+
+	curl_capture_range_headers :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
+		context = runtime.default_context()
+
+		real_size := int(size) * int(nmemb)
+		line := strings.trim_space(string(contents[:real_size]))
+		if colon := strings.index_byte(line, ':'); colon > 0 {
+			res := (^Range_Case_Result)(userp)
+			key := line[:colon]
+			val := strings.trim_space(line[colon+1:])
+			switch {
+			case strings.equal_fold(key, "accept-ranges"):
+				res.accept_ranges_len = copy(res.accept_ranges_buf[:], val)
+			case strings.equal_fold(key, "content-range"):
+				res.content_range_len = copy(res.content_range_buf[:], val)
+			case strings.equal_fold(key, "last-modified"):
+				res.last_modified_len = copy(res.last_modified_buf[:], val)
+			case strings.equal_fold(key, "content-length"):
+				res.content_length_len = copy(res.content_length_buf[:], val)
+			}
+		}
+
+		return c.size_t(real_size)
+	}
+
+	CONTENT :: "0123456789"
+
+	r: http.Router
+	defer http.router_destroy(r)
+	http.route_get(&r, "/file", proc(ctx: ^http.Ctx) {
+		http.respond_file_path(&ctx.res, "core/http2/README.md")
+	})
+	http.route_get(&r, "/content", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "ETag", `"v1"`)
+		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+	})
+	http.route_post(&r, "/content", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "ETag", `"v1"`)
+		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+	})
+	http.route_get(&r, "/weak", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "ETag", `W/"v1"`)
+		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+	})
+	http.route_get(&r, "/no-range", proc(ctx: ^http.Ctx) {
+		http.set_header(&ctx.res, "Accept-Ranges", "none")
+		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+	})
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 1,
+		handler      = http.router(&r),
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Range_Test_Ctx :: struct {
+		server:           ^http.Server,
+		endpoint_err:     net.Socket_Info_Error,
+		handle_ok:        bool,
+		file_range:       Range_Case_Result,
+		file_if_match:    Range_Case_Result,
+		file_if_older:    Range_Case_Result,
+		file_if_future:   Range_Case_Result,
+		content_range:    Range_Case_Result,
+		content_head:     Range_Case_Result,
+		content_suffix:   Range_Case_Result,
+		content_neg_zero: Range_Case_Result,
+		content_oob:      Range_Case_Result,
+		content_multi:    Range_Case_Result,
+		etag_match:       Range_Case_Result,
+		etag_mismatch:    Range_Case_Result,
+		etag_weak_req:    Range_Case_Result,
+		etag_weak_res:    Range_Case_Result,
+		no_range:         Range_Case_Result,
+		post_range:       Range_Case_Result,
+	}
+
+	ctx := Range_Test_Ctx{server = &server}
+	defer {
+		delete(ctx.file_range.response.body)
+		delete(ctx.file_if_match.response.body)
+		delete(ctx.file_if_older.response.body)
+		delete(ctx.file_if_future.response.body)
+		delete(ctx.content_range.response.body)
+		delete(ctx.content_head.response.body)
+		delete(ctx.content_suffix.response.body)
+		delete(ctx.content_neg_zero.response.body)
+		delete(ctx.content_oob.response.body)
+		delete(ctx.content_multi.response.body)
+		delete(ctx.etag_match.response.body)
+		delete(ctx.etag_mismatch.response.body)
+		delete(ctx.etag_weak_req.response.body)
+		delete(ctx.etag_weak_res.response.body)
+		delete(ctx.no_range.response.body)
+		delete(ctx.post_range.response.body)
+	}
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Range_Test_Ctx)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, endpoint_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = endpoint_err
+		if endpoint_err != nil {
+			return
+		}
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil {
+			return
+		}
+		defer curl.easy_cleanup(handle)
+
+		do_req :: proc(
+			handle:   ^curl.CURL,
+			port:     int,
+			path:     string,
+			method:   enum { Get, Head, Post },
+			range_h:  string,
+			if_range: string,
+			res:      ^Range_Case_Result,
+			capture:  curl.write_callback,
+		) {
+			url := fmt.ctprintf("http://127.0.0.1:%d%s", port, path)
+			hdrs: ^curl.slist
+			hdrs = curl.slist_append(hdrs, fmt.ctprintf("Range: %s", range_h))
+			if if_range != "" {
+				hdrs = curl.slist_append(hdrs, fmt.ctprintf("If-Range: %s", if_range))
+			}
+			defer curl.slist_free_all(hdrs)
+
+			ok :=
+				curl.easy_setopt(handle, .URL, url) == .E_OK &&
+				curl.easy_setopt(handle, .HTTPHEADER, hdrs) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+				curl.easy_setopt(handle, .WRITEDATA, &res.response) == .E_OK &&
+				curl.easy_setopt(handle, .HEADERFUNCTION, capture) == .E_OK &&
+				curl.easy_setopt(handle, .HEADERDATA, res) == .E_OK
+
+			switch method {
+			case .Get:
+				ok = ok && curl.easy_setopt(handle, .HTTPGET, c.long(1)) == .E_OK
+			case .Head:
+				ok = ok && curl.easy_setopt(handle, .NOBODY, c.long(1)) == .E_OK
+			case .Post:
+				ok = ok &&
+					curl.easy_setopt(handle, .POST, c.long(1)) == .E_OK &&
+					curl.easy_setopt(handle, .POSTFIELDS, rawptr(nil)) == .E_OK &&
+					curl.easy_setopt(handle, .POSTFIELDSIZE, c.long(0)) == .E_OK
+			}
+
+			res.setopt_ok = ok
+			if !ok {
+				return
+			}
+
+			res.perform_err = curl.easy_perform(handle)
+			res.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &res.response.status)
+		}
+
+		do_req(handle, endpoint.port, "/file", .Get, "bytes=0-15", "", &ctx.file_range, curl_capture_range_headers)
+		lm := string(ctx.file_range.last_modified_buf[:ctx.file_range.last_modified_len])
+		do_req(handle, endpoint.port, "/file", .Get, "bytes=0-15", lm, &ctx.file_if_match, curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/file", .Get, "bytes=0-15", "Fri, 05 Feb 2023 09:01:10 GMT", &ctx.file_if_older, curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/file", .Get, "bytes=0-15", "Thu, 01 Jan 2099 00:00:00 GMT", &ctx.file_if_future, curl_capture_range_headers)
+
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=2-5",      "",       &ctx.content_range,    curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Head, "bytes=2-5",      "",       &ctx.content_head,     curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=-3",       "",       &ctx.content_suffix,   curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=-0",       "",       &ctx.content_neg_zero, curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=20-30",    "",       &ctx.content_oob,      curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=0-1, 4-5", "",       &ctx.content_multi,    curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=2-5",      `"v1"`,   &ctx.etag_match,       curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=2-5",      `"v2"`,   &ctx.etag_mismatch,    curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Get,  "bytes=2-5",      `W/"v1"`, &ctx.etag_weak_req,    curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/weak",     .Get,  "bytes=2-5",      `"v1"`,   &ctx.etag_weak_res,    curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/no-range", .Get,  "bytes=2-5",      "",       &ctx.no_range,         curl_capture_range_headers)
+		do_req(handle, endpoint.port, "/content",  .Post, "bytes=2-5",      "",       &ctx.post_range,       curl_capture_range_headers)
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+
+	readme_bytes, readme_err := os.read_entire_file("core/http2/README.md", context.temp_allocator)
+	testing.expect_value(t, readme_err, nil)
+
+	check_range :: proc(
+		t:           ^testing.T,
+		name:        string,
+		res:         ^Range_Case_Result,
+		exp_status:  c.long,
+		exp_ar:      string,
+		exp_cr:      string,
+		exp_body:    string,
+	) {
+		testing.expectf(t, res.setopt_ok, "%s: setopt failed", name)
+		testing.expectf(t, res.perform_err == .E_OK, "%s: curl failed: %s", name, curl.easy_strerror(res.perform_err))
+		testing.expect_value(t, res.getinfo_err, curl.code.E_OK)
+		testing.expect_value(t, res.response.status, exp_status)
+		if exp_ar != "" {
+			testing.expect_value(t, string(res.accept_ranges_buf[:res.accept_ranges_len]), exp_ar)
+		}
+		if exp_cr != "" {
+			testing.expect_value(t, string(res.content_range_buf[:res.content_range_len]), exp_cr)
+		}
+		testing.expect_value(t, string(res.response.body[:]), exp_body)
+	}
+
+	exp_file_cr := fmt.tprintf("bytes 0-15/%d", len(readme_bytes))
+	check_range(t, "file_range",     &ctx.file_range,     206, "bytes", exp_file_cr, string(readme_bytes[:16]))
+	testing.expect(t, ctx.file_range.last_modified_len > 0, "expected Last-Modified header")
+	check_range(t, "file_if_match",  &ctx.file_if_match,  206, "bytes", exp_file_cr, string(readme_bytes[:16]))
+	check_range(t, "file_if_older",  &ctx.file_if_older,  200, "bytes", "",          string(readme_bytes))
+	check_range(t, "file_if_future", &ctx.file_if_future, 200, "bytes", "",          string(readme_bytes))
+
+	check_range(t, "content_range",    &ctx.content_range,    206, "bytes", "bytes 2-5/10", "2345")
+	check_range(t, "content_head",     &ctx.content_head,     206, "bytes", "bytes 2-5/10", "")
+	testing.expect_value(t, string(ctx.content_head.content_length_buf[:ctx.content_head.content_length_len]), "4")
+	check_range(t, "content_suffix",   &ctx.content_suffix,   206, "bytes", "bytes 7-9/10", "789")
+	check_range(t, "content_neg_zero", &ctx.content_neg_zero, 416, "bytes", "bytes */10",   "")
+	check_range(t, "content_oob",      &ctx.content_oob,      416, "bytes", "bytes */10",   "")
+	check_range(t, "content_multi",    &ctx.content_multi,    200, "bytes", "",             CONTENT)
+	check_range(t, "etag_match",       &ctx.etag_match,       206, "bytes", "bytes 2-5/10", "2345")
+	check_range(t, "etag_mismatch",    &ctx.etag_mismatch,    200, "bytes", "",             CONTENT)
+	check_range(t, "etag_weak_req",    &ctx.etag_weak_req,    200, "bytes", "",             CONTENT)
+	check_range(t, "etag_weak_res",    &ctx.etag_weak_res,    200, "bytes", "",             CONTENT)
+	check_range(t, "no_range",         &ctx.no_range,         200, "none",  "",             CONTENT)
+	check_range(t, "post_range",       &ctx.post_range,       200, "bytes", "",             CONTENT)
+}

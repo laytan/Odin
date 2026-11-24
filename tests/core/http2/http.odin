@@ -134,3 +134,116 @@ test_body_url_encoded :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(track.bad_free_array), 0)
 	}
 }
+
+@(test)
+test_range_header_and_apply :: proc(t: ^testing.T) {
+	http.headers_init_hash_secret()
+
+	make_req :: proc(range_val: string) -> http.Request {
+		req: http.Request
+		req.headers.allocator = context.allocator
+		http.headers_set(&req.headers, "Range", range_val)
+		return req
+	}
+
+	// Valid ranges.
+	{
+		req := make_req("bytes=0-9")
+		defer http.headers_destroy(req.headers)
+		r, ok := http.get_range_header(&req)
+		testing.expect(t, ok)
+		testing.expect_value(t, r.start, Maybe(int)(0))
+		testing.expect_value(t, r.end, Maybe(int)(9))
+	}
+	{
+		req := make_req("BYTES=0-9")
+		defer http.headers_destroy(req.headers)
+		r, ok := http.get_range_header(&req)
+		testing.expect(t, ok)
+		testing.expect_value(t, r.start, Maybe(int)(0))
+		testing.expect_value(t, r.end, Maybe(int)(9))
+	}
+	{
+		req := make_req("bytes=5-")
+		defer http.headers_destroy(req.headers)
+		r, ok := http.get_range_header(&req)
+		testing.expect(t, ok)
+		testing.expect_value(t, r.start, Maybe(int)(5))
+		testing.expect_value(t, r.end, Maybe(int)(nil))
+	}
+	{
+		req := make_req("bytes=-10")
+		defer http.headers_destroy(req.headers)
+		r, ok := http.get_range_header(&req)
+		testing.expect(t, ok)
+		testing.expect_value(t, r.start, Maybe(int)(nil))
+		testing.expect_value(t, r.end, Maybe(int)(-10))
+	}
+	{
+		req := make_req("bytes=-0")
+		defer http.headers_destroy(req.headers)
+		r, ok := http.get_range_header(&req)
+		testing.expect(t, ok)
+		_, _, apply_ok := http.apply_range_to_size(r, 100)
+		testing.expect(t, !apply_ok, "bytes=-0 must be unsatisfiable")
+	}
+
+	// Ignored / invalid Range headers.
+	for bad in ([?]string{
+		"bytes=0-1, 2-3",
+		"items=0-5",
+		"bytes=-",
+		"bytes=abc-def",
+		"bytes=0-1-2",
+		"bytes",
+	}) {
+		req := make_req(bad)
+		defer http.headers_destroy(req.headers)
+		_, ok := http.get_range_header(&req)
+		testing.expectf(t, !ok, "expected %q to be ignored/rejected", bad)
+	}
+
+	// apply_range_to_size cases.
+	{
+		off, n, ok := http.apply_range_to_size({start = 10, end = 19}, 100)
+		testing.expect(t, ok)
+		testing.expect_value(t, off, 10)
+		testing.expect_value(t, n, 10)
+	}
+	{
+		off, n, ok := http.apply_range_to_size({start = 90, end = 200}, 100)
+		testing.expect(t, ok)
+		testing.expect_value(t, off, 90)
+		testing.expect_value(t, n, 10)
+	}
+	{
+		off, n, ok := http.apply_range_to_size({start = 90}, 100)
+		testing.expect(t, ok)
+		testing.expect_value(t, off, 90)
+		testing.expect_value(t, n, 10)
+	}
+	{
+		off, n, ok := http.apply_range_to_size({end = -10}, 100)
+		testing.expect(t, ok)
+		testing.expect_value(t, off, 90)
+		testing.expect_value(t, n, 10)
+	}
+	{
+		off, n, ok := http.apply_range_to_size({end = -200}, 100)
+		testing.expect(t, ok)
+		testing.expect_value(t, off, 0)
+		testing.expect_value(t, n, 100)
+	}
+	for unsat in ([?]http.Range{
+		{start = 100, end = 110},
+		{start = 20, end = 10},
+		{end = 0},
+	}) {
+		_, _, ok := http.apply_range_to_size(unsat, 100)
+		testing.expectf(t, !ok, "expected %v to be unsatisfiable", unsat)
+	}
+	{
+		_, _, ok := http.apply_range_to_size({start = 0, end = 0}, 0)
+		testing.expect(t, !ok, "empty representation cannot satisfy a byte range")
+	}
+}
