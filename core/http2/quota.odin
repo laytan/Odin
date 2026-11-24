@@ -21,7 +21,8 @@ Quota :: struct {
 // Allow at least 20 seconds to receive the headers. If the client sends data, increase the timeout
 // by 1 second for every 500 bytes received. But do not allow more than 40 seconds in total.
 // Only accept up to 64 KiB of data containing the request line and headers.
-DEFAULT_HEADERS_QUOTA :: Quota{
+@(rodata)
+DEFAULT_HEADERS_QUOTA := Quota{
 	max_size = 64 * mem.Kilobyte,
 	min      = 20 * time.Second,
 	max      = 40 * time.Second,
@@ -33,7 +34,8 @@ DEFAULT_HEADERS_QUOTA :: Quota{
 //
 // Allow at least 20 seconds to receive the body. If the client sends data, increase the timeout
 // by 1 second for every 500 bytes received. Up to 10 MiB total, with no absolute duration limit.
-DEFAULT_BODY_QUOTA :: Quota{
+@(rodata)
+DEFAULT_BODY_QUOTA := Quota{
 	max_size = 10 * mem.Megabyte,
 	min      = 20 * time.Second,
 	max      = 0,
@@ -45,7 +47,8 @@ DEFAULT_BODY_QUOTA :: Quota{
 //
 // Allow at least 20 seconds to read the body. If the client receives data, increase the timeout
 // by 1 second for every 500 bytes sent. With no total limit (client may receive 500b/s indefinitely).
-DEFAULT_SEND_QUOTA :: Quota{
+@(rodata)
+DEFAULT_SEND_QUOTA := Quota{
 	max_size = 0, // No max response size.
 	min      = 20 * time.Second,
 	max      = 0,
@@ -54,7 +57,8 @@ DEFAULT_SEND_QUOTA :: Quota{
 }
 
 // Explicit unlimited quota opt-out for Server_Options fields (since zero Quota selects defaults).
-UNLIMITED_QUOTA :: Quota{
+@(rodata)
+UNLIMITED_QUOTA := Quota{
 	max_size = -1,
 	min      = -1,
 	max      = -1,
