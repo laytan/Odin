@@ -1050,6 +1050,7 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 		return true
 	}
 
+	_headers_set_readonly(&res.headers)
 	return nil
 }
 

@@ -54,7 +54,7 @@ headers_iter :: proc(m: ^Headers, state: ^int) -> (string, string, bool) {
 }
 
 headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
-	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you try to set a header on the request or on a response after sending started?", loc)
 
 	return _headers_set_with_hash(m, Header_Spot{
 		key   = key,
@@ -64,7 +64,7 @@ headers_set :: proc(m: ^Headers, key, value: string, loc := #caller_location) ->
 }
 
 headers_add :: proc(m: ^Headers, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
-	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to set a header on the server request or client response?", loc)
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you try to set a header on the request or on a response after sending started?", loc)
 
 	return _headers_add_with_hash(m, Header_Spot{
 		key   = key,
@@ -152,7 +152,7 @@ headers_has_token :: proc(h: ^Headers, key, token: string) -> bool {
 }
 
 headers_entry :: proc(m: ^Headers, key: string, loc := #caller_location) -> (key_ptr, val_ptr: ^string, just_inserted: bool, err: mem.Allocator_Error) {
-	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to modify a header on the server request or client response?", loc)
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you try to modify a header on the request or on a response after sending started?", loc)
 	if m.len >= m.threshold {
 		_headers_grow(m) or_return
 	}
@@ -181,7 +181,7 @@ headers_entry :: proc(m: ^Headers, key: string, loc := #caller_location) -> (key
 }
 
 headers_delete :: proc(m: ^Headers, key: string, loc := #caller_location) -> (deleted_key, deleted_value: string) {
-	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you accidentally try to delete a header on the server request or client response?", loc)
+	assert(!_HEADERS_ARE_READONLY(m^), "these headers are readonly, did you try to delete a header on the request or on a response after sending started?", loc)
 	return #force_inline _headers_delete_with_hash(m, key, _headers_hash_key(key))
 }
 

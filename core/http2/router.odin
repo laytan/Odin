@@ -57,8 +57,9 @@ import "core:strings"
 // 	})
 // 	http.route_all(&r, "/api/*", http.router(&api))
 Router :: struct {
-	routes: [Method]_Route_Trie,
-	all:    _Route_Trie,
+	allocator: runtime.Allocator,
+	routes:    [Method]_Route_Trie,
+	all:       _Route_Trie,
 }
 
 /* A registered route pairing a `Handler` with its pattern. */
@@ -71,6 +72,13 @@ Route :: struct {
 Route_Param :: struct {
 	name:  string,
 	value: string,
+}
+
+/* Creates a `Router` using `allocator` for all route trie allocations. Zero-initialized `Router` values default to `context.allocator` on first registration. */
+make_router :: proc(allocator := context.allocator) -> Router {
+	return Router{
+		allocator = allocator,
+	}
 }
 
 /* Wraps `router` in a `Handler`. `router` must outlive the returned `Handler`. */
@@ -151,11 +159,12 @@ write_routes :: proc(w: io.Writer, r: Router) {
 }
 
 /*
-Returns all captured `:param` values in path order.
-Must be called from a handler dispatched by `router`.
+Returns all captured `:param` values in path order, or `nil` outside a `Router`.
 */
 route_params :: proc(ctx: ^Ctx) -> (params: []Route_Param) {
-	return context_get(ctx, _Route_Match).vars[:]
+	match := context_get(ctx, _Route_Match)
+	if match == nil { return nil }
+	return match.vars[:]
 }
 
 /*
@@ -211,11 +220,11 @@ route_param_int :: proc(params: []Route_Param, name: string) -> (value: int, ok:
 }
 
 route_get_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Get], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Get], Route{handler, pattern}, loc)
 }
 
 route_get_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Get], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Get], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `GET` route for `pattern`. */
@@ -226,11 +235,11 @@ route_get :: proc {
 
 
 route_post_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Post], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Post], Route{handler, pattern}, loc)
 }
 
 route_post_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Post], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Post], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `POST` route for `pattern`. */
@@ -241,11 +250,11 @@ route_post :: proc {
 
 
 route_delete_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Delete], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Delete], Route{handler, pattern}, loc)
 }
 
 route_delete_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Delete], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Delete], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `DELETE` route for `pattern`. */
@@ -256,11 +265,11 @@ route_delete :: proc {
 
 
 route_patch_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Patch], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Patch], Route{handler, pattern}, loc)
 }
 
 route_patch_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Patch], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Patch], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `PATCH` route for `pattern`. */
@@ -271,11 +280,11 @@ route_patch :: proc {
 
 
 route_put_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Put], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Put], Route{handler, pattern}, loc)
 }
 
 route_put_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Put], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Put], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `PUT` route for `pattern`. */
@@ -286,11 +295,11 @@ route_put :: proc {
 
 
 route_head_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Head], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Head], Route{handler, pattern}, loc)
 }
 
 route_head_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Head], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Head], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `HEAD` route for `pattern`, overriding the `HEAD` -> `GET` fallback. */
@@ -301,11 +310,11 @@ route_head :: proc {
 
 
 route_connect_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Connect], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Connect], Route{handler, pattern}, loc)
 }
 
 route_connect_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Connect], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Connect], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `CONNECT` route for `pattern`. */
@@ -316,11 +325,11 @@ route_connect :: proc {
 
 
 route_options_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Options], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Options], Route{handler, pattern}, loc)
 }
 
 route_options_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Options], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Options], Route{handler(p), pattern}, loc)
 }
 
 /* Registers an `OPTIONS` route for `pattern`. */
@@ -331,11 +340,11 @@ route_options :: proc {
 
 
 route_trace_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Trace], Route{handler, pattern}, loc)
+	_router_add(r, &r.routes[.Trace], Route{handler, pattern}, loc)
 }
 
 route_trace_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.routes[.Trace], Route{handler(p), pattern}, loc)
+	_router_add(r, &r.routes[.Trace], Route{handler(p), pattern}, loc)
 }
 
 /* Registers a `TRACE` route for `pattern`. */
@@ -346,11 +355,11 @@ route_trace :: proc {
 
 
 route_all_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_route_trie_add(&r.all, Route{handler, pattern}, loc)
+	_router_add(r, &r.all, Route{handler, pattern}, loc)
 }
 
 route_all_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_route_trie_add(&r.all, Route{handler(p), pattern}, loc)
+	_router_add(r, &r.all, Route{handler(p), pattern}, loc)
 }
 
 /*
@@ -442,10 +451,21 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 	}
 }
 
+@(private="file")
+_router_add :: proc(r: ^Router, t: ^_Route_Trie, route: Route, loc := #caller_location) {
+	if r.allocator.procedure == nil {
+		r.allocator = context.allocator
+	}
+	if t.segments.allocator.procedure == nil {
+		t.segments.allocator = r.allocator
+	}
+	_route_trie_add(t, route, r.allocator, loc)
+}
+
 // Inserts `route` into the trie while maintaining per-level child ordering:
 // static segments first, `:param` segments next, and `*` last.
 // Patterns beginning with `'/'` produce a leading `""` segment node mirroring path splitting.
-_route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) {
+_route_trie_add :: proc(t: ^_Route_Trie, route: Route, allocator: runtime.Allocator, loc := #caller_location) {
 	pattern := route.pattern
 	assert(pattern != "", loc=loc)
 
@@ -460,7 +480,7 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 		segment, ok := _next_pattern_segment(&pattern)
 		if !ok {
 			if is_prefix {
-				prefix_segment := make_trie("*", curr.segments.allocator)
+				prefix_segment := make_trie("*", allocator)
 				prefix_segment.route = route
 				append(&curr.segments, prefix_segment)
 			} else {
@@ -482,7 +502,7 @@ _route_trie_add :: proc(t: ^_Route_Trie, route: Route, loc := #caller_location) 
 			}
 		}
 
-		inject_at(&curr.segments, insertion_point, make_trie(segment, curr.segments.allocator))
+		inject_at(&curr.segments, insertion_point, make_trie(segment, allocator))
 		curr = &curr.segments[insertion_point]
 	}
 
