@@ -269,6 +269,13 @@ Request :: struct {
 	headers:           Headers,
 }
 
+@(private)
+_Deferred :: struct {
+	trampoline: proc(ctx: ^Ctx, cb: rawptr, data: rawptr),
+	cb:         rawptr,
+	data:       rawptr,
+}
+
 Response :: struct {
 	quota:    ^Quota,
 	progress: Progression,
@@ -277,7 +284,7 @@ Response :: struct {
 	sent:     int,
 
 	_buf:       [dynamic]byte,
-	_deferred:  [dynamic]proc(ctx: ^Ctx),
+	_deferred:  [dynamic]_Deferred,
 	_last_send: time.Time,
 	_sends:     int,
 	_state:     enum {
@@ -303,9 +310,57 @@ response_set_quota :: proc(res: ^Response, quota: ^Quota) {
 	progression_set_quota(&res.progress, quota^)
 }
 
-response_defer :: proc(ctx: ^Ctx, deferred: proc(^Ctx)) -> runtime.Allocator_Error {
-	_, err := append(&ctx.res._deferred, deferred)
+response_defer :: proc {
+	response_defer_proc,
+	response_defer_with_data,
+}
+
+response_defer_proc :: proc(ctx: ^Ctx, deferred: proc(ctx: ^Ctx)) -> runtime.Allocator_Error {
+	assert(deferred != nil, "nil response_defer proc")
+	trampoline :: proc(ctx: ^Ctx, cb: rawptr, _: rawptr) {
+		(proc(ctx: ^Ctx))(cb)(ctx)
+	}
+	_, err := append(&ctx.res._deferred, _Deferred{
+		trampoline = trampoline,
+		cb         = rawptr(deferred),
+	})
 	return err
+}
+
+response_defer_with_data :: proc(ctx: ^Ctx, data: $T, deferred: proc(ctx: ^Ctx, data: T)) -> runtime.Allocator_Error {
+	assert(deferred != nil, "nil response_defer proc")
+	when size_of(T) <= size_of(rawptr) {
+		packed: rawptr
+		when size_of(T) > 0 {
+			data := data
+			intrinsics.mem_copy(&packed, &data, size_of(T))
+		}
+		trampoline :: proc(ctx: ^Ctx, cb: rawptr, data: rawptr) {
+			val: T
+			when size_of(T) > 0 {
+				data := data
+				intrinsics.mem_copy(&val, &data, size_of(T))
+			}
+			(proc(ctx: ^Ctx, data: T))(cb)(ctx, val)
+		}
+		_, err := append(&ctx.res._deferred, _Deferred{
+			trampoline = trampoline,
+			cb         = rawptr(deferred),
+			data       = packed,
+		})
+		return err
+	} else {
+		copy_ptr := new_clone(data, transaction_allocator(ctx)) or_return
+		trampoline :: proc(ctx: ^Ctx, cb: rawptr, data: rawptr) {
+			(proc(ctx: ^Ctx, data: T))(cb)(ctx, (^T)(data)^)
+		}
+		_, err := append(&ctx.res._deferred, _Deferred{
+			trampoline = trampoline,
+			cb         = rawptr(deferred),
+			data       = copy_ptr,
+		})
+		return err
+	}
 }
 
 @(thread_local)
@@ -622,8 +677,8 @@ _connection_run_deferred :: proc(c: ^Connection) {
 
 	for len(c.res._deferred) > 0 {
 		deferred := pop(&c.res._deferred)
-		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred)
-		deferred(&c.ctx)
+		log.debugf("http[t=%v][c=%v]: msg=\"running defer\", defer=%v", td.id, c.socket, deferred.cb)
+		deferred.trampoline(&c.ctx, deferred.cb, deferred.data)
 		assert(!destroy_flag.destroyed, "cannot destroy or detach connection inside response_defer")
 	}
 

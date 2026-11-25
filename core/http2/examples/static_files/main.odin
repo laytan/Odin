@@ -54,10 +54,8 @@ main :: proc() {
 		}
 
 		// Defer mechanism for after the response is sent, instead of after the procedure returns.
-		// Combining with the context system we can make sure the file is always closed.
-		http.context_add(ctx, f)
-		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
-			os.close(http.context_get(ctx, ^os.File)^)
+		http.response_defer(ctx, f, proc(_: ^http.Ctx, f: ^os.File) {
+			os.close(f)
 		})
 
 		assoc_err := http.respond_file(ctx, f)

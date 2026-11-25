@@ -502,8 +502,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 	http.request_set_quota(&c.req, &ws.recv_quota)
 	http.response_set_quota(&c.res, &ws.send_quota)
 
-	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
-		c  := http._connection_of_context(ctx)
+	http.response_defer(&c.ctx, c, proc(ctx: ^http.Ctx, c: ^http.Connection) {
 		ws := http.context_get(ctx, _Connection)
 		if ws.headers.in_flight != nil {
 			err := ws.send_err

@@ -793,11 +793,8 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 			http.respond(ctx)
 			return
 		}
-		File_Handle :: distinct ^os.File
-		http.context_add(ctx, File_Handle(f))
-		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
-			fp := http.context_get(ctx, File_Handle)^
-			os.close((^os.File)(fp))
+		http.response_defer(ctx, f, proc(_: ^http.Ctx, fp: ^os.File) {
+			os.close(fp)
 		})
 		if assoc_err := http.respond_file(ctx, f); assoc_err != nil {
 			ctx.res.status = .Internal_Server_Error

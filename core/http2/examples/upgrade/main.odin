@@ -78,9 +78,8 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 		http.response_set_quota(&c.res, &http.UNLIMITED_QUOTA)
 
 		fmt.printfln("[in-pool] client %v upgraded", c.socket)
-		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
-			c := http._connection_of_context(ctx)
-			fmt.printfln("[in-pool] client %v closed", c.socket)
+		http.response_defer(ctx, c.socket, proc(_: ^http.Ctx, sock: nbio.TCP_Socket) {
+			fmt.printfln("[in-pool] client %v closed", sock)
 		})
 
 		scan_next_line(c)

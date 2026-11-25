@@ -756,17 +756,8 @@ _respond_file_path :: proc(c: ^Connection, file: string, dir := nbio.CWD, redire
 			}
 		}
 
-		Respond_File_Path_Handle :: distinct nbio.Handle
-		if _, add_err := context_add(&c.ctx, Respond_File_Path_Handle(op.open.handle)); add_err != nil {
-			log.errorf("http[t=%v][c=%v]: msg=\"failed to record opened file handle\", err=%v", td.id, c.socket, add_err)
-			nbio.close(op.open.handle)
-			c.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
-			return
-		}
-		if def_err := response_defer(&c.ctx, proc(ctx: ^Ctx) {
-			handle := context_get(ctx, Respond_File_Path_Handle)
-			nbio.close(nbio.Handle(handle^))
+		if def_err := response_defer(&c.ctx, op.open.handle, proc(_: ^Ctx, handle: nbio.Handle) {
+			nbio.close(handle)
 		}); def_err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to register file handle defer\", err=%v", td.id, c.socket, def_err)
 			nbio.close(op.open.handle)

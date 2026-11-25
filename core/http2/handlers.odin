@@ -85,45 +85,37 @@ Rather than providing tons of configuration options,
 you are encouraged to copy+paste the implementation allowing you to configure it exactly as wanted.
 */
 logged :: proc(ctx: ^Ctx, next: []Handler) {
-	Logger_Ctx :: struct {
-		start: time.Time,
-	}
-
-	if _, err := context_add(ctx, Logger_Ctx{now()}); err == nil {
-		response_defer(ctx, proc(ctx: ^Ctx) {
-			logger_ctx := context_get(ctx, Logger_Ctx)
-
-			if context.logger.procedure == runtime.default_logger_proc {
-				date: [DATE_LENGTH]byte
-				date_write(date[:], now())
-				fmt.eprintfln(
-					"[%v] %v - %v %q %v.%v -> %v %m %v",
-					string(date[:]),
-					net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
-					method_string(ctx.req.line.method),
-					ctx.req.line.target,
-					ctx.req.line.version.major,
-					ctx.req.line.version.minor,
-					status_string(ctx.res.status),
-					ctx.res.sent,
-					since(logger_ctx.start),
-				)
-			} else {
-				context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
-				log.infof(
-					"%v - %v %q %v.%v -> %v %m %v",
-					net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
-					method_string(ctx.req.line.method),
-					ctx.req.line.target,
-					ctx.req.line.version.major,
-					ctx.req.line.version.minor,
-					status_string(ctx.res.status),
-					ctx.res.sent,
-					since(logger_ctx.start),
-				)
-			}
-		})
-	}
+	response_defer(ctx, now(), proc(ctx: ^Ctx, start: time.Time) {
+		if context.logger.procedure == runtime.default_logger_proc {
+			date: [DATE_LENGTH]byte
+			date_write(date[:], now())
+			fmt.eprintfln(
+				"[%v] %v - %v %q %v.%v -> %v %m %v",
+				string(date[:]),
+				net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
+				method_string(ctx.req.line.method),
+				ctx.req.line.target,
+				ctx.req.line.version.major,
+				ctx.req.line.version.minor,
+				status_string(ctx.res.status),
+				ctx.res.sent,
+				since(start),
+			)
+		} else {
+			context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
+			log.infof(
+				"%v - %v %q %v.%v -> %v %m %v",
+				net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
+				method_string(ctx.req.line.method),
+				ctx.req.line.target,
+				ctx.req.line.version.major,
+				ctx.req.line.version.minor,
+				status_string(ctx.res.status),
+				ctx.res.sent,
+				since(start),
+			)
+		}
+	})
 
 	handle(next, ctx)
 }

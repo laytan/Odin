@@ -695,6 +695,17 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		testing.expect_value(t, def_err, runtime.Allocator_Error.Out_Of_Memory)
 		testing.expect_value(t, len(c.res._deferred), 0)
 
+		def_small_err := http.response_defer(&c.ctx, u32(7), proc(_: ^http.Ctx, _: u32) {})
+		testing.expect_value(t, def_small_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, len(c.res._deferred), 0)
+
+		Large_Defer :: struct {
+			a, b, c: int,
+		}
+		def_large_err := http.response_defer(&c.ctx, Large_Defer{1, 2, 3}, proc(_: ^http.Ctx, _: Large_Defer) {})
+		testing.expect_value(t, def_large_err, runtime.Allocator_Error.Out_Of_Memory)
+		testing.expect_value(t, len(c.res._deferred), 0)
+
 		small_buf: [24]byte
 		small_arena: mem.Arena
 		mem.arena_init(&small_arena, small_buf[:])
@@ -985,4 +996,100 @@ test_keepalive_deferred_lifo_and_next_request :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(c.res._deferred), 0)
 	testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "next")
 	testing.expect_value(t, active_connection_count(&env.thread), 1)
+}
+
+@(test)
+test_response_defer_with_user_data :: proc(t: ^testing.T) {
+	Event :: struct {
+		kind: string,
+		u16v: u16,
+		nsec: i64,
+		tag:  string,
+		n:    int,
+	}
+
+	Large_Payload :: struct {
+		out: ^[dynamic]Event,
+		tag: string,
+		n:   int,
+	}
+
+	Small_Payload :: struct {
+		out: ^[dynamic]Event,
+		v:   u16,
+	}
+
+	env: Upgrade_Test_Env
+	setup_upgrade_env(t, &env)
+	defer destroy_upgrade_env(&env)
+
+	c := push_test_connection(t, &env)
+	defer http._connection_destroy(c)
+	c.req.line              = {method = .Get, target = "/", version = {1, 1}}
+	c.req.has_consumed_body = true
+	c.res._state            = .Sent
+	c.res._sends            = 0
+	c.scanner.is_pumping    = true
+
+	events := make([dynamic]Event, context.allocator)
+	defer delete(events)
+
+	// Pre-reserve _deferred so inline response_defer calls measure strictly 0 extra tx arena growth.
+	reserve(&c.res._deferred, 8)
+	tx_tail_before   := c.transaction_arena.tail
+	tx_offset_before := tx_tail_before.offset
+
+	testing.expect_value(t, http.response_defer(&c.ctx, &events, proc(_: ^http.Ctx, ev: ^[dynamic]Event) {
+		append(ev, Event{kind = "ptr"})
+	}), nil)
+
+	// Sub-pointer-width integer packed inline into _Deferred.data.
+	sub_val := Small_Payload{out = &events, v = 0xBEEF}
+	testing.expect(t, size_of(u16) < size_of(rawptr))
+	testing.expect_value(t, http.response_defer(&c.ctx, u16(0xBEEF), proc(ctx: ^http.Ctx, v: u16) {
+		sp := http.context_get(ctx, Small_Payload)
+		append(sp.out, Event{kind = "u16", u16v = v})
+	}), nil)
+	testing.expect_value(t, c.transaction_arena.tail, tx_tail_before)
+	testing.expect_value(t, c.transaction_arena.tail.offset, tx_offset_before)
+
+	http.context_add(&c.ctx, sub_val)
+
+	// Exact pointer-width value (time.Time on 64-bit) with no heap/arena clone.
+	stamp := time.Time{_nsec = 123456789}
+	tx_after_ctx_add := c.transaction_arena.tail.offset
+	testing.expect_value(t, http.response_defer(&c.ctx, stamp, proc(ctx: ^http.Ctx, ts: time.Time) {
+		sp := http.context_get(ctx, Small_Payload)
+		append(sp.out, Event{kind = "time", nsec = ts._nsec})
+	}), nil)
+	when size_of(time.Time) <= size_of(rawptr) {
+		testing.expect_value(t, c.transaction_arena.tail.offset, tx_after_ctx_add)
+	}
+
+	// Struct larger than rawptr is cloned onto transaction_allocator before returning.
+	local_large := Large_Payload{out = &events, tag = "cloned", n = 99}
+	testing.expect(t, size_of(Large_Payload) > size_of(rawptr))
+	testing.expect_value(t, http.response_defer(&c.ctx, local_large, proc(_: ^http.Ctx, lp: Large_Payload) {
+		append(lp.out, Event{kind = "large", tag = lp.tag, n = lp.n})
+	}), nil)
+	// Clobber caller stack copy to prove defer observes cloned payload.
+	local_large = {}
+
+	// 2-arg form interoperates in the same LIFO stack.
+	testing.expect_value(t, http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
+		sp := http.context_get(ctx, Small_Payload)
+		append(sp.out, Event{kind = "plain"})
+	}), nil)
+
+	http._check_send_done(c)
+
+	testing.expect_value(t, len(c.res._deferred), 0)
+	testing.expect_value(t, len(events), 5)
+	if len(events) == 5 {
+		testing.expect_value(t, events[0], Event{kind = "plain"})
+		testing.expect_value(t, events[1], Event{kind = "large", tag = "cloned", n = 99})
+		testing.expect_value(t, events[2], Event{kind = "time", nsec = 123456789})
+		testing.expect_value(t, events[3], Event{kind = "u16", u16v = 0xBEEF})
+		testing.expect_value(t, events[4], Event{kind = "ptr"})
+	}
 }

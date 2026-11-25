@@ -24,7 +24,8 @@ worker_id: int
 @(thread_local)
 worker_requests: int
 
-Slow_State :: struct {
+Slow_Req :: struct {
+	ctx:   ^http.Ctx,
 	timer: ^nbio.Operation,
 }
 
@@ -65,19 +66,14 @@ handle_fast :: proc(ctx: ^http.Ctx) {
 
 handle_slow :: proc(ctx: ^http.Ctx) {
 	worker_requests += 1
-	state := http.context_add(ctx, Slow_State{})
-	http.response_defer(ctx, proc(ctx: ^http.Ctx) {
-		state := http.context_get(ctx, Slow_State)
-		if state.timer != nil {
-			nbio.remove(state.timer)
-			state.timer = nil
-		}
+	req := new_clone(Slow_Req{ctx = ctx}, http.transaction_allocator(ctx))
+	http.response_defer(ctx, req, proc(_: ^http.Ctx, req: ^Slow_Req) {
+		nbio.remove(req.timer)
 	})
 
-	state.timer = nbio.timeout_poly(5 * time.Second, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
-		context.temp_allocator = http.temp_allocator(ctx)
-		state := http.context_get(ctx, Slow_State)
-		state.timer = nil
-		http.respond_plain(ctx, fmt.tprintf("slow request drained cleanly on worker %d\n", worker_id))
+	req.timer = nbio.timeout_poly(5 * time.Second, req, proc(_: ^nbio.Operation, req: ^Slow_Req) {
+		context.temp_allocator = http.temp_allocator(req.ctx)
+		req.timer = nil
+		http.respond_plain(req.ctx, fmt.tprintf("slow request drained cleanly on worker %d\n", worker_id))
 	})
 }

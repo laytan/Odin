@@ -63,9 +63,8 @@ handle_upload :: proc(ctx: ^http.Ctx) {
 
 		state := http.context_get(ctx, Upload_State)
 		state.file = op.open.handle
-		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
-			state := http.context_get(ctx, Upload_State)
-			nbio.close(state.file)
+		http.response_defer(ctx, op.open.handle, proc(_: ^http.Ctx, file: nbio.Handle) {
+			nbio.close(file)
 		})
 
 		http.body(ctx, on_chunk)
