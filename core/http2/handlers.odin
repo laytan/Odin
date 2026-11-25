@@ -2,6 +2,7 @@
 #+feature using-stmt
 package http
 
+import "base:intrinsics"
 import "base:runtime"
 
 import "core:io"
@@ -141,6 +142,34 @@ body_parser :: proc(next: ^Handler, loc := #caller_location) -> Handler {
 			}
 		},
 	}
+}
+
+body_parser_collect :: proc(ctx: ^Ctx, allocator := context.temp_allocator, loc := #caller_location) -> ([]byte, bool) {
+	state := context_get(ctx, Body_Parser_State)
+	if state == nil {
+		return nil, false
+	}
+
+	overflown: bool
+	n: int
+	for part in state.parts {
+		n, overflown = intrinsics.overflow_add(n, len(part))
+		if overflown {
+			return nil, false
+		}
+	}
+
+	buf, err := make([]byte, n, allocator, loc)
+	if err != nil {
+		return nil, false
+	}
+
+	n = 0
+	for part in state.parts {
+		n += copy(buf[n:], part)
+	}
+
+	return buf, true
 }
 
 Body_Parser_Iterator :: struct {
