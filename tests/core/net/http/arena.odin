@@ -62,8 +62,8 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	first_block := a1.tail
 
 	http.arena_destroy(&a1)
-	testing.expect(t, thread.free_arenas[1] == first_block, "expected 8 KiB block in bucket 1 freelist")
-	testing.expect(t, thread.free_arenas[0] == nil, "expected bucket 0 freelist to remain empty")
+	testing.expect(t, thread.free_arenas[1].head == first_block, "expected 8 KiB block in bucket 1 freelist")
+	testing.expect(t, thread.free_arenas[0].head == nil, "expected bucket 0 freelist to remain empty")
 
 	a2 := http.get_arena(nil)
 	bs2, alloc_err2 := http.arena_alloc(&a2, 5000, mem.DEFAULT_ALIGNMENT)
@@ -71,7 +71,7 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(bs2), 5000)
 	testing.expect(t, a2.tail == first_block, "expected bucket 1 block to be reused")
 	testing.expect_value(t, counter.alloc_count, 1)
-	testing.expect(t, thread.free_arenas[1] == nil, "expected bucket 1 freelist to be empty after reuse")
+	testing.expect(t, thread.free_arenas[1].head == nil, "expected bucket 1 freelist to be empty after reuse")
 
 	http.arena_destroy(&a2)
 	http._server_thread_free_arenas_destroy(&thread)
@@ -139,7 +139,7 @@ test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(big_block.data), 64 * mem.Kilobyte)
 
 	http.arena_destroy(&a_big)
-	testing.expect(t, thread.free_arenas[4] == big_block, "expected 64 KiB block cached in bucket 4")
+	testing.expect(t, thread.free_arenas[4].head == big_block, "expected 64 KiB block cached in bucket 4")
 
 	// Small 4 KiB request must NOT steal the cached 64 KiB block from bucket 4.
 	a_small := http.get_arena(nil)
@@ -149,7 +149,7 @@ test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(small_bs), 64)
 	testing.expect(t, a_small.tail != big_block, "expected small request not to steal cached 64 KiB block")
 	testing.expect_value(t, len(a_small.tail.data), 4096)
-	testing.expect(t, thread.free_arenas[4] == big_block, "expected 64 KiB block to remain in bucket 4")
+	testing.expect(t, thread.free_arenas[4].head == big_block, "expected 64 KiB block to remain in bucket 4")
 }
 
 @(test)
@@ -175,8 +175,8 @@ test_arena_oversized_block_not_pooled :: proc(t: ^testing.T) {
 	testing.expect_value(t, counter.alloc_count, 1)
 
 	http.arena_destroy(&a)
-	for head in thread.free_arenas {
-		testing.expect(t, head == nil, "expected oversized block not to be placed in free_arenas")
+	for b in thread.free_arenas {
+		testing.expect(t, b.head == nil, "expected oversized block not to be placed in free_arenas")
 	}
 	testing.expect_value(t, counter.free_count, 1)
 }
@@ -204,8 +204,8 @@ test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(large), 5000)
 
 	http.arena_destroy(a)
-	testing.expect(t, thread.free_arenas[0] != nil, "expected initial 4 KiB block in bucket 0 freelist")
-	testing.expect(t, thread.free_arenas[1] != nil, "expected overflow 8 KiB block in bucket 1 freelist")
+	testing.expect(t, thread.free_arenas[0].head != nil, "expected initial 4 KiB block in bucket 0 freelist")
+	testing.expect(t, thread.free_arenas[1].head != nil, "expected overflow 8 KiB block in bucket 1 freelist")
 }
 
 @(test)
@@ -556,8 +556,8 @@ test_arena_cross_thread_worker_destroy :: proc(t: ^testing.T) {
 	testing.expect(t, work.td_was_nil, "expected http.td to be nil on spawned worker thread")
 	testing.expect(t, work.bytes_valid, "expected arena bytes intact across threads")
 	testing.expect(t, val_arena.tail == nil, "expected val_arena.tail cleared after worker destroy")
-	for head in srv_thread.free_arenas {
-		testing.expect(t, head == nil, "expected worker destroy not to push into server free_arenas")
+	for b in srv_thread.free_arenas {
+		testing.expect(t, b.head == nil, "expected worker destroy not to push into server free_arenas")
 	}
 	testing.expect_value(t, counter.free_count, 4)
 	testing.expect_value(t, track.current_memory_allocated, 0)
@@ -651,8 +651,8 @@ test_arena_cross_thread_worker_alloc_and_server_reclaim :: proc(t: ^testing.T) {
 
 	// Destroying back on the server thread recycles worker-allocated power-of-two blocks into free_arenas.
 	http.arena_destroy(&a)
-	testing.expect(t, srv_thread.free_arenas[0] != nil, "expected 4 KiB block recycled into server thread bucket 0")
-	testing.expect(t, srv_thread.free_arenas[1] != nil, "expected 8 KiB blocks recycled into server thread bucket 1")
+	testing.expect(t, srv_thread.free_arenas[0].head != nil, "expected 4 KiB block recycled into server thread bucket 0")
+	testing.expect(t, srv_thread.free_arenas[1].head != nil, "expected 8 KiB blocks recycled into server thread bucket 1")
 
 	http._server_thread_free_arenas_destroy(&srv_thread)
 	testing.expect_value(t, server_track.current_memory_allocated, 0)
@@ -740,7 +740,7 @@ test_arena_multi_server_allocator_isolation :: proc(t: ^testing.T) {
 	testing.expect_value(t, b_err, nil)
 	b_cached := b.tail
 	http.arena_destroy(&b)
-	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server B 8 KiB block cached on thread_b")
+	testing.expect(t, thread_b.free_arenas[1].head == b_cached, "expected Server B 8 KiB block cached on thread_b")
 	b_allocs_before := track_b.total_allocation_count
 	b_frees_before  := track_b.total_free_count
 
@@ -756,12 +756,12 @@ test_arena_multi_server_allocator_isolation :: proc(t: ^testing.T) {
 	_, a2_err := http.arena_alloc(&a, 5000, mem.DEFAULT_ALIGNMENT)
 	testing.expect_value(t, a2_err, nil)
 	testing.expect(t, a.tail != b_cached, "expected Server A arena not to steal Server B cached block")
-	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server B cached block untouched in bucket 1")
+	testing.expect(t, thread_b.free_arenas[1].head == b_cached, "expected Server B cached block untouched in bucket 1")
 	testing.expect_value(t, track_a.total_allocation_count, 2)
 
 	http.arena_destroy(&a)
-	testing.expect(t, thread_b.free_arenas[0] == nil, "expected Server A 4 KiB block not pushed into thread_b")
-	testing.expect(t, thread_b.free_arenas[1] == b_cached, "expected Server A 8 KiB block not pushed into thread_b")
+	testing.expect(t, thread_b.free_arenas[0].head == nil, "expected Server A 4 KiB block not pushed into thread_b")
+	testing.expect(t, thread_b.free_arenas[1].head == b_cached, "expected Server A 8 KiB block not pushed into thread_b")
 	testing.expect_value(t, track_b.total_allocation_count, b_allocs_before)
 	testing.expect_value(t, track_b.total_free_count, b_frees_before)
 	testing.expect_value(t, track_a.current_memory_allocated, 0)
@@ -796,10 +796,10 @@ test_arena_same_server_different_worker_thread :: proc(t: ^testing.T) {
 	// Destroy on thread_2 of the same server: recycles directly into thread_2.free_arenas.
 	http.td = &thread_2
 	http.arena_destroy(&a1)
-	testing.expect(t, thread_2.free_arenas[0] == block0, "expected 4 KiB block recycled into thread_2 bucket 0")
-	testing.expect(t, thread_2.free_arenas[1] == block1, "expected 8 KiB block recycled into thread_2 bucket 1")
-	for head in thread_1.free_arenas {
-		testing.expect(t, head == nil, "expected thread_1 free_arenas empty")
+	testing.expect(t, thread_2.free_arenas[0].head == block0, "expected 4 KiB block recycled into thread_2 bucket 0")
+	testing.expect(t, thread_2.free_arenas[1].head == block1, "expected 8 KiB block recycled into thread_2 bucket 1")
+	for b in thread_1.free_arenas {
+		testing.expect(t, b.head == nil, "expected thread_1 free_arenas empty")
 	}
 	testing.expect_value(t, counter.free_count, 0)
 

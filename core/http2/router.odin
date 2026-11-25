@@ -7,6 +7,7 @@ import "base:intrinsics"
 import "core:net"
 import "core:fmt"
 import "core:io"
+import "core:slice"
 import "core:strings"
 
 // Routes HTTP requests by method and URL path.
@@ -61,10 +62,10 @@ Router :: struct {
 	all:       _Route_Trie,
 }
 
-/* A registered route pairing a `Handler` with its pattern. */
+/* A registered route pairing its `handlers` chain with its pattern. */
 Route :: struct {
-	handler: Handler,
-	pattern: string,
+	handlers: []Handler,
+	pattern:  string,
 }
 
 /* A captured `:name` path parameter (`name` omits the leading `':'`). */
@@ -82,11 +83,8 @@ make_router :: proc(allocator := context.allocator) -> Router {
 
 /* Wraps `router` in a `Handler`. `router` must outlive the returned `Handler`. */
 router :: proc(router: ^Router) -> Handler {
-	h: Handler
-	h.user_data = router
-
-	h.handle = proc(h: ^Handler, ctx: ^Ctx) {
-		router := (^Router)(h.user_data)
+	return handler(router, proc(user_data: rawptr, ctx: ^Ctx) {
+		router := (^Router)(user_data)
 		rline := ctx.req.line
 
 		match := context_get(ctx, _Route_Match)
@@ -129,18 +127,16 @@ router :: proc(router: ^Router) -> Handler {
 		}
 
 		match.route = route
-		route.handler.handle(&route.handler, ctx)
-	}
-
-	return h
+		handle(route.handlers, ctx)
+	})
 }
 
 /* Frees memory allocated by `r`. */
 router_destroy :: proc(r: Router) {
 	for trie in r.routes {
-		_route_trie_destroy(trie)
+		_route_trie_destroy(trie, r.allocator)
 	}
-	_route_trie_destroy(r.all)
+	_route_trie_destroy(r.all, r.allocator)
 }
 
 /* Writes a human-readable overview of registered routes to `w`. */
@@ -211,156 +207,57 @@ route_param_int :: proc(params: []Route_Param, name: string) -> (value: int, ok:
 	return parse_int(route_param(params, name))
 }
 
-route_get_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Get], Route{handler, pattern}, loc)
-}
-
-route_get_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Get], Route{handler(p), pattern}, loc)
-}
-
 /* Registers a `GET` route for `pattern`. */
-route_get :: proc {
-	route_get_handler,
-	route_get_proc,
-}
-
-
-route_post_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Post], Route{handler, pattern}, loc)
-}
-
-route_post_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Post], Route{handler(p), pattern}, loc)
+route_get :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Get], pattern, handlers, loc)
 }
 
 /* Registers a `POST` route for `pattern`. */
-route_post :: proc {
-	route_post_handler,
-	route_post_proc,
-}
-
-
-route_delete_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Delete], Route{handler, pattern}, loc)
-}
-
-route_delete_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Delete], Route{handler(p), pattern}, loc)
+route_post :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Post], pattern, handlers, loc)
 }
 
 /* Registers a `DELETE` route for `pattern`. */
-route_delete :: proc {
-	route_delete_handler,
-	route_delete_proc,
-}
-
-
-route_patch_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Patch], Route{handler, pattern}, loc)
-}
-
-route_patch_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Patch], Route{handler(p), pattern}, loc)
+route_delete :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Delete], pattern, handlers, loc)
 }
 
 /* Registers a `PATCH` route for `pattern`. */
-route_patch :: proc {
-	route_patch_handler,
-	route_patch_proc,
-}
-
-
-route_put_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Put], Route{handler, pattern}, loc)
-}
-
-route_put_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Put], Route{handler(p), pattern}, loc)
+route_patch :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Patch], pattern, handlers, loc)
 }
 
 /* Registers a `PUT` route for `pattern`. */
-route_put :: proc {
-	route_put_handler,
-	route_put_proc,
-}
-
-
-route_head_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Head], Route{handler, pattern}, loc)
-}
-
-route_head_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Head], Route{handler(p), pattern}, loc)
+route_put :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Put], pattern, handlers, loc)
 }
 
 /* Registers a `HEAD` route for `pattern`, overriding the `HEAD` -> `GET` fallback. */
-route_head :: proc {
-	route_head_handler,
-	route_head_proc,
-}
-
-
-route_connect_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Connect], Route{handler, pattern}, loc)
-}
-
-route_connect_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Connect], Route{handler(p), pattern}, loc)
+route_head :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Head], pattern, handlers, loc)
 }
 
 /* Registers a `CONNECT` route for `pattern`. */
-route_connect :: proc {
-	route_connect_handler,
-	route_connect_proc,
-}
-
-
-route_options_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Options], Route{handler, pattern}, loc)
-}
-
-route_options_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Options], Route{handler(p), pattern}, loc)
+route_connect :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Connect], pattern, handlers, loc)
 }
 
 /* Registers an `OPTIONS` route for `pattern`. */
-route_options :: proc {
-	route_options_handler,
-	route_options_proc,
-}
-
-
-route_trace_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.routes[.Trace], Route{handler, pattern}, loc)
-}
-
-route_trace_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.routes[.Trace], Route{handler(p), pattern}, loc)
+route_options :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Options], pattern, handlers, loc)
 }
 
 /* Registers a `TRACE` route for `pattern`. */
-route_trace :: proc {
-	route_trace_handler,
-	route_trace_proc,
-}
-
-
-route_all_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
-	_router_add(r, &r.all, Route{handler, pattern}, loc)
-}
-
-route_all_proc :: proc(r: ^Router, pattern: string, p: Handle_Proc, loc := #caller_location) {
-	_router_add(r, &r.all, Route{handler(p), pattern}, loc)
+route_trace :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.routes[.Trace], pattern, handlers, loc)
 }
 
 /*
 Registers a fallback route matching any HTTP method after method-specific routes.
 Useful for catch-alls and mounting sub-routers.
 */
-route_all :: proc {
-	route_all_handler,
-	route_all_proc,
+route_all :: proc(r: ^Router, pattern: string, handlers: ..Handler, loc := #caller_location) {
+	_router_add(r, &r.all, pattern, handlers, loc)
 }
 
 _Route_Match :: struct {
@@ -376,10 +273,11 @@ _Route_Trie :: struct {
 	route:    Route,
 }
 
-_route_trie_destroy :: proc(t: _Route_Trie) {
+_route_trie_destroy :: proc(t: _Route_Trie, allocator: runtime.Allocator) {
 	for st in t.segments {
-		_route_trie_destroy(st)
+		_route_trie_destroy(st, allocator)
 	}
+	delete(t.route.handlers, allocator)
 	delete(t.segments)
 }
 
@@ -403,7 +301,7 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 					}
 				}
 			} else {
-				if curr.route.handler.handle != nil && pattern_param_count(curr.route.pattern) == param_count {
+				if len(curr.route.handlers) > 0 && pattern_param_count(curr.route.pattern) == param_count {
 					return curr.route
 				}
 			}
@@ -444,39 +342,68 @@ _route_trie_check_conflicts :: proc(t: _Route_Trie, pattern: string, param_count
 }
 
 @(private="file")
-_router_add :: proc(r: ^Router, t: ^_Route_Trie, route: Route, loc := #caller_location) {
+_router_add :: proc(r: ^Router, t: ^_Route_Trie, pattern: string, handlers: []Handler, loc := #caller_location) {
+	assert(len(handlers) > 0, "route requires at least one handler", loc)
+	for elem, i in handlers {
+		is_middleware := false
+		switch h in elem {
+		case Handle_Proc:
+			assert(h != nil, "nil handler proc", loc)
+		case Data_Handler:
+			assert(h.handle != nil, "nil handler proc", loc)
+		case Middleware_Proc:
+			assert(h != nil, "nil middleware proc", loc)
+			is_middleware = true
+		case Data_Middleware:
+			assert(h.handle != nil, "nil middleware proc", loc)
+			is_middleware = true
+		case nil:
+			panic("nil HTTP handler", loc)
+		}
+		if i < len(handlers) - 1 {
+			assert(is_middleware, "terminal handler cannot be followed by another handler", loc)
+		}
+	}
+
 	if r.allocator.procedure == nil {
 		r.allocator = context.allocator
 	}
 	if t.segments.allocator.procedure == nil {
 		t.segments.allocator = r.allocator
 	}
-	_route_trie_add(t, route, r.allocator, loc)
+	_route_trie_add(t, pattern, handlers, r.allocator, loc)
 }
 
 // Inserts `route` into the trie while maintaining per-level child ordering:
 // static segments first, `:param` segments next, and `*` last.
 // Patterns beginning with `'/'` produce a leading `""` segment node mirroring path splitting.
-_route_trie_add :: proc(t: ^_Route_Trie, route: Route, allocator: runtime.Allocator, loc := #caller_location) {
-	pattern := route.pattern
+_route_trie_add :: proc(t: ^_Route_Trie, pattern: string, handlers: []Handler, allocator: runtime.Allocator, loc := #caller_location) {
 	assert(pattern != "", loc=loc)
 
 	if conflict, has_conflict := _route_trie_check_conflicts(t^, pattern).?; has_conflict {
-		fmt.panicf("route determinism conflict: %q and %q can both match the same path", route.pattern, conflict.pattern, loc=loc)
+		fmt.panicf("route determinism conflict: %q and %q can both match the same path", pattern, conflict.pattern, loc=loc)
 	}
 
 	is_prefix := pattern == "*" || strings.has_suffix(pattern, "/*")
 
+	orig_pattern := pattern
+	pattern := pattern
 	curr := t
 	segments: for {
 		segment, ok := _next_pattern_segment(&pattern)
 		if !ok {
+			cloned, alloc_err := slice.clone(handlers, allocator)
+			assert(alloc_err == nil, "failed to allocate route handlers", loc)
+			route := Route{
+				handlers = cloned,
+				pattern  = orig_pattern,
+			}
 			if is_prefix {
 				prefix_segment := make_trie("*", allocator)
 				prefix_segment.route = route
 				append(&curr.segments, prefix_segment)
 			} else {
-				assert(curr.route.handler.handle == nil)
+				assert(len(curr.route.handlers) == 0, loc=loc)
 				curr.route = route
 			}
 			return
@@ -516,7 +443,7 @@ _route_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_P
 		segment, ok := _next_path_segment(&path)
 		if !ok {
 			// On "/", an explicit "/" route (registered on the leading `""` node) takes priority over "/*".
-			if t.segment == "" && t.route.handler.handle != nil {
+			if t.segment == "" && len(t.route.handlers) > 0 {
 				return &t.route
 			}
 			// When `!at_root`, `orig_path` is a non-empty or empty subslice immediately following the `'/'`
@@ -525,13 +452,13 @@ _route_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_P
 			if !at_root && raw_data(orig_path)[-1] == '/' {
 				for &ts in t.segments {
 					if ts.segment == "*" {
-						assert(ts.route.handler.handle != nil)
+						assert(len(ts.route.handlers) > 0)
 						suffix^ = "/"
 						return &ts.route
 					}
 				}
 			}
-			return t.route.handler.handle != nil ? &t.route : nil
+			return len(t.route.handlers) > 0 ? &t.route : nil
 		}
 
 		// NOTE: could binary search but I don't think it's worth it for the amount of paths you usually have.
@@ -539,7 +466,7 @@ _route_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_P
 		for &ts in t.segments {
 			switch {
 			case ts.segment == "*":
-				assert(ts.route.handler.handle != nil)
+				assert(len(ts.route.handlers) > 0)
 				if at_root {
 					suffix^ = orig_path
 				} else {
@@ -573,8 +500,8 @@ _route_trie_match :: proc(t: ^_Route_Trie, path: string, vars: ^[dynamic]Route_P
 _route_trie_write :: proc(w: io.Writer, t: _Route_Trie, indent := 0) {
 	for _ in 0..<indent { fmt.wprint(w, "\t") }
 	pre := "/" if t.segment == "" else ""
-	if t.route.handler.handle != nil {
-		fmt.wprintfln(w, "%s%s -> %p", pre, t.segment, rawptr(t.route.handler.handle))
+	if len(t.route.handlers) > 0 {
+		fmt.wprintfln(w, "%s%s -> %d handler(s)", pre, t.segment, len(t.route.handlers))
 	} else {
 		fmt.wprintfln(w, "%s%s", pre, t.segment)
 	}

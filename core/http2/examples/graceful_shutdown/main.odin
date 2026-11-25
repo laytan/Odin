@@ -38,7 +38,7 @@ main :: proc() {
 		address      = nbio.IP4_Loopback,
 		port         = 8080,
 		thread_count = 2,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 		thread_initializer = proc() {
 			worker_id = sync.atomic_add(&next_worker_id, 1) + 1
 			fmt.printfln("worker %d started", worker_id)

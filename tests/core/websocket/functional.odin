@@ -179,7 +179,7 @@ test_websocket_upgrade_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = 18081,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -329,7 +329,7 @@ test_websocket_rejects_non_get_upgrade_methods :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = 18089,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -492,7 +492,7 @@ test_websocket_ping_pong_and_header_recycling_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = 18090,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -764,7 +764,7 @@ test_websocket_upgrade_header_validation :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = 18091,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -894,7 +894,7 @@ test_websocket_protocol_hardening_and_max_message_size :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = 18092,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -1078,7 +1078,7 @@ test_websocket_pipelined_frames_with_immediate_arena_destroy :: proc(t: ^testing
 		address      = nbio.IP4_Loopback,
 		port         = 18093,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)

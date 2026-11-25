@@ -146,27 +146,24 @@ Server :: struct {
 A HTTP handler that handles upgrade requests, adding upgraded connections to the server.
 */
 handler :: proc(s: ^Server) -> http.Handler {
-	return http.Handler {
-		user_data = s,
-		handle = proc(handler: ^http.Handler, ctx: ^http.Ctx) {
-			s := (^Server)(handler.user_data)
-			if !_prepare_upgrade(&ctx.req, &ctx.res) {
-				http.respond(&ctx.res)
-				return
-			}
+	return http.handler(s, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		s := (^Server)(user_data)
+		if !_prepare_upgrade(&ctx.req, &ctx.res) {
+			http.respond(&ctx.res)
+			return
+		}
 
-			c := http.connection_of_context(ctx)
-			ws := http.context_add(ctx, _Connection{
-				s = s,
-			})
-			ws.frames.allocator = http.transaction_allocator(c)
-			if s.idle_timeout > 0 {
-				ws.recv_quota = {min = s.idle_timeout}
-			}
+		c := http.connection_of_context(ctx)
+		ws := http.context_add(ctx, _Connection{
+			s = s,
+		})
+		ws.frames.allocator = http.transaction_allocator(c)
+		if s.idle_timeout > 0 {
+			ws.recv_quota = {min = s.idle_timeout}
+		}
 
-			http.send_heading(&ctx.res, _on_upgrade)
-		},
-	}
+		http.send_heading(&ctx.res, _on_upgrade)
+	})
 }
 
 /*

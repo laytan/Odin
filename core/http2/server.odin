@@ -39,7 +39,8 @@ Server_Options :: struct {
 	port:                 Maybe(int),
 	backlog:              int,
 	thread_count:         int,
-	handler:              Handler,
+	// Slice backing array must outlive `listen_and_serve`.
+	handlers:             []Handler,
 	thread_initializer:   proc(),
 	thread_deinitializer: proc(),
 
@@ -825,8 +826,8 @@ on_headers :: proc(c: ^Connection) {
 		context.temp_allocator = temp_allocator(c)
 		c.ctx._vars.allocator   = transaction_allocator(c)
 		c.res.status = .OK
-		assert(td.s.opts.handler.handle != nil, "HTTP server does not have a request handler set")
-		td.s.opts.handler.handle(&td.s.opts.handler, &c.ctx)
+		assert(len(td.s.opts.handlers) > 0, "HTTP server does not have a request handler set")
+		handle(td.s.opts.handlers, &c.ctx)
 	}
 }
 
@@ -1050,7 +1051,7 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 	status := status_string(res.status)
 	if status == "" {
 		buf: [20]byte
-		status = strconv.write_int(buf, i64(res.status), 10)
+		status = strconv.write_int(buf[:], i64(res.status), 10)
 	}
 	append_str(&res._buf, status) or_return
 	append_str(&res._buf, "\r\n") or_return

@@ -524,7 +524,7 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside _connection_destroy defer")
 		testing.expect_value(t, outer_arena.offset, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
-		testing.expect(t, env.thread.free_arenas[0] != nil, "expected arena blocks returned to thread freelist")
+		testing.expect(t, env.thread.free_arenas[0].head != nil, "expected arena blocks returned to thread freelist")
 	}
 
 	// 2. connection_detach binds context.temp_allocator = temp_allocator(c) for defers.
@@ -591,7 +591,7 @@ test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(c.scanner.buf[:2]), "xy")
 	testing.expect(t, c.temp_arena.tail == orig_block, "expected pinned block to become temp_arena.tail")
 	testing.expect(t, orig_block.prev == nil, "expected overflow block unlinked from pinned block")
-	testing.expect(t, env.thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+	testing.expect(t, env.thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
 	testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer to remain unpoisoned")
 
 	expected_offset := int(uintptr(raw_data(c.scanner.buf)) - uintptr(raw_data(orig_block.data))) + len(c.scanner.buf)
@@ -754,7 +754,7 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 
 		free_all(http.temp_allocator(c))
 		testing.expect(t, c.temp_arena.tail == orig_block, "expected _scanner_free_all OOM fallback to pin existing buf block")
-		testing.expect(t, thread.free_arenas[1] != nil, "expected 8 KiB overflow block returned to thread freelist")
+		testing.expect(t, thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
 		testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer unpoisoned")
 		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hello")
 

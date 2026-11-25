@@ -35,7 +35,7 @@ main :: proc() {
 	http.route_get(&r, "/work/:ms", handle_work)
 
 	fmt.println("Listening on http://127.0.0.1:8080")
-	s := http.make_server(http.Server_Options{handler = http.router(&r)})
+	s := http.make_server(http.Server_Options{handlers = {http.router(&r)}})
 	err := http.listen_and_serve(&s)
 	fmt.assertf(err == nil, "server error: %v", err)
 }

@@ -39,45 +39,33 @@ Auth_User :: struct {
 }
 
 main :: proc() {
-	login_h      := http.handler(login)
-	login_parsed := http.body_parser(&login_h)
-
-	create_h      := http.handler(create_note)
-	create_parsed := http.body_parser(&create_h)
-
 	api := http.make_router()
 	http.route_get   (&api, "/notes",     list_notes)
-	http.route_post  (&api, "/notes",     create_parsed)
+	http.route_post  (&api, "/notes",     http.body_parser, create_note)
 	http.route_get   (&api, "/notes/:id", get_note)
 	http.route_delete(&api, "/notes/:id", delete_note)
 
-	api_routed := http.router(&api)
-	api_auth   := require_auth(&api_routed)
-
 	r := http.make_router()
-	http.route_post(&r, "/login", login_parsed)
-	http.route_all (&r, "/api/*", api_auth)
-
-	routed := http.router(&r)
-	app    := http.logged(&routed)
+	http.route_post(&r, "/login", http.body_parser, login)
+	http.route_all (&r, "/api/*", require_auth, http.router(&api))
 
 	fmt.println("Listening on http://127.0.0.1:8080")
-	s := http.make_server(http.Server_Options{handler = app})
+	s := http.make_server(http.Server_Options{
+		handlers = {http.logged, http.router(&r)},
+	})
 	err := http.listen_and_serve(&s)
 	fmt.assertf(err == nil, "server error: %v", err)
 }
 
-require_auth :: proc(next: ^http.Handler) -> http.Handler {
-	return http.middleware_proc(next, proc(h: ^http.Handler, ctx: ^http.Ctx) {
-		user, ok := http.request_cookie_get(&ctx.req, "session")
-		if !ok || user == "" {
-			ctx.res.status = .Unauthorized
-			http.respond_plain(&ctx.res, "unauthorized\n")
-			return
-		}
-		http.context_add(ctx, Auth_User{name = user})
-		h.next.handle(h.next, ctx)
-	})
+require_auth :: proc(ctx: ^http.Ctx, next: []http.Handler) {
+	user, ok := http.request_cookie_get(&ctx.req, "session")
+	if !ok || user == "" {
+		ctx.res.status = .Unauthorized
+		http.respond_plain(&ctx.res, "unauthorized\n")
+		return
+	}
+	http.context_add(ctx, Auth_User{name = user})
+	http.handle(next, ctx)
 }
 
 login :: proc(ctx: ^http.Ctx) {

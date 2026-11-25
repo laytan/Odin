@@ -22,12 +22,9 @@ main :: proc() {
 		}
 	}
 
-	pwd_server        := handler(serve_pwd)
-	logged_pwd_server := logged(&pwd_server)
-
 	server := make_server({
-		handler = logged_pwd_server,
-		port    = port,
+		handlers = {logged, serve_pwd},
+		port     = port,
 	}, context.allocator)
 
 	terminal.set_termination_handler(proc "contextless" (server: rawptr) -> bool {

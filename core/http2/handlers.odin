@@ -11,38 +11,69 @@ import "core:net"
 import "core:time"
 import "core:fmt"
 
-Handler_Proc :: proc(handler: ^Handler, ctx: ^Ctx)
-Handle_Proc  :: proc(ctx: ^Ctx)
+Handle_Proc          :: proc(ctx: ^Ctx)
+Middleware_Proc      :: proc(ctx: ^Ctx, next: []Handler)
+Data_Handle_Proc     :: proc(user_data: rawptr, ctx: ^Ctx)
+Data_Middleware_Proc :: proc(user_data: rawptr, ctx: ^Ctx, next: []Handler)
 
-Handler :: struct {
+Data_Handler :: struct {
 	user_data: rawptr,
-	next:      ^Handler,
-	handle:    Handler_Proc,
+	handle:    Data_Handle_Proc,
 }
 
-handler :: proc "contextless" (handle: Handle_Proc) -> Handler {
-	h: Handler
-	h.user_data = rawptr(handle)
+Data_Middleware :: struct {
+	user_data: rawptr,
+	handle:    Data_Middleware_Proc,
+}
 
-	handle := proc(h: ^Handler, ctx: ^Ctx) {
-		p := (Handle_Proc)(h.user_data)
-		p(ctx)
+Handler :: union {
+	Handle_Proc,
+	Middleware_Proc,
+	Data_Handler,
+	Data_Middleware,
+}
+
+handler_with_data :: proc "contextless" (user_data: rawptr, handle: Data_Handle_Proc) -> Handler {
+	return Data_Handler{user_data = user_data, handle = handle}
+}
+
+middleware_with_data :: proc "contextless" (user_data: rawptr, handle: Data_Middleware_Proc) -> Handler {
+	return Data_Middleware{user_data = user_data, handle = handle}
+}
+
+handler :: proc {
+	handler_with_data,
+	middleware_with_data,
+}
+
+handle :: proc(handlers: []Handler, ctx: ^Ctx) {
+	if len(handlers) == 0 {
+		return
 	}
-
-	h.handle = handle
-	return h
+	rest := handlers[1:]
+	switch h in handlers[0] {
+	case Handle_Proc:
+		assert(h != nil, "nil handler proc")
+		assert(len(rest) == 0, "terminal handler cannot be followed by another handler")
+		h(ctx)
+	case Data_Handler:
+		assert(h.handle != nil, "nil handler proc")
+		assert(len(rest) == 0, "terminal handler cannot be followed by another handler")
+		h.handle(h.user_data, ctx)
+	case Middleware_Proc:
+		assert(h != nil, "nil middleware proc")
+		h(ctx, rest)
+	case Data_Middleware:
+		assert(h.handle != nil, "nil middleware proc")
+		h.handle(h.user_data, ctx, rest)
+	case nil:
+		panic("nil HTTP handler")
+	}
 }
 
 handler_404 :: proc(using ctx: ^Ctx) {
 	res.status = .Not_Found
 	respond(&res)
-}
-
-middleware_proc :: proc(next: ^Handler, handle: Handler_Proc) -> Handler {
-	h: Handler
-	h.next = next
-	h.handle = handle
-	return h
 }
 
 /*
@@ -53,94 +84,84 @@ If no `context.logger` is set up, it is logged to stderr.
 Rather than providing tons of configuration options,
 you are encouraged to copy+paste the implementation allowing you to configure it exactly as wanted.
 */
-logged :: proc(next: ^Handler) -> Handler {
-	return middleware_proc(next, logger)
-
-	logger :: proc(h: ^Handler, ctx: ^Ctx) {
-		Logger_Ctx :: struct {
-			start: time.Time,
-		}
-
-		if _, err := context_add(ctx, Logger_Ctx{now()}); err == nil {
-			response_defer(ctx, proc(ctx: ^Ctx) {
-				c          := connection_of_context(ctx)
-				logger_ctx := context_get(ctx, Logger_Ctx)
-
-				if context.logger.procedure == runtime.default_logger_proc {
-					date: [DATE_LENGTH]byte
-					date_write(date[:], now())
-					fmt.eprintfln(
-						"[%v] %v - %v %q %v.%v -> %v %m %v",
-						string(date[:]),
-						net.endpoint_to_string(c.remote, transaction_allocator(c)),
-						method_string(ctx.req.line.method),
-						ctx.req.line.target,
-						ctx.req.line.version.major,
-						ctx.req.line.version.minor,
-						status_string(ctx.res.status),
-						ctx.res.sent,
-						since(logger_ctx.start),
-					)
-				} else {
-					context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
-					log.infof(
-						"%v - %v %q %v.%v -> %v %m %v",
-						net.address_to_string(c.remote.address, transaction_allocator(c)),
-						method_string(ctx.req.line.method),
-						ctx.req.line.target,
-						ctx.req.line.version.major,
-						ctx.req.line.version.minor,
-						status_string(ctx.res.status),
-						ctx.res.sent,
-						since(logger_ctx.start),
-					)
-				}
-			})
-		}
-
-		h.next.handle(h.next, ctx)
+logged :: proc(ctx: ^Ctx, next: []Handler) {
+	Logger_Ctx :: struct {
+		start: time.Time,
 	}
+
+	if _, err := context_add(ctx, Logger_Ctx{now()}); err == nil {
+		response_defer(ctx, proc(ctx: ^Ctx) {
+			c          := connection_of_context(ctx)
+			logger_ctx := context_get(ctx, Logger_Ctx)
+
+			if context.logger.procedure == runtime.default_logger_proc {
+				date: [DATE_LENGTH]byte
+				date_write(date[:], now())
+				fmt.eprintfln(
+					"[%v] %v - %v %q %v.%v -> %v %m %v",
+					string(date[:]),
+					net.endpoint_to_string(c.remote, transaction_allocator(c)),
+					method_string(ctx.req.line.method),
+					ctx.req.line.target,
+					ctx.req.line.version.major,
+					ctx.req.line.version.minor,
+					status_string(ctx.res.status),
+					ctx.res.sent,
+					since(logger_ctx.start),
+				)
+			} else {
+				context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
+				log.infof(
+					"%v - %v %q %v.%v -> %v %m %v",
+					net.endpoint_to_string(c.remote, transaction_allocator(c)),
+					method_string(ctx.req.line.method),
+					ctx.req.line.target,
+					ctx.req.line.version.major,
+					ctx.req.line.version.minor,
+					status_string(ctx.res.status),
+					ctx.res.sent,
+					since(logger_ctx.start),
+				)
+			}
+		})
+	}
+
+	handle(next, ctx)
 }
 
 Body_Parser_State :: struct {
-	next:  ^Handler,
+	next:  []Handler,
 	parts: [dynamic][]byte,
 }
 
-body_parser :: proc(next: ^Handler, loc := #caller_location) -> Handler {
-	assert(next != nil, "body_parser requires a non-nil next handler", loc)
-	return {
-		next   = next,
-		handle = proc(h: ^Handler, ctx: ^Ctx) {
-			assert(context_get(ctx, Body_Parser_State) == nil)
-			s, add_err := context_add(ctx, Body_Parser_State{
-				next = h.next,
-			})
-			if add_err != nil {
+body_parser :: proc(ctx: ^Ctx, next: []Handler) {
+	assert(len(next) > 0, "body_parser requires a non-empty next handler chain")
+	s, add_err := context_add(ctx, Body_Parser_State{
+		next = next,
+	})
+	if add_err != nil {
+		invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+		return
+	}
+	s.parts.allocator = transaction_allocator(ctx)
+
+	body(&ctx.req, on_body, retain = true)
+
+	on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
+		ctx := context_of_request(r)
+		s := context_get(ctx, Body_Parser_State)
+		assert(s != nil)
+
+		if len(body) > 0 {
+			if _, app_err := append(&s.parts, body); app_err != nil {
 				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
 				return
 			}
-			s.parts.allocator = transaction_allocator(ctx)
+		}
 
-			body(&ctx.req, on_body, retain = true)
-
-			on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
-				ctx := context_of_request(r)
-				s := context_get(ctx, Body_Parser_State)
-				assert(s != nil)
-
-				if len(body) > 0 {
-					if _, app_err := append(&s.parts, body); app_err != nil {
-						invalid_request(connection_of_context(ctx), .Internal_Server_Error)
-						return
-					}
-				}
-
-				if !is_partial {
-					s.next.handle(s.next, ctx)
-				}
-			}
-		},
+		if !is_partial {
+			handle(s.next, ctx)
+		}
 	}
 }
 

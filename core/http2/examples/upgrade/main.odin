@@ -20,8 +20,6 @@ import http "core:http2"
 
 @(rodata)
 UPGRADE_RECV_QUOTA := http.Quota{min = 60 * time.Second}
-@(rodata)
-UPGRADE_SEND_QUOTA := http.UNLIMITED_QUOTA
 
 Echo_Conn :: struct {
 	sock:     nbio.TCP_Socket,
@@ -36,7 +34,7 @@ main :: proc() {
 	http.route_get(&r, "/detach", handle_detached_upgrade)
 
 	fmt.println("Listening on http://127.0.0.1:8080")
-	s := http.make_server(http.Server_Options{handler = http.router(&r)})
+	s := http.make_server(http.Server_Options{handlers = {http.router(&r)}})
 	err := http.listen_and_serve(&s)
 	fmt.assertf(err == nil, "server error: %v", err)
 }
@@ -74,7 +72,7 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 
 		// Replace HTTP request/response quotas with protocol-appropriate limits (here: 60s idle recv, unlimited send).
 		http.request_set_quota(&c.req, &UPGRADE_RECV_QUOTA)
-		http.response_set_quota(&c.res, &UPGRADE_SEND_QUOTA)
+		http.response_set_quota(&c.res, &http.UNLIMITED_QUOTA)
 
 		fmt.printfln("[in-pool] client %v upgraded", c.socket)
 		http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {

@@ -352,7 +352,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 		t = t,
 	})
 
-	next := http.handler(proc(ctx: ^http.Ctx) {
+	next := proc(ctx: ^http.Ctx) {
 		exp := http.context_get(ctx, Stream_Expectation)
 		exp.called = true
 		t := exp.t
@@ -423,10 +423,9 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 		bad_oob_n, bad_oob_err := io.read_at(stream, at_buf[:], 14)
 		testing.expect_value(t, bad_oob_err, io.Error.Invalid_Offset)
 		testing.expect_value(t, bad_oob_n, 0)
-	})
+	}
 
-	parser := http.body_parser(&next)
-	parser.handle(&parser, &c.ctx)
+	http.handle({http.body_parser, next}, &c.ctx)
 	testing.expect(t, exp.called, "expected body_parser to invoke next handler")
 
 	// Verify empty body stream behavior (off=0 -> .EOF, off>0 -> .Invalid_Offset).
@@ -775,10 +774,11 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	}
 
 	Test_Env :: struct {
-		s:      http.Server,
-		thread: http.Server_Thread,
-		prev:   ^http.Server_Thread,
-		c:      http.Connection,
+		s:        http.Server,
+		handlers: [1]http.Handler,
+		thread:   http.Server_Thread,
+		prev:     ^http.Server_Thread,
+		c:        http.Connection,
 	}
 
 	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
@@ -788,9 +788,8 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		http.respond(&c.res)
 	}
 
-	test_handler := http.Handler{
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			state := (^Test_State)(h.user_data)
+	test_handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
+		state := (^Test_State)(user_data)
 			c := http.connection_of_context(ctx)
 			state.req_count += 1
 
@@ -845,12 +844,11 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 					}
 				})
 			}
-		},
 	}
 
-	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: ^http.Handler, payload: string, env: ^Test_Env) {
-		test_handler.user_data = state
-		env.s = http.make_server({handler = test_handler^})
+	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: http.Data_Handle_Proc, payload: string, env: ^Test_Env) {
+		env.handlers = {http.handler(state, test_handler)}
+		env.s = http.make_server({handlers = env.handlers[:]})
 
 		env.thread = http.Server_Thread{s = &env.s, id = 1}
 		env.prev = http.td
@@ -884,7 +882,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	{
 		state := Test_State{t = t, mode = .Unconsumed}
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /unconsumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
 			&env,
 		)
@@ -900,7 +898,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	{
 		state := Test_State{t = t, mode = .Unconsumed}
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /unconsumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
 			&env,
 		)
@@ -917,7 +915,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		state := Test_State{t = t, mode = .Consumed_Keepalive}
 		defer delete(state.second_target)
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /consumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello" +
 			"GET /after-consumed-cl HTTP/1.1\r\nHost: localhost\r\n\r\n",
 			&env,
@@ -936,7 +934,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		state := Test_State{t = t, mode = .Consumed_Keepalive}
 		defer delete(state.second_target)
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /consumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"5\r\nhello\r\n0\r\n\r\n" +
 			"GET /after-consumed-chunked HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -955,7 +953,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	{
 		state := Test_State{t = t, mode = .Partial_Cb_Respond}
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /partial-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n" +
 			"GET /should-not-run HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -974,7 +972,7 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	{
 		state := Test_State{t = t, mode = .Partial_Cb_Respond}
 		env: Test_Env
-		run_payload(t, &state, &test_handler,
+		run_payload(t, &state, test_handler,
 			"POST /partial-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
 			&env,
 		)
@@ -1013,10 +1011,11 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	}
 
 	Test_Env :: struct {
-		s:      http.Server,
-		thread: http.Server_Thread,
-		prev:   ^http.Server_Thread,
-		c:      http.Connection,
+		s:        http.Server,
+		handlers: [1]http.Handler,
+		thread:   http.Server_Thread,
+		prev:     ^http.Server_Thread,
+		c:        http.Connection,
 	}
 
 	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
@@ -1026,9 +1025,8 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		http.respond(&c.res)
 	}
 
-	handler := http.Handler{
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Pause_State)(h.user_data)
+	handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
+		st := (^Pause_State)(user_data)
 			c := http.connection_of_context(ctx)
 			st.req_count += 1
 
@@ -1094,12 +1092,11 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 					}
 				}
 			})
-		},
 	}
 
-	setup_and_run :: proc(t: ^testing.T, st: ^Pause_State, h: ^http.Handler, payload: string, env: ^Test_Env) {
-		h.user_data = st
-		env.s = http.make_server({handler = h^})
+	setup_and_run :: proc(t: ^testing.T, st: ^Pause_State, h: http.Data_Handle_Proc, payload: string, env: ^Test_Env) {
+		env.handlers = {http.handler(st, h)}
+		env.s = http.make_server({handlers = env.handlers[:]})
 		env.thread = http.Server_Thread{s = &env.s, id = 1}
 		env.prev = http.td
 		http.td = &env.thread
@@ -1137,7 +1134,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Async_Paused}
 		defer delete(st.second_target)
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
 			&env,
 		)
@@ -1180,7 +1177,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Async_Paused}
 		defer delete(st.second_target)
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /ch HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\na\r\nhello",
 			&env,
 		)
@@ -1227,7 +1224,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Sync_Pause_Resume}
 		defer delete(st.second_target)
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /sync HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n" +
 			"GET /after-sync HTTP/1.1\r\nHost: localhost\r\n\r\n",
@@ -1246,7 +1243,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Sync_Pause_Resume_Pause, early_respond_pending = true}
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /prp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
 			&env,
@@ -1269,7 +1266,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Pause_Before_Body_And_On_Final, early_respond_pending = true}
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /edge-final HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
 			&env,
 		)
@@ -1292,7 +1289,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Async_Paused}
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /early-resp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
 			&env,
 		)
@@ -1312,7 +1309,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Async_Paused, early_respond_pending = true}
 		env: Test_Env
-		setup_and_run(t, &st, &handler,
+		setup_and_run(t, &st, handler,
 			"POST /pending-scan HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc",
 			&env,
 		)
@@ -1388,22 +1385,17 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 			sent_seen:  int,
 		}
 		state: Reject_State
-		handler := http.Handler{
-			user_data = &state,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				st := (^Reject_State)(h.user_data)
-				st.handled = true
-				st.sends_seen = ctx.res._sends
-				st.sent_seen = ctx.res.sent
-				ctx.res.status = .Unauthorized
-				http.write_response_heading(&ctx.res)
-				ctx.res._state = .Sending
-				ctx.res._sends = 1
-				http.respond(&ctx.res)
-			},
-		}
-
-		s := http.make_server({handler = handler})
+		s := http.make_server({handlers = {http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			st := (^Reject_State)(user_data)
+			st.handled = true
+			st.sends_seen = ctx.res._sends
+			st.sent_seen = ctx.res.sent
+			ctx.res.status = .Unauthorized
+			http.write_response_heading(&ctx.res)
+			ctx.res._state = .Sending
+			ctx.res._sends = 1
+			http.respond(&ctx.res)
+		})}})
 
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
@@ -1711,10 +1703,10 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 		st := State{t = t}
 		counter := Arena_Counting_Allocator{backing = context.allocator}
-		handler := http.Handler{
-			user_data = &st,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				st := (^State)(h.user_data)
+		s := http.make_server({
+			body_quota = http.UNLIMITED_QUOTA,
+			handlers   = {http.handler(&st, proc(user_data: rawptr, ctx: ^http.Ctx) {
+				st := (^State)(user_data)
 				c := http.connection_of_context(ctx)
 
 				temp, terr := make([]byte, 256, context.temp_allocator)
@@ -1723,11 +1715,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 				st.temp_sentinel = temp
 
 				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
-			},
-		}
-		s := http.make_server({
-			body_quota = http.UNLIMITED_QUOTA,
-			handler    = handler,
+			})},
 		}, arena_counting_allocator(&counter))
 
 		thread := http.Server_Thread{s = &s, id = 1}
@@ -1906,13 +1894,12 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 	// 2. Lying 1 GiB chunk size with UNLIMITED_QUOTA starts detached reusable buffer at BODY_BUF_SIZE (16 KiB block).
 	{
 		counter := Arena_Counting_Allocator{backing = context.allocator}
-		handler := http.handler(proc(ctx: ^http.Ctx) {
-			c := http.connection_of_context(ctx)
-			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
-		})
 		s := http.make_server({
 			body_quota = http.UNLIMITED_QUOTA,
-			handler    = handler,
+			handlers   = {proc(ctx: ^http.Ctx) {
+				c := http.connection_of_context(ctx)
+				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+			}},
 		}, arena_counting_allocator(&counter))
 
 		thread := http.Server_Thread{s = &s, id = 1}
@@ -1946,13 +1933,12 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 	// 3. Small split Content-Length (200 bytes) caps reusable buffer at MULTIPLIER (512 bytes) inside existing 4 KiB block.
 	{
 		counter := Arena_Counting_Allocator{backing = context.allocator}
-		handler := http.handler(proc(ctx: ^http.Ctx) {
-			c := http.connection_of_context(ctx)
-			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
-		})
 		s := http.make_server({
 			body_quota = http.UNLIMITED_QUOTA,
-			handler    = handler,
+			handlers   = {proc(ctx: ^http.Ctx) {
+				c := http.connection_of_context(ctx)
+				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+			}},
 		}, arena_counting_allocator(&counter))
 
 		thread := http.Server_Thread{s = &s, id = 1}
@@ -2081,7 +2067,7 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 			buf_start = uintptr(raw_data(buf)),
 			buf_end   = uintptr(raw_data(buf)) + uintptr(len(buf)),
 		})
-		next := http.handler(proc(ctx: ^http.Ctx) {
+		next := proc(ctx: ^http.Ctx) {
 			ps := http.context_get(ctx, Parser_State)
 			ps.called = true
 
@@ -2098,10 +2084,9 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 			n, rerr := io.read(stream, out[:])
 			testing.expect_value(ps.t, rerr, nil)
 			testing.expect_value(ps.t, string(out[:n]), "hello world")
-		})
+		}
 
-		parser := http.body_parser(&next)
-		parser.handle(&parser, &c.ctx)
+		http.handle({http.body_parser, next}, &c.ctx)
 		testing.expect(t, ps.called, "expected body_parser to invoke next handler")
 		testing.expect_value(t, counter.alloc_count, 1)
 	}

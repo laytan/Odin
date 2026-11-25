@@ -84,7 +84,7 @@ test_http2_server_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		handler      = http.handler(http2_test_handler),
+		handlers     = {http2_test_handler},
 	})
 
 	setup_err := http._setup(&state.server)
@@ -209,7 +209,7 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		body_quota   = {max_size = 4096, min = 5 * time.Second},
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -346,42 +346,33 @@ test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
 
 	r: http.Router
 	defer http.router_destroy(r)
-	http.route_get(&r, "/ping", http.Handler{
-		user_data = &srv_state,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Head_Server_State)(h.user_data)
-			if st.ping_count < len(st.ping_methods) {
-				st.ping_methods[st.ping_count] = ctx.req.line.method
-			}
-			st.ping_count += 1
-			http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
-		},
-	})
-	http.route_head(&r, "/custom", http.Handler{
-		user_data = &srv_state,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Head_Server_State)(h.user_data)
-			st.custom_head_count += 1
-			st.custom_head_method = ctx.req.line.method
-			http.set_content_length_header(&ctx.res, 9)
-			http.respond(&ctx.res)
-		},
-	})
-	http.route_get(&r, "/custom", http.Handler{
-		user_data = &srv_state,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Head_Server_State)(h.user_data)
-			st.custom_get_count += 1
-			st.custom_get_method = ctx.req.line.method
-			http.respond_bytes(&ctx.res, transmute([]byte)string("custom-ok"))
-		},
-	})
+	http.route_get(&r, "/ping", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		st := (^Head_Server_State)(user_data)
+		if st.ping_count < len(st.ping_methods) {
+			st.ping_methods[st.ping_count] = ctx.req.line.method
+		}
+		st.ping_count += 1
+		http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
+	}))
+	http.route_head(&r, "/custom", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		st := (^Head_Server_State)(user_data)
+		st.custom_head_count += 1
+		st.custom_head_method = ctx.req.line.method
+		http.set_content_length_header(&ctx.res, 9)
+		http.respond(&ctx.res)
+	}))
+	http.route_get(&r, "/custom", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		st := (^Head_Server_State)(user_data)
+		st.custom_get_count += 1
+		st.custom_get_method = ctx.req.line.method
+		http.respond_bytes(&ctx.res, transmute([]byte)string("custom-ok"))
+	}))
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -546,24 +537,21 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	http.route_get(&r, "/ping", proc(ctx: ^http.Ctx) {
 		http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
 	})
-	http.route_get(&r, "/slow", http.Handler{
-		user_data = &srv_state,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Shutdown_Server_State)(h.user_data)
-			st.handler_saw_tls = len(_tls_test_buf) >= 6 && string(_tls_test_buf[:6]) == "tls-ok"
-			sync.one_shot_event_signal(&st.slow_started)
-			nbio.timeout_poly(40 * time.Millisecond, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
-				http.respond_bytes(&ctx.res, transmute([]byte)string("slow-ok"))
-			})
-		},
-	})
+	http.route_get(&r, "/slow", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		st := (^Shutdown_Server_State)(user_data)
+		st.handler_saw_tls = len(_tls_test_buf) >= 6 && string(_tls_test_buf[:6]) == "tls-ok"
+		sync.one_shot_event_signal(&st.slow_started)
+		nbio.timeout_poly(40 * time.Millisecond, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
+			http.respond_bytes(&ctx.res, transmute([]byte)string("slow-ok"))
+		})
+	}))
 
 	server := http.make_server(http.Server_Options{
 		address              = nbio.IP4_Loopback,
 		port                 = http.OS_ASSIGNED_PORT,
 		thread_count         = 1,
 		request_quota        = http.Quota{max_size = 64 * mem.Kilobyte, min = 200 * time.Millisecond, max = 250 * time.Millisecond},
-		handler              = http.router(&r),
+		handlers             = {http.router(&r)},
 		thread_initializer = proc() {
 			_tls_test_buf = make([]byte, 16)
 			copy(_tls_test_buf, "tls-ok")
@@ -822,7 +810,7 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -993,7 +981,7 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -1699,41 +1687,29 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 			})
 		}
 
-		http.route_get(&r, "/ok", http.Handler{
-			user_data = &srv_state,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
-				http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
-			},
-		})
-		http.route_get(&r, "/file", http.Handler{
-			user_data = &srv_state,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
-				http.respond_file_path(&ctx.res, "core/http2/README.md")
-			},
-		})
-		http.route_get(&r, "/missing", http.Handler{
-			user_data = &srv_state,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
-				http.respond_file_path(&ctx.res, "core/http2/__does_not_exist__")
-			},
-		})
-		http.route_get(&r, "/close", http.Handler{
-			user_data = &srv_state,
-			handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-				register_defer_check(ctx, (^Temp_Check_State)(h.user_data))
-				http.set_header(&ctx.res, "connection", "close")
-				http.respond_bytes(&ctx.res, transmute([]byte)string("bye"))
-			},
-		})
+		http.route_get(&r, "/ok", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			register_defer_check(ctx, (^Temp_Check_State)(user_data))
+			http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
+		}))
+		http.route_get(&r, "/file", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			register_defer_check(ctx, (^Temp_Check_State)(user_data))
+			http.respond_file_path(&ctx.res, "core/http2/README.md")
+		}))
+		http.route_get(&r, "/missing", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			register_defer_check(ctx, (^Temp_Check_State)(user_data))
+			http.respond_file_path(&ctx.res, "core/http2/__does_not_exist__")
+		}))
+		http.route_get(&r, "/close", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			register_defer_check(ctx, (^Temp_Check_State)(user_data))
+			http.set_header(&ctx.res, "connection", "close")
+			http.respond_bytes(&ctx.res, transmute([]byte)string("bye"))
+		}))
 
 		s := http.make_server(http.Server_Options{
 			address      = nbio.IP4_Loopback,
 			port         = http.OS_ASSIGNED_PORT,
 			thread_count = 1,
-			handler      = http.router(&r),
+			handlers     = {http.router(&r)},
 		})
 		setup_err := http._setup(&s)
 		if !testing.expect_value(t, setup_err, nil) {
@@ -1798,10 +1774,10 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 			address      = nbio.IP4_Loopback,
 			port         = http.OS_ASSIGNED_PORT,
 			thread_count = 2,
-			handler      = http.handler(proc(ctx: ^http.Ctx) {
+			handlers     = {proc(ctx: ^http.Ctx) {
 				http.set_header(&ctx.res, "connection", "close")
 				http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
-			}),
+			}},
 		})
 		setup_err := http._setup(&s2)
 		if !testing.expect_value(t, setup_err, nil) {
@@ -2224,10 +2200,8 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 	r: http.Router
 	defer http.router_destroy(r)
 
-	http.route_post(&r, "/stream-cl", http.Handler{
-		user_data = &srv_check,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			chk := (^Server_Check)(h.user_data)
+	http.route_post(&r, "/stream-cl", http.handler(&srv_check, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		chk := (^Server_Check)(user_data)
 			sentinel, serr := make([]byte, 128, context.temp_allocator)
 			if serr != nil {
 				ctx.res.status = .Internal_Server_Error
@@ -2265,13 +2239,10 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s", st.count, st.hash, tag, allocator = http.transaction_allocator(ctx)))
 				}
 			})
-		},
-	})
+	}))
 
-	http.route_post(&r, "/stream-chunked", http.Handler{
-		user_data = &srv_check,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			chk := (^Server_Check)(h.user_data)
+	http.route_post(&r, "/stream-chunked", http.handler(&srv_check, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		chk := (^Server_Check)(user_data)
 			sentinel, serr := make([]byte, 128, context.temp_allocator)
 			if serr != nil {
 				ctx.res.status = .Internal_Server_Error
@@ -2310,10 +2281,9 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s:%s", st.count, st.hash, tag, tr, allocator = http.transaction_allocator(ctx)))
 				}
 			})
-		},
-	})
+	}))
 
-	parsed_next := http.handler(proc(ctx: ^http.Ctx) {
+	http.route_post(&r, "/parsed", http.body_parser, proc(ctx: ^http.Ctx) {
 		bps: http.Body_Parser_Stream
 		http.body_parser_stream_init(&bps, ctx)
 		stream := http.body_parser_stream(&bps)
@@ -2341,15 +2311,13 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 		http.set_header(&ctx.res, "connection", "close")
 		http.respond_plain(&ctx.res, fmt.aprintf("%d:%d", total, h, allocator = http.transaction_allocator(ctx)))
 	})
-	parsed_handler := http.body_parser(&parsed_next)
-	http.route_post(&r, "/parsed", parsed_handler)
 
 	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
 		body_quota   = {max_size = 4 * mem.Megabyte, min = 5 * time.Second},
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
 	setup_err := http._setup(&server)
@@ -2592,10 +2560,8 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 		tx_offset_1:    int,
 		chk:            ^Server_Peak_Check,
 	}
-	http.route_get(&r, "/seq", http.Handler{
-		user_data = &srv_check,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			chk := (^Server_Peak_Check)(h.user_data)
+	http.route_get(&r, "/seq", http.handler(&srv_check, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		chk := (^Server_Peak_Check)(user_data)
 			if _, err := http.context_add(ctx, Seq_State{chk = chk}); err != nil {
 				ctx.res.status = .Internal_Server_Error
 				http.respond(&ctx.res)
@@ -2630,8 +2596,7 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 			}
 
 			send_next(http.connection_of_context(ctx), nil)
-		},
-	})
+	}))
 
 	// 2. Bursty send_chunk streaming (4 x 1 KiB chunks per burst, draining to _sends == 0 between bursts).
 	Burst_State :: struct {
@@ -2642,10 +2607,8 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 		tx_offset_1: int,
 		chk:         ^Server_Peak_Check,
 	}
-	http.route_get(&r, "/burst", http.Handler{
-		user_data = &srv_check,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			chk := (^Server_Peak_Check)(h.user_data)
+	http.route_get(&r, "/burst", http.handler(&srv_check, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		chk := (^Server_Peak_Check)(user_data)
 			if _, err := http.context_add(ctx, Burst_State{chk = chk}); err != nil {
 				ctx.res.status = .Internal_Server_Error
 				http.respond(&ctx.res)
@@ -2696,8 +2659,7 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 			}
 
 			send_burst(http.connection_of_context(ctx))
-		},
-	})
+	}))
 
 	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
 		http.respond_plain(&ctx.res, "still-alive")
@@ -2708,7 +2670,7 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 		port           = http.OS_ASSIGNED_PORT,
 		thread_count   = 1,
 		response_quota = http.UNLIMITED_QUOTA,
-		handler        = http.router(&r),
+		handlers       = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
 	setup_err := http._setup(&server)
@@ -2944,18 +2906,12 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 	r: http.Router
 	defer http.router_destroy(r)
 
-	http.route_post(&r, "/echo-cl", http.Handler{
-		user_data = &stats,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			handle_echo(ctx, (^Echo_Stats)(h.user_data), .Content_Length)
-		},
-	})
-	http.route_post(&r, "/echo-chunked", http.Handler{
-		user_data = &stats,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			handle_echo(ctx, (^Echo_Stats)(h.user_data), .Chunked)
-		},
-	})
+	http.route_post(&r, "/echo-cl", http.handler(&stats, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		handle_echo(ctx, (^Echo_Stats)(user_data), .Content_Length)
+	}))
+	http.route_post(&r, "/echo-chunked", http.handler(&stats, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		handle_echo(ctx, (^Echo_Stats)(user_data), .Chunked)
+	}))
 	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
 		http.respond_plain(&ctx.res, "still-alive")
 	})
@@ -2966,7 +2922,7 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 		thread_count   = 1,
 		body_quota     = http.UNLIMITED_QUOTA,
 		response_quota = http.UNLIMITED_QUOTA,
-		handler        = http.router(&r),
+		handlers       = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
 	setup_err := http._setup(&server)
@@ -3237,7 +3193,7 @@ test_http2_range_requests_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		handler      = http.router(&r),
+		handlers     = {http.router(&r)},
 	})
 
 	setup_err := http._setup(&server)
@@ -3438,10 +3394,12 @@ test_http2_response_defer_sees_socket_on_destroy :: proc(t: ^testing.T) {
 	}
 
 	state: Defer_Socket_State
-	handler := http.Handler{
-		user_data = &state,
-		handle = proc(h: ^http.Handler, ctx: ^http.Ctx) {
-			st := (^Defer_Socket_State)(h.user_data)
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 1,
+		handlers     = {http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			st := (^Defer_Socket_State)(user_data)
 			c := http.connection_of_response(&ctx.res)
 			st.handler_socket = c.socket
 
@@ -3455,14 +3413,7 @@ test_http2_response_defer_sees_socket_on_destroy :: proc(t: ^testing.T) {
 
 			http.set_header(&ctx.res, "Connection", "close")
 			http.respond_plain(&ctx.res, "bye")
-		},
-	}
-
-	server := http.make_server(http.Server_Options{
-		address      = nbio.IP4_Loopback,
-		port         = http.OS_ASSIGNED_PORT,
-		thread_count = 1,
-		handler      = handler,
+		})},
 	})
 
 	setup_err := http._setup(&server)
@@ -3543,10 +3494,10 @@ test_http2_server_shutdown_async :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 2,
-		handler      = http.handler(proc(ctx: ^http.Ctx) {
+		handlers     = {proc(ctx: ^http.Ctx) {
 			http.set_header(&ctx.res, "Connection", "close")
 			http.respond_plain(&ctx.res, "ok")
-		}),
+		}},
 	})
 
 	// Before _serve starts, server_shutdown_async returns false.
@@ -3624,4 +3575,138 @@ test_http2_server_shutdown_async :: proc(t: ^testing.T) {
 	testing.expect(t, ctx.first_async, "expected first server_shutdown_async to return true")
 	testing.expect(t, !ctx.second_async, "expected second server_shutdown_async to return false")
 	testing.expect(t, !http.server_shutdown_async(&server), "expected false after _serve completes")
+}
+
+@(test)
+test_http2_middleware_pipeline_and_subrouter_with_curl :: proc(t: ^testing.T) {
+	testing.set_fail_timeout(t, 5 * time.Second)
+
+	Auth_Tag :: struct {
+		user: string,
+	}
+
+	outer_mw := proc(ctx: ^http.Ctx, next: []http.Handler) {
+		http.set_header(&ctx.res, "X-Outer", "1")
+		http.handle(next, ctx)
+	}
+
+	require_user := proc(ctx: ^http.Ctx, next: []http.Handler) {
+		u, ok := http.get_header(&ctx.req, "X-User")
+		if !ok || u == "" {
+			ctx.res.status = .Unauthorized
+			http.respond_plain(&ctx.res, "unauthorized")
+			return
+		}
+		http.context_add(ctx, Auth_Tag{user = u})
+		http.set_header(&ctx.res, "X-Authed", u)
+		http.handle(next, ctx)
+	}
+
+	api: http.Router
+	defer http.router_destroy(api)
+	http.route_post(&api, "/echo", http.body_parser, proc(ctx: ^http.Ctx) {
+		body, ok := http.body_parser_collect(ctx)
+		if !ok {
+			ctx.res.status = .Bad_Request
+			http.respond(&ctx.res)
+			return
+		}
+		tag := http.context_get(ctx, Auth_Tag)
+		http.respond_plain(&ctx.res, fmt.aprintf("%s:%s", tag.user, string(body), allocator = http.transaction_allocator(ctx)))
+	})
+
+	root: http.Router
+	defer http.router_destroy(root)
+	http.route_all(&root, "/api/*", require_user, http.router(&api))
+
+	server := http.make_server(http.Server_Options{
+		address      = nbio.IP4_Loopback,
+		port         = http.OS_ASSIGNED_PORT,
+		thread_count = 1,
+		handlers     = {outer_mw, http.router(&root)},
+	})
+
+	setup_err := http._setup(&server)
+	if !testing.expect_value(t, setup_err, nil) {
+		http._destroy(&server)
+		return
+	}
+
+	Case_Res :: struct {
+		setopt_ok:   bool,
+		perform_err: curl.code,
+		getinfo_err: curl.code,
+		response:    Curl_Response,
+	}
+	Test_Ctx :: struct {
+		server:       ^http.Server,
+		endpoint_err: net.Socket_Info_Error,
+		handle_ok:    bool,
+		unauth:       Case_Res,
+		authed:       Case_Res,
+	}
+
+	ctx := Test_Ctx{server = &server}
+	defer delete(ctx.unauth.response.body)
+	defer delete(ctx.authed.response.body)
+
+	client_thread := thread.create_and_start_with_data(&ctx, proc(data: rawptr) {
+		ctx := (^Test_Ctx)(data)
+		defer http.server_shutdown(ctx.server)
+
+		endpoint, ep_err := nbio.bound_endpoint(ctx.server.socket)
+		ctx.endpoint_err = ep_err
+		if ep_err != nil { return }
+
+		handle := curl.easy_init()
+		ctx.handle_ok = handle != nil
+		if handle == nil { return }
+		defer curl.easy_cleanup(handle)
+
+		url := fmt.ctprintf("http://127.0.0.1:%d/api/echo", endpoint.port)
+
+		// 1. Short-circuit 401 when X-User is missing.
+		ctx.unauth.setopt_ok =
+			curl.easy_setopt(handle, .URL, url) == .E_OK &&
+			curl.easy_setopt(handle, .POST, c.long(1)) == .E_OK &&
+			curl.easy_setopt(handle, .POSTFIELDS, cstring("hello")) == .E_OK &&
+			curl.easy_setopt(handle, .POSTFIELDSIZE, c.long(5)) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEFUNCTION, curl_write_response) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.unauth.response) == .E_OK
+		if ctx.unauth.setopt_ok {
+			ctx.unauth.perform_err = curl.easy_perform(handle)
+			ctx.unauth.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.unauth.response.status)
+		}
+
+		// 2. Full pipeline: outer_mw -> root router -> require_user -> api router -> body_parser -> endpoint.
+		hdrs := curl.slist_append(nil, "X-User: alice")
+		defer curl.slist_free_all(hdrs)
+		ctx.authed.setopt_ok =
+			curl.easy_setopt(handle, .HTTPHEADER, hdrs) == .E_OK &&
+			curl.easy_setopt(handle, .WRITEDATA, &ctx.authed.response) == .E_OK
+		if ctx.authed.setopt_ok {
+			ctx.authed.perform_err = curl.easy_perform(handle)
+			ctx.authed.getinfo_err = curl.easy_getinfo(handle, .RESPONSE_CODE, &ctx.authed.response.status)
+		}
+	})
+
+	http._serve(&server)
+	thread.join(client_thread)
+	thread.destroy(client_thread)
+	http._destroy(&server)
+
+	if !testing.expect_value(t, ctx.endpoint_err, nil) { return }
+	if !testing.expect(t, ctx.handle_ok, "curl.easy_init failed") { return }
+
+	testing.expect(t, ctx.unauth.setopt_ok, "unauth setopt failed")
+	testing.expectf(t, ctx.unauth.perform_err == .E_OK, "unauth curl failed: %s", curl.easy_strerror(ctx.unauth.perform_err))
+	testing.expect_value(t, ctx.unauth.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.unauth.response.status, c.long(401))
+	testing.expect_value(t, string(ctx.unauth.response.body[:]), "unauthorized")
+
+	testing.expect(t, ctx.authed.setopt_ok, "authed setopt failed")
+	testing.expectf(t, ctx.authed.perform_err == .E_OK, "authed curl failed: %s", curl.easy_strerror(ctx.authed.perform_err))
+	testing.expect_value(t, ctx.authed.getinfo_err, curl.code.E_OK)
+	testing.expect_value(t, ctx.authed.response.status, c.long(200))
+	testing.expect_value(t, string(ctx.authed.response.body[:]), "alice:hello")
 }
