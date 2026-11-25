@@ -210,7 +210,7 @@ test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
-	http.progression_init(&c.req.progress, {})
+	http.progression_init(&c.req.progress, nil)
 
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -336,7 +336,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
-	http.progression_init(&c.req.progress, {})
+	http.progression_init(&c.req.progress, nil)
 
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -1680,8 +1680,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		c.res._deferred.allocator = tx_alloc
 		c.scanner.c               = c
 		c.scanner.allocator       = &c.transaction_arena
-		c.req.quota               = &s.opts.request_quota
-		http.progression_init(&c.req.progress, c.req.quota^)
+		http.progression_init(&c.req.progress, &s.opts.request_quota)
 
 		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
 		testing.expect_value(t, buf_err, nil)
@@ -2043,7 +2042,7 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, {})
+		http.progression_init(&c.req.progress, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -2279,8 +2278,7 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		c.res._deferred.allocator = tx_alloc
 		c.scanner.c               = c
 		c.scanner.allocator       = &c.transaction_arena
-		c.req.quota               = &s.opts.body_quota
-		http.progression_init(&c.req.progress, c.req.quota^)
+		http.progression_init(&c.req.progress, &s.opts.body_quota)
 		c.res._state              = .Handling
 		c.res.progress.max        = 0
 		c.res._sends              = 1
@@ -2396,7 +2394,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, {})
+		http.progression_init(&c.req.progress, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -2490,7 +2488,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, {})
+		http.progression_init(&c.req.progress, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)

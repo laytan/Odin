@@ -282,8 +282,7 @@ _respond_handle_with_size :: proc(c: ^Connection, file: nbio.Handle, size: int, 
 		last_modified_buf, err := make([]byte, DATE_LENGTH, transaction_allocator(c))
 		if err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Last-Modified buffer\", err=%v", td.id, c.socket, err)
-			c.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
+			_connection_abort(c)
 			return
 		}
 		date_write(last_modified_buf, last_modified)
@@ -304,6 +303,34 @@ _respond_handle_with_size :: proc(c: ^Connection, file: nbio.Handle, size: int, 
 // respond_ procs finalize the response, called once per response
 
 SEND_ENTIRE_FILE :: nbio.SEND_ENTIRE_FILE
+
+@(private="file")
+_prepare_send :: proc(c: ^Connection) -> (max: int, timeout: time.Duration, ok: bool) {
+	max     = c.res.progress.max
+	timeout = c.res.progress.timeout
+	if max == 0 || timeout == 0 {
+		_connection_abort(c, skip_graceful = false)
+		return 0, 0, false
+	}
+	if timeout < 0 {
+		timeout = nbio.NO_TIMEOUT
+	}
+	c.res._sends    += 1
+	c.res._last_send = now()
+	return max, timeout, true
+}
+
+@(private="file")
+_begin_heading :: proc(ctx: ^Ctx) -> bool {
+	c := _connection_of_context(ctx)
+	if err := write_response_heading(ctx); err != nil {
+		log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
+		_connection_abort(c)
+		return false
+	}
+	ctx.res._state = .Sending
+	return true
+}
 
 send_file :: proc(ctx: ^Ctx, file: nbio.Handle, offset: int = 0, nbytes: int = SEND_ENTIRE_FILE, on_sent: Send_Callback = nil) {
 	nbytes := nbytes
@@ -326,24 +353,13 @@ send_file :: proc(ctx: ^Ctx, file: nbio.Handle, offset: int = 0, nbytes: int = S
 	}
 
 	if nbytes > 0 && wants_body(ctx) {
-		max := ctx.res.progress.max
-		timeout := ctx.res.progress.timeout
-		if max == 0 || timeout == 0 {
-			ctx.res._state = .Error
-			_check_send_done(c)
+		max, timeout, ok := _prepare_send(c)
+		if !ok {
 			return
 		}
-
 		if nbytes != SEND_ENTIRE_FILE && max >= 0 {
-			nbytes = min(nbytes, ctx.res.progress.max)
+			nbytes = min(nbytes, max)
 		}
-
-		if timeout < 0 {
-			timeout = nbio.NO_TIMEOUT
-		}
-
-		ctx.res._sends += 1
-		ctx.res._last_send = now()
 		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes, timeout=timeout)
 	}
 }
@@ -354,13 +370,9 @@ send :: proc(ctx: ^Ctx, bufs: [][]byte, on_sent: Send_Callback = nil) {
 	case .Error:
 		return
 	case .None, .Handling:
-		if err := write_response_heading(ctx); err != nil {
-			log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
-			ctx.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
+		if !_begin_heading(ctx) {
 			return
 		}
-		ctx.res._state = .Sending
 		if !wants_body(ctx) || len(bufs) == 0 {
 			_do_send(c, {ctx.res._buf[:]}, on_sent)
 			return
@@ -406,25 +418,13 @@ _constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
 
 _do_send :: proc(c: ^Connection, bufs: [][]byte, on_sent: Send_Callback) {
 	bufs := bufs
-
-	max := c.res.progress.max
-	timeout := c.res.progress.timeout
-	if max == 0 || timeout == 0 {
-		c.res._state = .Error
-		_check_send_done(c)
+	max, timeout, ok := _prepare_send(c)
+	if !ok {
 		return
 	}
-
 	if max > 0 {
 		bufs = _constraint_bufs(bufs, max)
 	}
-
-	if timeout < 0 {
-		timeout = nbio.NO_TIMEOUT
-	}
-
-	c.res._sends += 1
-	c.res._last_send = now()
 	nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
 }
 
@@ -459,8 +459,7 @@ _begin_chunked :: proc(ctx: ^Ctx) -> ^_Chunked_State {
 		if err := set_header(ctx, "Transfer-Encoding", "chunked"); err != nil {
 			c := _connection_of_context(ctx)
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to set Transfer-Encoding header\", err=%v", td.id, c.socket, err)
-			ctx.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
+			_connection_abort(c)
 			return nil
 		}
 	}
@@ -469,8 +468,7 @@ _begin_chunked :: proc(ctx: ^Ctx) -> ^_Chunked_State {
 	if err != nil {
 		c := _connection_of_context(ctx)
 		log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Chunked_State\", err=%v", td.id, c.socket, err)
-		ctx.res._state = .Error
-		_check_send_done(c, skip_graceful = true)
+		_connection_abort(c)
 		return nil
 	}
 	state.free = &state.inline_hdr
@@ -499,21 +497,14 @@ respond :: proc(ctx: ^Ctx) {
 	switch ctx.res._state {
 	case .Error:
 		return
-	case .None, .Handling:
+	case .None, .Handling, .Sending:
 		if is_chunked && wants_body(ctx) && _response_allows_body(c) {
 			send(ctx, {transmute([]byte)string("0\r\n\r\n")})
-		} else {
+		} else if ctx.res._state != .Sending {
 			send_heading(ctx)
 		}
 		if ctx.res._state == .Error {
 			return
-		}
-	case .Sending:
-		if is_chunked && wants_body(ctx) && _response_allows_body(c) {
-			send(ctx, {transmute([]byte)string("0\r\n\r\n")})
-			if ctx.res._state == .Error {
-				return
-			}
 		}
 	case .Sent:
 		panic("response has been sent already")
@@ -526,29 +517,21 @@ respond :: proc(ctx: ^Ctx) {
 }
 
 respond_bytes :: proc(ctx: ^Ctx, bytes: []byte) {
-	c := _connection_of_context(ctx)
-
 	switch ctx.res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		set_content_length_header(ctx, len(bytes))
-		if len(bytes) > 0 {
-			send(ctx, {bytes})
-		} else {
-			send_heading(ctx)
-		}
-		if ctx.res._state == .Error {
-			return
-		}
 	case .Sent, .Sending:
 		panic("response has been sent already")
 	case:
 		unreachable()
 	}
 
-	ctx.res._state = .Sent
-	_check_send_done(c)
+	set_content_length_header(ctx, len(bytes))
+	if len(bytes) > 0 {
+		send(ctx, {bytes})
+	}
+	respond(ctx)
 }
 
 respond_plain :: proc(ctx: ^Ctx, text: string) {
@@ -626,8 +609,7 @@ send_chunk :: proc(ctx: ^Ctx, bufs: [][]byte, on_sent: Send_Callback = nil) {
 		alloc_err: runtime.Allocator_Error
 		node, alloc_err = new(_Chunk_Header, transaction_allocator(ctx))
 		if alloc_err != nil {
-			ctx.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
+			_connection_abort(c)
 			return
 		}
 	}
@@ -651,16 +633,19 @@ send_chunk :: proc(ctx: ^Ctx, bufs: [][]byte, on_sent: Send_Callback = nil) {
 }
 
 send_heading :: proc(ctx: ^Ctx, on_sent: Send_Callback = nil) {
-	c := _connection_of_context(ctx)
-	if err := write_response_heading(ctx); err != nil {
-		log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
-		ctx.res._state = .Error
-		_check_send_done(c, skip_graceful = true)
+	switch ctx.res._state {
+	case .Error:
 		return
+	case .None, .Handling:
+		if !_begin_heading(ctx) {
+			return
+		}
+		_do_send(_connection_of_context(ctx), {ctx.res._buf[:]}, on_sent)
+	case .Sent, .Sending:
+		panic("response has been sent already")
+	case:
+		unreachable()
 	}
-
-	ctx.res._state = .Sending
-	_do_send(c, {ctx.res._buf[:]}, on_sent)
 }
 
 @(private="file")
@@ -725,13 +710,8 @@ respond_handle :: proc(ctx: ^Ctx, file: nbio.Handle) {
 
 respond_file :: proc(ctx: ^Ctx, file: ^os.File) -> nbio.Association_Error {
 	handle := nbio.associate_handle(os.fd(file)) or_return
-	mime: Maybe(Mime_Type)
-	if !headers_has(ctx.res.headers, "content-type") {
-		if m, ok := mime_from_extension(os.name(file)); ok {
-			mime = m
-		}
-	}
-	_respond_handle(_connection_of_context(ctx), handle, redirect_if_dir = false, mime = mime)
+	m, has_mime := mime_from_extension(os.name(file))
+	_respond_handle(_connection_of_context(ctx), handle, redirect_if_dir = false, mime = has_mime ? m : nil)
 	return nil
 }
 
@@ -749,24 +729,17 @@ _respond_file_path :: proc(c: ^Connection, file: string, dir := nbio.CWD, redire
 			return
 		}
 
-		mime: Maybe(Mime_Type)
-		if !headers_has(c.res.headers, "content-type") {
-			if m, ok := mime_from_extension(op.open.path); ok {
-				mime = m
-			}
-		}
-
 		if def_err := response_defer(&c.ctx, op.open.handle, proc(_: ^Ctx, handle: nbio.Handle) {
 			nbio.close(handle)
 		}); def_err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to register file handle defer\", err=%v", td.id, c.socket, def_err)
 			nbio.close(op.open.handle)
-			c.res._state = .Error
-			_check_send_done(c, skip_graceful = true)
+			_connection_abort(c)
 			return
 		}
 
-		_respond_handle(c, op.open.handle, redirect_if_dir, mime)
+		m, has_mime := mime_from_extension(op.open.path)
+		_respond_handle(c, op.open.handle, redirect_if_dir, has_mime ? m : nil)
 	}
 }
 

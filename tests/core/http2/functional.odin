@@ -1538,10 +1538,8 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 	c.scanner.allocator      = &c.transaction_arena
 	c.req.line               = {method = .Get, target = "/", version = {1, 1}}
 	c.req.has_consumed_body  = true
-	c.req.quota              = &s.opts.request_quota
-	c.res.quota              = &s.opts.response_quota
-	http.progression_init(&c.req.progress, http.UNLIMITED_QUOTA)
-	http.progression_init(&c.res.progress, http.UNLIMITED_QUOTA)
+	http.progression_init(&c.req.progress, &http.UNLIMITED_QUOTA)
+	http.progression_init(&c.res.progress, &http.UNLIMITED_QUOTA)
 	c.res.status = .OK
 	c.res._state = .Handling
 
@@ -1914,10 +1912,8 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	c.res._deferred.allocator = tx_alloc
 	c.scanner.c              = c
 	c.scanner.allocator      = &c.transaction_arena
-	c.req.quota              = &s.opts.request_quota
-	c.res.quota              = &s.opts.response_quota
-	http.progression_init(&c.req.progress, http.UNLIMITED_QUOTA)
-	http.progression_init(&c.res.progress, http.UNLIMITED_QUOTA)
+	http.progression_init(&c.req.progress, &http.UNLIMITED_QUOTA)
+	http.progression_init(&c.res.progress, &http.UNLIMITED_QUOTA)
 	c.res._state = .Sending
 
 	Frame_State :: struct {

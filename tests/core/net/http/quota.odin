@@ -90,7 +90,9 @@ progression_update :: proc(t: ^testing.T) {
 	}
 
 	for &c in cases {
-		http.progression_update(&c.input_progression, c.input_quota, c.transferred, c.dur)
+		c.input_progression.quota = &c.input_quota
+		c.output.quota            = &c.input_quota
+		http.progression_update(&c.input_progression, c.transferred, c.dur)
 		if !testing.expect_value(t, c.input_progression, c.output) {
 			log.errorf("FAIL: %s", c.description)
 		}
@@ -118,12 +120,12 @@ test_server_options_default_and_unlimited_quotas :: proc(t: ^testing.T) {
 	testing.expect_value(t, unlimited_server.opts.response_quota, http.UNLIMITED_QUOTA)
 
 	p: http.Progression
-	http.progression_init(&p, http.UNLIMITED_QUOTA)
+	http.progression_init(&p, &http.UNLIMITED_QUOTA)
 	testing.expect_value(t, p.max, -1)
 	testing.expect_value(t, p.timeout, time.Duration(-1))
 	testing.expect(t, !http.progression_is_exhausted(p))
 
-	http.progression_update(&p, http.UNLIMITED_QUOTA, 1_000_000, 10 * time.Minute)
+	http.progression_update(&p, 1_000_000, 10 * time.Minute)
 	testing.expect_value(t, p.max, -1)
 	testing.expect_value(t, p.timeout, time.Duration(-1))
 	testing.expect(t, !http.progression_is_exhausted(p))
@@ -141,15 +143,15 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		rate_add = time.Second,
 	}
 	http.request_set_quota(&req, &q_fresh)
-	testing.expect_value(t, req.quota, &q_fresh)
-	testing.expect_value(t, req.quota^, q_fresh)
+	testing.expect_value(t, req.progress.quota, &q_fresh)
+	testing.expect_value(t, req.progress.quota^, q_fresh)
 	testing.expect_value(t, req.progress.max, 1000)
 	testing.expect_value(t, req.progress.timeout, 10 * time.Second)
 
 	res: http.Response
 	http.response_set_quota(&res, &q_fresh)
-	testing.expect_value(t, res.quota, &q_fresh)
-	testing.expect_value(t, res.quota^, q_fresh)
+	testing.expect_value(t, res.progress.quota, &q_fresh)
+	testing.expect_value(t, res.progress.quota^, q_fresh)
 	testing.expect_value(t, res.progress.max, 1000)
 	testing.expect_value(t, res.progress.timeout, 10 * time.Second)
 
@@ -164,7 +166,7 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		rate_add = time.Second,
 	}
 	http.request_set_quota(&req, &q_override)
-	testing.expect_value(t, req.quota, &q_override)
+	testing.expect_value(t, req.progress.quota, &q_override)
 	// max = 5000 - 1000 = 4000
 	testing.expect_value(t, req.progress.max, 4000)
 	// timeout = 10s - 3s + (1000 / 500) * 1s = 9s (< max - total = 17s)
@@ -175,7 +177,7 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 	res.progress.transferred = 600
 	res.progress.total = 5 * time.Second
 	http.response_set_quota(&res, &q_small)
-	testing.expect_value(t, res.quota, &q_small)
+	testing.expect_value(t, res.progress.quota, &q_small)
 	testing.expect_value(t, res.progress.max, 0)
 	testing.expect_value(t, res.progress.timeout, time.Duration(0))
 
@@ -214,8 +216,7 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends = 1
 
-		c.req.quota = quota
-		http.progression_reset(&c.req.progress, quota^)
+		http.progression_reset(&c.req.progress, quota)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", clen_str), nil)
@@ -249,12 +250,12 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 
 		req_unlimited := http.UNLIMITED_QUOTA
 		http.request_set_quota(&c.req, &req_unlimited)
-		testing.expect_value(t, c.req.quota, &req_unlimited)
+		testing.expect_value(t, c.req.progress.quota, &req_unlimited)
 		testing.expect_value(t, c.req.progress.max, -1)
 
 		res_custom := http.Quota{max_size = 42, min = 3 * time.Second}
 		http.response_set_quota(&c.res, &res_custom)
-		testing.expect_value(t, c.res.quota, &res_custom)
+		testing.expect_value(t, c.res.progress.quota, &res_custom)
 		testing.expect_value(t, c.res.progress.max, 42)
 		testing.expect_value(t, c.res.progress.timeout, 3 * time.Second)
 
@@ -279,7 +280,7 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 
 		req_tight := http.Quota{max_size = 8}
 		http.request_set_quota(&c.req, &req_tight)
-		testing.expect_value(t, c.req.quota, &req_tight)
+		testing.expect_value(t, c.req.progress.quota, &req_tight)
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect(t, c.res._state == .Error)

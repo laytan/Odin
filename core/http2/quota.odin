@@ -68,6 +68,8 @@ UNLIMITED_QUOTA := Quota{
 }
 
 Progression :: struct {
+	quota: ^Quota,
+
 	// Total transferred.
 	transferred: int,
 	// Total time spent doing IO.
@@ -84,38 +86,40 @@ Progression :: struct {
 	timeout: time.Duration,
 }
 
-progression_reset :: proc(p: ^Progression, q: Quota) {
+progression_reset :: proc(p: ^Progression, q: ^Quota) {
 	p^ = {}
 	progression_init(p, q)
 }
 
-progression_init :: proc(p: ^Progression, q: Quota) {
+progression_init :: proc(p: ^Progression, q: ^Quota) {
 	assert(p.transferred == 0)
 	assert(p.total == 0)
 	progression_set_quota(p, q)
 }
 
 // Recomputes remaining max and timeout from q while accounting for bytes and duration already transferred.
-progression_set_quota :: proc(p: ^Progression, q: Quota) {
-	p.max = q.max_size > 0 ? max(0, q.max_size - p.transferred) : -1
+progression_set_quota :: proc(p: ^Progression, q: ^Quota) {
+	p.quota = q
+	quota := q != nil ? q^ : {}
+	p.max = quota.max_size > 0 ? max(0, quota.max_size - p.transferred) : -1
 
-	if q.min <= 0 && q.max <= 0 {
+	if quota.min <= 0 && quota.max <= 0 {
 		p.timeout = -1
 		return
 	}
 
 	timeout: time.Duration
-	if q.min > 0 {
-		timeout = q.min - p.total
-		if q.min_rate > 0 && q.rate_add > 0 && p.transferred > 0 {
-			timeout += time.Duration((f64(p.transferred) / f64(q.min_rate)) * f64(q.rate_add))
+	if quota.min > 0 {
+		timeout = quota.min - p.total
+		if quota.min_rate > 0 && quota.rate_add > 0 && p.transferred > 0 {
+			timeout += time.Duration((f64(p.transferred) / f64(quota.min_rate)) * f64(quota.rate_add))
 		}
 	} else {
-		timeout = q.max - p.total
+		timeout = quota.max - p.total
 	}
 
-	if q.max > 0 {
-		allowed := max(0, q.max - p.total)
+	if quota.max > 0 {
+		allowed := max(0, quota.max - p.total)
 		timeout = min(timeout, allowed)
 	}
 
@@ -138,10 +142,11 @@ progression_is_exhausted :: proc(p: Progression) -> bool {
 	return p.max == 0 || p.timeout == 0
 }
 
-progression_update :: proc(p: ^Progression, q: Quota, transferred: int, dur: time.Duration) {
+progression_update :: proc(p: ^Progression, transferred: int, dur: time.Duration) {
 	assert(transferred > 0)
 	assert(dur >= 0)
 
+	q := p.quota != nil ? p.quota^ : {}
 	p.transferred += transferred
 	p.total += dur
 

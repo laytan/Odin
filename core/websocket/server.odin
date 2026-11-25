@@ -811,7 +811,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 			return
 		}
 		if ws.s.idle_timeout > 0 {
-			http.progression_reset(&c.req.progress, ws.recv_quota)
+			http.progression_reset(&c.req.progress, &ws.recv_quota)
 		}
 		scan(c, ws, size_of(_Frame_Header), on_frame_header)
 	}

@@ -86,7 +86,7 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 	}
 
 	scan_next_line :: proc(c: ^http.Connection) {
-		http.progression_reset(&c.req.progress, UPGRADE_RECV_QUOTA)
+		http.progression_reset(&c.req.progress, &UPGRADE_RECV_QUOTA)
 		// `scan_temp_line` reads CRLF-delimited lines into `c.temp_arena` (automatically consuming any
 		// pipelined bytes that already arrived after the HTTP upgrade headers).
 		http.scan_temp_line(&c.scanner, on_line)

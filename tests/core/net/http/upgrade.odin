@@ -63,10 +63,8 @@ push_test_connection :: proc(
 	c.res._buf.allocator      = tx_alloc
 	c.res._deferred.allocator = tx_alloc
 
-	c.req.quota = &env.s.opts.request_quota
-	http.progression_init(&c.req.progress, c.req.quota^)
-	c.res.quota = &env.s.opts.response_quota
-	http.progression_init(&c.res.progress, c.res.quota^)
+	http.progression_init(&c.req.progress, &env.s.opts.request_quota)
+	http.progression_init(&c.res.progress, &env.s.opts.response_quota)
 
 	if len(payload) > 0 {
 		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
@@ -660,10 +658,8 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		c.res._buf.allocator      = tx_alloc
 		c.res._deferred.allocator = tx_alloc
 
-		c.req.quota = &s.opts.request_quota
-		http.progression_init(&c.req.progress, c.req.quota^)
-		c.res.quota = &s.opts.response_quota
-		http.progression_init(&c.res.progress, c.res.quota^)
+		http.progression_init(&c.req.progress, &s.opts.request_quota)
+		http.progression_init(&c.res.progress, &s.opts.response_quota)
 		return c
 	}
 
@@ -915,8 +911,7 @@ test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
 		c.req.line              = {method = .Post, target = "/upload", version = {1, 1}}
 		c.res._state            = .Handling
 		c.req.has_consumed_body = false
-		c.req.quota             = &env.s.opts.body_quota
-		http.progression_init(&c.req.progress, c.req.quota^)
+		http.progression_init(&c.req.progress, &env.s.opts.body_quota)
 		testing.expect_value(t, http.headers_set(&c.req.headers, tc.hdr_key, tc.hdr_val), nil)
 		http._headers_set_readonly(&c.req.headers)
 

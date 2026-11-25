@@ -411,6 +411,11 @@ _scanner_prepare_recv_buf :: proc(s: ^Scanner) -> bool {
 	return _scanner_replace_buf(s, s.allocator, new_size)
 }
 
+@(private="file")
+_is_scanning_headers :: proc(c: ^Connection) -> bool {
+	return (c.res._state == .None && c.req.line.version != {}) || c.scanner.scan.callback == _body_chunked_on_trailer
+}
+
 scanner_pump :: proc(s: ^Scanner) {
 	if !_scanner_pump_buffered(s) {
 		return
@@ -466,9 +471,7 @@ scanner_pump :: proc(s: ^Scanner) {
 			case .Timeout:
 				invalid_request(s.c, .Request_Timeout)
 			case .Not_Connected, .Connection_Closed:
-				s.c.scanner.scan = {}
-				s.c.res._state   = .Error
-				_check_send_done(s.c, skip_graceful = true)
+				_connection_abort(s.c)
 			case .Network_Unreachable, .Insufficient_Resources, .Invalid_Argument, .Would_Block, .Interrupted, .Unknown, .None:
 				fallthrough
 			case:
@@ -479,14 +482,12 @@ scanner_pump :: proc(s: ^Scanner) {
 
 		if op.recv.received == 0 {
 			log.debugf("http[t=%v][c=%v]: msg=\"client disconnected\"", td.id, s.c.socket)
-			s.c.scanner.scan = {}
-			s.c.res._state   = .Error
-			_check_send_done(s.c, skip_graceful = true)
+			_connection_abort(s.c)
 			return
 		}
 
 		dur := since(s.last_recv_start)
-		progression_update(&s.c.req.progress, s.c.req.quota != nil ? s.c.req.quota^ : {}, op.recv.received, dur)
+		progression_update(&s.c.req.progress, op.recv.received, dur)
 
 		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, op.recv.received, len(op.recv.bufs[0]), dur)
 		s.write_head += op.recv.received
@@ -733,10 +734,9 @@ _body_chunked_on_size :: proc(c: ^Connection, data: []byte) {
 
 	if size == 0 {
 		// Trailers reuse request_quota and scan non-reusably so headers can store zero-copy slices.
-		c.req.quota = &td.s.opts.request_quota
-		progression_reset(&c.req.progress, c.req.quota^)
+		progression_reset(&c.req.progress, &td.s.opts.request_quota)
 		if buffered := c.scanner.write_head - c.scanner.read_head; buffered > 0 {
-			progression_update(&c.req.progress, c.req.quota^, buffered, 0)
+			progression_update(&c.req.progress, buffered, 0)
 		}
 		scan_line(&c.scanner, _body_chunked_on_trailer)
 		return

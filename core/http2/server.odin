@@ -262,7 +262,6 @@ context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 }
 
 Request :: struct {
-	quota:             ^Quota,
 	progress:          Progression,
 	line:              Requestline,
 	has_consumed_body: bool,
@@ -277,7 +276,6 @@ _Deferred :: struct {
 }
 
 Response :: struct {
-	quota:    ^Quota,
 	progress: Progression,
 	status:   Status,
 	headers:  Headers,
@@ -299,15 +297,13 @@ Response :: struct {
 // Overrides the quota applied to receiving the remaining request headers/body.
 // The given pointer must live as long as the transaction.
 request_set_quota :: proc(req: ^Request, quota: ^Quota) {
-	req.quota = quota
-	progression_set_quota(&req.progress, quota^)
+	progression_set_quota(&req.progress, quota)
 }
 
 // Overrides the quota applied to sending the response.
 // The given pointer must live as long as the transaction.
 response_set_quota :: proc(res: ^Response, quota: ^Quota) {
-	res.quota = quota
-	progression_set_quota(&res.progress, quota^)
+	progression_set_quota(&res.progress, quota)
 }
 
 response_defer :: proc {
@@ -459,14 +455,6 @@ _server_thread_serve :: proc(thread: ^Server_Thread) {
 
 _is_scanning_request_line :: proc(c: ^Connection) -> bool {
 	return c.res._state == .None && c.req.line.version == {}
-}
-
-_is_scanning_headers :: proc(c: ^Connection) -> bool {
-	if c.req.line.version == {} {
-		return false
-	}
-
-	return c.res._state == .None || c.req.quota == &td.s.opts.request_quota
 }
 
 _connection_is_idle :: proc(c: ^Connection) -> bool {
@@ -709,6 +697,13 @@ _connection_release :: proc(c: ^Connection) {
 	xar.release(&td.connections, idx)
 }
 
+@(private)
+_connection_abort :: proc(c: ^Connection, skip_graceful := true) {
+	c.scanner.scan = {}
+	c.res._state   = .Error
+	_check_send_done(c, skip_graceful = skip_graceful)
+}
+
 _connection_destroy :: proc(c: ^Connection) {
 	assert(c.res._sends == 0, "cannot destroy connection while sends are in flight")
 	log.debugf("http[t=%v][c=%v]: msg=\"destroy\"", td.id, c.socket)
@@ -776,13 +771,11 @@ _serve_connection :: proc(c: ^Connection) {
 
 	allocator := transaction_allocator(c)
 
-	c.req.quota = &td.s.opts.request_quota
-	progression_init(&c.req.progress, c.req.quota^)
+	progression_init(&c.req.progress, &td.s.opts.request_quota)
 	if c.scanner.write_head > 0 {
-		progression_update(&c.req.progress, c.req.quota^, c.scanner.write_head, 0)
+		progression_update(&c.req.progress, c.scanner.write_head, 0)
 	}
-	c.res.quota = &td.s.opts.response_quota
-	progression_init(&c.res.progress, c.res.quota^)
+	progression_init(&c.res.progress, &td.s.opts.response_quota)
 
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
@@ -873,8 +866,7 @@ on_headers :: proc(c: ^Connection) {
 	}
 
 	c.res._state = .Handling
-	c.req.quota = &td.s.opts.body_quota
-	progression_reset(&c.req.progress, c.req.quota^)
+	progression_reset(&c.req.progress, &td.s.opts.body_quota)
 	_headers_set_readonly(&c.req.headers)
 
 	// An options request with the "*" is a no-op/ping request to
@@ -1214,7 +1206,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	}
 
 	if sent > 0 {
-		progression_update(&c.res.progress, c.res.quota != nil ? c.res.quota^ : {}, sent, since(c.res._last_send))
+		progression_update(&c.res.progress, sent, since(c.res._last_send))
 	}
 
 	if err != nil {
