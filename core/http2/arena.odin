@@ -53,11 +53,21 @@ arena_allocator :: proc(a: ^Arena) -> mem.Allocator {
 	return _arena_allocator(a, true)
 }
 
+@(private="file")
+_arena_validate_size_align :: #force_inline proc(size, align: int) -> (resolved_align: int, err: mem.Allocator_Error) {
+	if size < 0 {
+		return 0, .Invalid_Argument
+	}
+	resolved_align = align == 0 ? mem.DEFAULT_ALIGNMENT : align
+	if resolved_align < 0 || !math.is_power_of_two(resolved_align) {
+		return 0, .Invalid_Argument
+	}
+	return resolved_align, nil
+}
+
 arena_alloc :: proc(a: ^Arena, size, align: int, should_zero := true) -> (bs: []byte, err: mem.Allocator_Error) {
 	if size == 0 { return nil, nil }
-	if size < 0  { return nil, .Invalid_Argument }
-	align := align == 0 ? mem.DEFAULT_ALIGNMENT : align
-	if align < 0 || !math.is_power_of_two(align) { return nil, .Invalid_Argument }
+	align := _arena_validate_size_align(size, align) or_return
 
 	arena := a.tail
 	if arena == nil { arena = _push_arena_block(a, size, align) or_return }
@@ -84,13 +94,7 @@ arena_resize :: proc(a: ^Arena, old_memory: []byte, size, align: int, should_zer
 	if size == 0 {
 		return nil, arena_free(a, raw_data(old_memory), len(old_memory))
 	}
-	if size < 0 {
-		return nil, .Invalid_Argument
-	}
-	align := align == 0 ? mem.DEFAULT_ALIGNMENT : align
-	if align < 0 || !math.is_power_of_two(align) {
-		return nil, .Invalid_Argument
-	}
+	align := _arena_validate_size_align(size, align) or_return
 
 	// Fast path: grow or shrink the most recent allocation in place.
 	if bs, err = _arena_block_resize_in_place(a.tail, old_memory, size, align, should_zero); err == nil {
@@ -143,10 +147,7 @@ arena_destroy :: proc(a: ^Arena) {
 	}
 	// Snapshot backing and detach tail before releasing any blocks: for bootstrapped arenas,
 	// `a` itself lives inside the oldest block in the chain.
-	backing := a.backing
-	if backing.procedure == nil {
-		backing = _arena_default_backing(a.c)
-	}
+	backing := _arena_backing(a)
 	arena := a.tail
 	a.tail = nil
 	for arena != nil {
@@ -165,7 +166,7 @@ _arena_release_exclusive_block :: proc(a: ^Arena, buf: []byte) -> bool {
 	}
 
 	buf_ptr := uintptr(raw_data(buf))
-	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
+	backing := _arena_backing(a)
 
 	pp := &a.tail
 	for block := pp^; block != nil; block = pp^ {
@@ -269,6 +270,14 @@ _arena_default_backing :: proc(c: ^Connection) -> mem.Allocator {
 		return _arena_backing_allocator(td.s)
 	}
 	return context.allocator
+}
+
+@(private)
+_arena_backing :: #force_inline proc(a: ^Arena, c: ^Connection = nil) -> mem.Allocator {
+	if a.backing.procedure != nil {
+		return a.backing
+	}
+	return _arena_default_backing(c != nil ? c : a.c)
 }
 
 @(private="file")
@@ -400,9 +409,7 @@ _server_thread_free_arenas_trim :: proc(t: ^Server_Thread) {
 }
 
 _push_arena_block :: proc(a: ^Arena, size, align: int) -> (arena: ^_Arena_Block, err: mem.Allocator_Error) {
-	if a.backing.procedure == nil {
-		a.backing = _arena_default_backing(a.c)
-	}
+	a.backing = _arena_backing(a)
 	arena = _arena_block_acquire(a.backing, size, align == 0 ? mem.DEFAULT_ALIGNMENT : align) or_return
 	arena.prev = a.tail
 	a.tail = arena

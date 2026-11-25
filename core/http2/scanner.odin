@@ -114,7 +114,7 @@ _scanner_reset_arena :: proc(s: ^Scanner, a: ^Arena, c: ^Connection) -> (kept: b
 	}
 
 	to_alloc  := _arena_fit_size(len(to_copy))
-	backing   := a.backing.procedure != nil ? a.backing : _arena_default_backing(c)
+	backing   := _arena_backing(a, c)
 	new_arena := _arena_block_acquire(backing, to_alloc, align = 1) or_return
 	new_buf: []byte
 	new_buf, err = make([]byte, to_alloc, mem.arena_allocator(new_arena))
@@ -180,7 +180,7 @@ _scanner_pin_buf_block :: proc(s: ^Scanner, a: ^Arena) -> bool {
 		return false
 	}
 
-	backing := a.backing.procedure != nil ? a.backing : _arena_default_backing(a.c)
+	backing := _arena_backing(a)
 	block := a.tail
 	a.tail = nil
 	for block != nil {

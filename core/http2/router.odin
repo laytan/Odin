@@ -97,8 +97,7 @@ router :: proc(router: ^Router) -> Handler {
 			}
 			match.vars.allocator = transaction_allocator(ctx)
 
-			without_query, _, _ := strings.partition(rline.target, "?")
-			target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
+			target, target_ok := _decode_request_target(ctx)
 			if !target_ok {
 				ctx.res.status = .Not_Found
 				respond(ctx)
@@ -168,13 +167,7 @@ Returns the full percent-decoded request path without the query string.
 route_target :: proc(ctx: ^Ctx) -> string {
 	match := context_get(ctx, _Route_Match)
 	if match == nil {
-		without_query, _, _ := strings.partition(ctx.req.line.target, "?")
-		target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
-		if !target_ok {
-			return ""
-		}
-
-		return target
+		return _decode_request_target(ctx) or_else ""
 	}
 
 	return match.target
@@ -511,24 +504,17 @@ _route_trie_write :: proc(w: io.Writer, t: _Route_Trie, indent := 0) {
 }
 
 @(private="file")
+_decode_request_target :: proc(ctx: ^Ctx) -> (target: string, ok: bool) {
+	without_query, _, _ := strings.partition(ctx.req.line.target, "?")
+	return net.percent_decode(without_query, transaction_allocator(ctx))
+}
+
+@(private="file")
 _next_pattern_segment :: proc(s: ^string) -> (res: string, ok: bool) {
-	st := s^
-
-	if st == "*" {
-		return st, false
+	if s^ == "*" {
+		return "*", false
 	}
-
-	m := strings.index_byte(st, '/')
-	if m < 0 {
-		res = st[:]
-		ok  = len(res) > 0
-		s^  = s[len(st):]
-	} else {
-		ok  = true
-		res = s[:m]
-		s^  = s[m+1:]
-	}
-	return
+	return _next_path_segment(s)
 }
 
 @(private="file")
