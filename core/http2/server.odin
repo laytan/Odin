@@ -10,6 +10,7 @@ import "core:io"
 import "core:log"
 import "core:nbio"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:sync"
 import "core:thread"
@@ -1039,8 +1040,6 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 	// PERF: to avoid resizes and reallocs of the buffer.
 	// We could keep a list of buffers instead.
 
-	w := buf_writer(&res._buf)
-
 	MIN             :: len("HTTP/1.1 200 \r\ndate: \r\ncontent-length: 1000\r\n") + DATE_LENGTH
 	AVG_HEADER_SIZE :: 20
 	reserve_size    := MIN + (AVG_HEADER_SIZE * headers_len(res.headers))
@@ -1049,15 +1048,12 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 	append_str(&res._buf, "HTTP/1.1 ") or_return
 
 	status := status_string(res.status)
-	if len(status) > 0 {
-		append_str(&res._buf, status) or_return
-		append_str(&res._buf, "\r\n") or_return
-	} else {
-		if _, write_err := io.write_int(w, int(res.status)); write_err != nil {
-			return .Out_Of_Memory
-		}
-		append_str(&res._buf, " \r\n") or_return
+	if status == "" {
+		buf: [20]byte
+		status = strconv.write_int(buf, i64(res.status), 10)
 	}
+	append_str(&res._buf, status) or_return
+	append_str(&res._buf, "\r\n") or_return
 
 	// Per RFC 9910 6.6.1 a Date header must be added in 2xx, 3xx, 4xx responses.
 	if !headers_has(res.headers, "date") {

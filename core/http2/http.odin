@@ -5,7 +5,6 @@ import "base:intrinsics"
 import "base:runtime"
 
 import "core:encoding/hex"
-import "core:io"
 import "core:net"
 import "core:os"
 import "core:strconv"
@@ -706,23 +705,6 @@ parse_int16 :: proc(str: string) -> (val: int, ok: bool) {
 
 	ok = true
 	return
-}
-
-@(private)
-buf_writer :: proc(buf: ^[dynamic]byte) -> io.Writer {
-	return io.Writer {
-		data = buf,
-		procedure = proc(stream_data: rawptr, mode: io.Stream_Mode, p: []byte, offset: i64, whence: io.Seek_From) -> (n: i64, err: io.Error) {
-			buf := (^[dynamic]byte)(stream_data)
-			#partial switch mode {
-			case .Write:
-				n, err := append_elems(buf, ..p)
-				return i64(n), .Buffer_Full if err != nil else nil
-			case:
-				return 0, .Unsupported
-			}
-		},
-	}
 }
 
 Mime_Type :: enum {

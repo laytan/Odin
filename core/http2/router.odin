@@ -208,22 +208,7 @@ Returns parameter `name` parsed as a non-negative base-10 integer,
 or `(0, false)` if missing, invalid, or overflowing `int`.
 */
 route_param_int :: proc(params: []Route_Param, name: string) -> (value: int, ok: bool) {
-	val := route_param(params, name)
-	if val == "" { return }
-
-	as_int: int
-	for ch in transmute([]byte)val {
-		switch ch {
-		case '0'..='9':
-			overflow: bool
-			if as_int, overflow = intrinsics.overflow_mul(as_int, 10);          overflow { return }
-			if as_int, overflow = intrinsics.overflow_add(as_int, int(ch-'0')); overflow { return }
-		case:
-			return
-		}
-	}
-
-	return as_int, true
+	return parse_int(route_param(params, name))
 }
 
 route_get_handler :: proc(r: ^Router, pattern: string, handler: Handler, loc := #caller_location) {
