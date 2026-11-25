@@ -1,6 +1,6 @@
 # core/http2 — Odin HTTP/1.1 Server (v2 Rewrite)
 
-> **Note:** `core/http2` is the clean-slate rewrite of `core/http` (**not** the HTTP/2 protocol). Once v1 is complete and verified, it will move to `core/net/http` (`import "core:net/http"`).
+> **Note:** `core/http2` is the clean-slate rewrite of `core/http` (**not** the HTTP/2 protocol). Once v1 is complete and verified, it will split into `core/net/http` (shared protocol primitives) and `core/net/http_server` (the HTTP/1.1 server), leaving room for a future `core/net/http_client`.
 
 ## v1 Scope & Design Goals
 
@@ -115,8 +115,14 @@
     - Transaction-scoped lifetime of request/route/cookie/`body_parser` (and `body(..., retain = true)`) slices across keep-alive requests (clone if retaining beyond the request), vs callback-scoped `Body_Cb` `body` slices when using the default `body(..., retain = false)` — warn explicitly that `retain = false` overwrites the live reusable buffer **in place** (undetectable by ASAN), so async consumers (`send`, `send_chunk`, `nbio.write`, etc.) must either copy `body` or pause via `body_pause`/`body_resume` (which keeps `body` valid zero-copy until `body_resume` runs; `is_partial == false` is always the `(nil, false)` EOF signal).
     - Worker-thread-pool request offloading & cross-thread arena contract: while only one thread touches `c` at a time, worker threads may read request state, allocate/build responses and headers on `transaction_allocator`/`temp_allocator`, and destroy detached arenas (`arena_destroy`); `nbio`-bound I/O calls (`respond`/`respond_*`, `send`, `send_chunk`, `body`, `connection_close`) must be posted back to the owning server thread via `nbio.current_thread_event_loop()` + `nbio.next_tick_poly(..., l = loop)` / `nbio.wake_up(loop)`.
   - [x] Write a few good examples of common use-cases to go into the examples repository (`core/http2/examples/`)
-  - [ ] Eventually we will add a HTTP client too, evaluate how that impacts the API, does that need its own package? But what are the packages going to be called? etc.
-  - [ ] Move `core/http2` into `core/net/http`.
+  - [x] Evaluate future HTTP client impact & package layout: settled on 3 sibling packages under `core/net/` — `core:net/http` (pure protocol primitives, zero `nbio`/OS/TLS deps, JS/WASM-compatible), `core:net/http_server`, and future `core:net/http_client` — avoiding `server`/`client` default-import shadowing and server/client naming asymmetry (`Request`, `Response`, `Connection`, directional verbs) while keeping `http_server` single-import ergonomic via protocol type/constant aliases.
+  - [ ] Split and move `core/http2` into `core/net/http` and `core/net/http_server`:
+    - Move pure protocol files (`http.odin`, `headers.odin`, `limits.odin`) into `core/net/http` (`package http`):
+      - Move `header_parse` (`server.odin`) and `header_allowed_trailer` / `FORBIDDEN_TRAILERS` (`scanner.odin`) into `headers.odin`, and `Range` / `range_parse` / `apply_range_to_size` (`respond.odin`) + `cookie_write` into `http.odin`.
+      - Keep `request_cookie_get`/`request_cookies` (`^Ctx` wrappers), `set_cookie`, `get_range_header`, and internal `parse_int`/`parse_int16` in `core/net/http_server`.
+      - Expose the small cross-package seam in `core:net/http`: `headers_set_readonly(h: ^Headers, readonly: bool)`, `headers_eq`, and `headers_valid_value`.
+    - Move server files (`server.odin`, `scanner.odin`, `arena.odin`, `respond.odin`, `router.odin`, `handlers.odin`, `main.odin`) into `core/net/http_server` (`package http_server`), re-exporting common protocol aliases (`Status`, `Method`, `Version`, `Headers`, `Cookie`, `Cookie_Same_Site`, `Limits`, `NO_LIMITS`, `Mime_Type`, etc.) from `core:net/http` so typical servers only need one import.
+    - Update `core/websocket/server.odin`, `core/http2/examples/`, and `tests/core/net/http/` (splitting into `tests/core/net/http/` and `tests/core/net/http_server/` if desired) to the new package paths.
 
 ### Memory Management Follow-Ups (For Further Review)
 
