@@ -114,7 +114,8 @@
     - `request_set_quota` / `response_set_quota` `^Quota` pointer lifetime (must outlive the transaction).
     - Transaction-scoped lifetime of request/route/cookie/`body_parser` (and `body(..., retain = true)`) slices across keep-alive requests (clone if retaining beyond the request), vs callback-scoped `Body_Cb` `body` slices when using the default `body(..., retain = false)` — warn explicitly that `retain = false` overwrites the live reusable buffer **in place** (undetectable by ASAN), so async consumers (`send`, `send_chunk`, `nbio.write`, etc.) must either copy `body` or pause via `body_pause`/`body_resume` (which keeps `body` valid zero-copy until `body_resume` runs; `is_partial == false` is always the `(nil, false)` EOF signal).
     - Worker-thread-pool request offloading & cross-thread arena contract: while only one thread touches `c` at a time, worker threads may read request state, allocate/build responses and headers on `transaction_allocator`/`temp_allocator`, and destroy detached arenas (`arena_destroy`); `nbio`-bound I/O calls (`respond`/`respond_*`, `send`, `send_chunk`, `body`, `connection_close`) must be posted back to the owning server thread via `nbio.current_thread_event_loop()` + `nbio.next_tick_poly(..., l = loop)` / `nbio.wake_up(loop)`.
-  - [ ] Write a few good examples of common use-cases to go into the examples repository
+  - [x] Write a few good examples of common use-cases to go into the examples repository (`core/http2/examples/`)
+  - [ ] Eventually we will add a HTTP client too, evaluate how that impacts the API, does that need its own package? But what are the packages going to be called? etc.
   - [ ] Move `core/http2` into `core/net/http`.
 
 ### Memory Management Follow-Ups (For Further Review)
