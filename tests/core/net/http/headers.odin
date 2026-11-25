@@ -475,7 +475,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.respond_file_content(&c.ctx, "assets/data.json", transmute([]byte)string(`{"ok":true}`))
@@ -490,7 +490,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.set_header(&c.ctx, "Content-Type", "application/vnd.custom+json")
@@ -506,7 +506,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.respond_file_content(&c.ctx, "LICENSE", transmute([]byte)string("MIT"))
@@ -527,7 +527,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.respond_plain(&c.ctx, "hello world")
@@ -543,7 +543,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.respond_html(&c.ctx, "<p>hi</p>")
@@ -557,7 +557,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.set_header(&c.ctx, "Content-Type", "application/xhtml+xml")
@@ -578,7 +578,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.req.line.method  = .Head
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		err := http.respond_json(&c.ctx, Payload{name = "odin", n = 42})
@@ -595,7 +595,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		bad := proc() {}
@@ -622,7 +622,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		defer destroy_test_connection(c)
 		c.res.status       = .OK
 		c.res._state        = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends        = 1
 
 		http.send_chunk(&c.ctx, {transmute([]byte)string("hi!")})

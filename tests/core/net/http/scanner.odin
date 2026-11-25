@@ -210,7 +210,7 @@ test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
-	http.progression_init(&c.req.progress, nil)
+	http.budget_init(&c.req.budget, nil)
 
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -336,7 +336,7 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	c.req.headers.allocator = tx_alloc
 	c.scanner.c = &c
 	c.scanner.allocator = &c.transaction_arena
-	http.progression_init(&c.req.progress, nil)
+	http.budget_init(&c.req.budget, nil)
 
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -482,9 +482,9 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		c.scanner.allocator = &c.transaction_arena
 
 		// Prevent invalid_request -> respond -> _do_send from calling nbio without an event loop.
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends = 1
-		c.req.progress.max = req_max
+		c.req.budget.max = req_max
 
 		if len(payload) > 0 {
 			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
@@ -499,7 +499,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		http.transaction_allocator_destroy(c)
 	}
 
-	// 1. Exhausted request quota before request-line completes -> 414 URI Too Long.
+	// 1. Exhausted request limits before request-line completes -> 414 URI Too Long.
 	{
 		c: http.Connection
 		setup_conn(t, &c, "GET /too-long-uri-without-crlf", 0)
@@ -510,7 +510,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect(t, c.res._state == .Error)
 	}
 
-	// 2. Exhausted request quota after request-line during header scanning -> 431 Request Header Fields Too Large.
+	// 2. Exhausted request limits after request-line during header scanning -> 431 Request Header Fields Too Large.
 	{
 		c: http.Connection
 		setup_conn(t, &c, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Big: incomplete", 0)
@@ -524,7 +524,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 	// 3. Header count exceeding max_headers (default 128) -> 431 Request Header Fields Too Large.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "", s.opts.request_quota.max_size)
+		setup_conn(t, &c, "", s.opts.request_limits.max_size)
 		defer cleanup_conn(&c)
 
 		tx_alloc := http.transaction_allocator(&c)
@@ -547,7 +547,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_len(c.req.headers), s.opts.max_headers)
 	}
 
-	// 4a. Content-Length exceeding body_quota.max_size -> 413 Payload Too Large.
+	// 4a. Content-Length exceeding body_limits.max_size -> 413 Payload Too Large.
 	{
 		c: http.Connection
 		setup_conn(t, &c, "", 10 * mem.Megabyte)
@@ -563,7 +563,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect(t, c.res._state == .Error)
 	}
 
-	// 4b. Exhausted body quota during body scanning -> 413 Payload Too Large.
+	// 4b. Exhausted body limits during body scanning -> 413 Payload Too Large.
 	{
 		c: http.Connection
 		setup_conn(t, &c, "5\r\nhe", 0)
@@ -733,7 +733,7 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 		c.scanner.c = &c
 		c.scanner.allocator = &c.transaction_arena
 		c.res._state = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends = 1
 
 		c.req.line.version = {1, 1}
@@ -1355,10 +1355,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		c.scanner.c = c
 		c.scanner.allocator = &c.transaction_arena
 
-		c.req.progress.max = req_max
-		c.req.progress.timeout = -1
+		c.req.budget.max = req_max
+		c.req.budget.timeout = -1
 		// Prevent send_continue/respond -> _do_send from calling nbio without an event loop.
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends = 1
 
 		if len(payload) > 0 {
@@ -1421,7 +1421,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	defer http.td = prev_td
 	defer http._server_thread_free_arenas_destroy(&thread)
 
-	// 2. Content-Length exceeding body_quota.max_size -> 413 Payload Too Large and no 100 Continue.
+	// 2. Content-Length exceeding body_limits.max_size -> 413 Payload Too Large and no 100 Continue.
 	{
 		c: http.Connection
 		setup_conn(t, &thread, &c, "", 100)
@@ -1545,7 +1545,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(c.res._buf), 0)
 	}
 
-	// 7. HTTP/1.1 chunked body(): sends 100 Continue when quota available, rejects 413 without 100 Continue when max == 0.
+	// 7. HTTP/1.1 chunked body(): sends 100 Continue when limits allow, rejects 413 without 100 Continue when max == 0.
 	{
 		c: http.Connection
 		setup_conn(t, &thread, &c, "", 100)
@@ -1680,7 +1680,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		c.res._deferred.allocator = tx_alloc
 		c.scanner.c               = c
 		c.scanner.allocator       = &c.transaction_arena
-		http.progression_init(&c.req.progress, &s.opts.request_quota)
+		http.budget_init(&c.req.budget, &s.opts.request_limits)
 
 		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
 		testing.expect_value(t, buf_err, nil)
@@ -1688,7 +1688,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		c.scanner.write_head = copy(buf, payload)
 	}
 
-	// 1. Lying 1 GiB Content-Length with UNLIMITED_QUOTA caps detached reusable buffer at BODY_BUF_SIZE (16 KiB block)
+	// 1. Lying 1 GiB Content-Length with NO_LIMITS caps detached reusable buffer at BODY_BUF_SIZE (16 KiB block)
 	//    and compacts in place across repeated chunks without touching headers or temp_allocator allocations.
 	{
 		State :: struct {
@@ -1700,7 +1700,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		st := State{t = t}
 		counter := Arena_Counting_Allocator{backing = context.allocator}
 		s := http.make_server({
-			body_quota = http.UNLIMITED_QUOTA,
+			body_limits = http.NO_LIMITS,
 			handlers   = {http.handler(&st, proc(user_data: rawptr, ctx: ^http.Ctx) {
 				st := (^State)(user_data)
 
@@ -1886,11 +1886,11 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		}
 	}
 
-	// 2. Lying 1 GiB chunk size with UNLIMITED_QUOTA starts detached reusable buffer at BODY_BUF_SIZE (16 KiB block).
+	// 2. Lying 1 GiB chunk size with NO_LIMITS starts detached reusable buffer at BODY_BUF_SIZE (16 KiB block).
 	{
 		counter := Arena_Counting_Allocator{backing = context.allocator}
 		s := http.make_server({
-			body_quota = http.UNLIMITED_QUOTA,
+			body_limits = http.NO_LIMITS,
 			handlers   = {proc(ctx: ^http.Ctx) {
 				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 			}},
@@ -1928,7 +1928,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 	{
 		counter := Arena_Counting_Allocator{backing = context.allocator}
 		s := http.make_server({
-			body_quota = http.UNLIMITED_QUOTA,
+			body_limits = http.NO_LIMITS,
 			handlers   = {proc(ctx: ^http.Ctx) {
 				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 			}},
@@ -2042,7 +2042,7 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, nil)
+		http.budget_init(&c.req.budget, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -2170,7 +2170,7 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 }
 
 @(test)
-test_scanner_pre_alloc_quota_and_timeout_rejection :: proc(t: ^testing.T) {
+test_scanner_pre_alloc_limits_and_timeout_rejection :: proc(t: ^testing.T) {
 	setup_conn :: proc(t: ^testing.T, s: ^http.Server, c: ^http.Connection, max_bytes: int, timeout: int) {
 		c^ = http.Connection{
 			transaction_arena = http.get_arena(nil),
@@ -2187,17 +2187,17 @@ test_scanner_pre_alloc_quota_and_timeout_rejection :: proc(t: ^testing.T) {
 		c.scanner.c               = c
 		c.scanner.allocator       = &c.transaction_arena
 		c.res._state              = .Handling
-		c.res.progress.max        = 0
+		c.res.budget.max          = 0
 		c.res._sends              = 1
-		c.req.progress.max        = max_bytes
-		c.req.progress.timeout    = time.Duration(timeout)
+		c.req.budget.max          = max_bytes
+		c.req.budget.timeout      = time.Duration(timeout)
 		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
 		testing.expect_value(t, err, nil)
 		c.scanner.buf = buf
 	}
 
 	for reuse in ([?]bool{true, false}) {
-		// 1. progress.max == 0 rejects with 413 Payload Too Large and 0 extra allocations.
+		// 1. budget.max == 0 rejects with 413 Payload Too Large and 0 extra allocations.
 		{
 			counter := Arena_Counting_Allocator{backing = context.allocator}
 			s := http.make_server({}, arena_counting_allocator(&counter))
@@ -2228,7 +2228,7 @@ test_scanner_pre_alloc_quota_and_timeout_rejection :: proc(t: ^testing.T) {
 			testing.expect_value(t, counter.alloc_count, before_allocs)
 		}
 
-		// 2. progress.timeout == 0 rejects with 408 Request Timeout and 0 extra allocations.
+		// 2. budget.timeout == 0 rejects with 408 Request Timeout and 0 extra allocations.
 		{
 			counter := Arena_Counting_Allocator{backing = context.allocator}
 			s := http.make_server({}, arena_counting_allocator(&counter))
@@ -2278,9 +2278,9 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		c.res._deferred.allocator = tx_alloc
 		c.scanner.c               = c
 		c.scanner.allocator       = &c.transaction_arena
-		http.progression_init(&c.req.progress, &s.opts.body_quota)
+		http.budget_init(&c.req.budget, &s.opts.body_limits)
 		c.res._state              = .Handling
-		c.res.progress.max        = 0
+		c.res.budget.max          = 0
 		c.res._sends              = 1
 		c.req.line.version        = {1, 1}
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
@@ -2295,7 +2295,7 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 
 	// 1. Non-CRLF bytes after chunk data -> immediate 400 Bad Request on 2 bytes in both retain = false and retain = true.
 	for retain in ([?]bool{false, true}) {
-		s := http.make_server({body_quota = http.UNLIMITED_QUOTA})
+		s := http.make_server({body_limits = http.NO_LIMITS})
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
 		http.td = &thread
@@ -2312,11 +2312,11 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
 
-	// 2a. Single huge incomplete trailer line (> request_quota.max_size) -> 431 Request Header Fields Too Large.
+	// 2a. Single huge incomplete trailer line (> request_limits.max_size) -> 431 Request Header Fields Too Large.
 	{
 		s := http.make_server({
-			request_quota = {max_size = 512, min = -1},
-			body_quota    = http.UNLIMITED_QUOTA,
+			request_limits = {max_size = 512, min = -1},
+			body_limits    = http.NO_LIMITS,
 		})
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
@@ -2341,11 +2341,11 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
 
-	// 2b. Multiple incomplete trailer lines exceeding request_quota.max_size (needing recv) -> 431.
+	// 2b. Multiple incomplete trailer lines exceeding request_limits.max_size (needing recv) -> 431.
 	{
 		s := http.make_server({
-			request_quota = {max_size = 32, min = -1},
-			body_quota    = http.UNLIMITED_QUOTA,
+			request_limits = {max_size = 32, min = -1},
+			body_limits    = http.NO_LIMITS,
 		})
 		thread := http.Server_Thread{s = &s, id = 1}
 		prev_td := http.td
@@ -2394,7 +2394,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, nil)
+		http.budget_init(&c.req.budget, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -2488,7 +2488,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.req.headers.allocator = tx_alloc
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
-		http.progression_init(&c.req.progress, nil)
+		http.budget_init(&c.req.budget, nil)
 
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
@@ -2610,10 +2610,10 @@ test_scanner_allocator_switch_oom_preserves_consistency :: proc(t: ^testing.T) {
 		c.scanner.c               = &c
 		c.scanner.allocator       = &c.transaction_arena
 		c.res._state              = .Handling
-		c.res.progress.max        = 0
+		c.res.budget.max          = 0
 		c.res._sends              = 1
-		c.req.progress.max        = -1
-		c.req.progress.timeout    = -1
+		c.req.budget.max          = -1
+		c.req.budget.timeout      = -1
 
 		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
 		testing.expect_value(t, err, nil)

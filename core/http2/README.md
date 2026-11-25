@@ -10,10 +10,10 @@
   - `transaction_arena`: Lives for a single HTTP request/response cycle (request line, headers, `Ctx` vars, response headers/buffer).
   - `temp_arena`: Bound to `context.temp_allocator`; calling `free_all(context.temp_allocator)` automatically preserves unread `Scanner` bytes and recycles arena blocks to thread-local power-of-two freelists (`4 KiB`–`16 MiB`).
 - **Secure by default**:
-  - `Quota` & `Progression` enforce byte caps, minimum/maximum timeouts, and minimum transfer rates (`min_rate` / `rate_add`) to resist Slowloris and resource exhaustion.
+  - `Limits` & `Budget` enforce byte caps, minimum/maximum timeouts, and minimum transfer rates (`min_rate` / `rate_add`) to resist Slowloris and resource exhaustion.
   - Strict RFC 9112 parsing and header validation to prevent HTTP/1.1 request smuggling (`CL.TE`, `TE.CL`, `TE.TE`), header injection, and hash-table DoS.
 - **Upgrade / Hijack support (WebSockets, SSE, custom protocols)**:
-  - **In-pool upgrades (`send_heading` + `.Sending`)**: Sends the upgrade response heading (e.g., `101 Switching Protocols`) with an optional `on_sent` callback while keeping `Connection`, `Scanner` (`temp_arena` + `free_all`), `response_defer`, `connection_close`, and `request_set_quota`/`response_set_quota` alive in the server pool.
+  - **In-pool upgrades (`send_heading` + `.Sending`)**: Sends the upgrade response heading (e.g., `101 Switching Protocols`) with an optional `on_sent` callback while keeping `Connection`, `Scanner` (`temp_arena` + `free_all`), `response_defer`, `connection_close`, and `request_set_limits`/`response_set_limits` alive in the server pool.
   - **Raw detach (`connection_detach`)**: Escape hatch that removes the socket from the server pool and returns `(nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error)` to user code.
 - **No OS signal hijacking**: `core:net/http` will not register signal handlers; user code owns signals and calls `server_shutdown(&s)`.
 
@@ -26,7 +26,7 @@
 | `server.odin` | `Server`, `Server_Options`, `Server_Thread`, `Connection`, `Ctx` (`context_add`/`context_get`), `Request`, `Response`, connection lifecycle, header validation, response heading serialization, shutdown. |
 | `scanner.odin` | Pull-based async `Scanner` (`Scan_Splitter`: `split_line`, `split_n`, `split_at_most`), `Content-Length` and `Transfer-Encoding: chunked` body decoding, trailer parsing. |
 | `arena.odin` | `Arena` and `_Arena_Block` power-of-two bucketed freelists per thread backed by `Server.allocator`, with ASAN poisoning. |
-| `quota.odin` | `Quota` and `Progression` state machine tracking transfer limits, min/max durations, and min transfer rate for headers, bodies, and responses. |
+| `limits.odin` | `Limits` and `Budget` state machine tracking transfer limits, min/max durations, and min transfer rate for headers, bodies, and responses. |
 | `respond.odin` | Streaming primitives (`send`, `send_file`) and response finalizers (`respond`, `respond_bytes`, `respond_handle`, `respond_file`, `respond_file_path`), single-range `Range` and `If-Range` handling. |
 | `headers.odin` | Case-insensitive open-addressed hash table using inline-lowercased SipHash (`Headers`), multi-value support (`headers_add`, `headers_get_all_iter`), and readonly protection. |
 | `router.odin` | Segment trie router (`Router`) supporting `:param` and `*` prefix wildcards, percent-decoding before matching, and route-registration conflict detection. |
@@ -104,14 +104,14 @@
   - **Recycle `ws.arena` on `Ping`/`Pong` control frames**: Added `_recycle_arena_if_idle` preserving any pipelined unread scanner bytes before destroying `ws.arena` on `Ping` (after copying payload into recycled `_Pong_Buf`) and `Pong` when `len(ws.frames) == 0`.
   - **Enforce `GET` method in `_prepare_upgrade`**: Rejected non-`GET` methods (`405 Method Not Allowed` with `Allow: GET`) and non-`HTTP/1.1` versions (`400 Bad Request`) per RFC 6455 §4.2.1.
 - [ ] **Testing, docs & package relocation**:
-  - [ ] Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, quota; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
+  - [ ] Consolidate tests into `tests/core/net/http/` (unit tests for parser, headers, router, limits; functional tests using `nbio`/`curl` for keep-alive, chunked bodies, pipelining, upgrades, range requests, and smuggling edge cases), passing under `-sanitize:address`.
   - [ ] Remove all (/most) of the logging. Trying to make sure errors are still debuggable.
   - [x] Document the router and all its logic (`Router` matching priority, `:param`, `*`/`/*` wildcards, trailing-slash handling, `HEAD -> GET` fallback, nested sub-routers, `route_target`/`route_suffix`, and conflict detection).
   - [ ] Rewrite usage examples and overview into `doc.odin`, and document key lifetime contracts:
     - Zero-copy async slice lifetimes (`respond_bytes`, `respond_plain`, `respond_html`, `send`, `send_chunk`, `set_header`, `respond_file_path` — do not pass stack buffers or prematurely freed `temp_allocator` memory).
     - `respond_file` / `respond_handle` file descriptor lifetime (must remain open until `response_defer`, not closed via `defer os.close(f)`).
     - Header-driven file-serving configuration for `respond_file`, `respond_file_path`, `respond_file_content`, `respond_handle`, and `respond_dir`: pre-set `Content-Type` to override MIME detection, `Accept-Ranges: none` to disable `Range` handling, `ETag` (strong quoted string) to enable strong `ETag` `If-Range` matching, or `Last-Modified` to override the timestamp used for `If-Range` date matching.
-    - `request_set_quota` / `response_set_quota` `^Quota` pointer lifetime (must outlive the transaction).
+    - `request_set_limits` / `response_set_limits` `^Limits` pointer lifetime (must outlive the transaction).
     - Transaction-scoped lifetime of request/route/cookie/`body_parser` (and `body(..., retain = true)`) slices across keep-alive requests (clone if retaining beyond the request), vs callback-scoped `Body_Cb` `body` slices when using the default `body(..., retain = false)` — warn explicitly that `retain = false` overwrites the live reusable buffer **in place** (undetectable by ASAN), so async consumers (`send`, `send_chunk`, `nbio.write`, etc.) must either copy `body` or pause via `body_pause`/`body_resume` (which keeps `body` valid zero-copy until `body_resume` runs; `is_partial == false` is always the `(nil, false)` EOF signal).
     - Worker-thread-pool request offloading & cross-thread arena contract: while only one thread touches `c` at a time, worker threads may read request state, allocate/build responses and headers on `transaction_allocator`/`temp_allocator`, and destroy detached arenas (`arena_destroy`); `nbio`-bound I/O calls (`respond`/`respond_*`, `send`, `send_chunk`, `body`, `connection_close`) must be posted back to the owning server thread via `nbio.current_thread_event_loop()` + `nbio.next_tick_poly(..., l = loop)` / `nbio.wake_up(loop)`.
   - [x] Write a few good examples of common use-cases to go into the examples repository (`core/http2/examples/`)

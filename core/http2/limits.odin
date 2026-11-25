@@ -4,7 +4,7 @@ package http
 import "core:mem"
 import "core:time"
 
-Quota :: struct {
+Limits :: struct {
 	// The maximum amount of bytes to potentially transfer.
 	max_size: int,
 	// The minimum time after which a client may be disconnected.
@@ -17,13 +17,13 @@ Quota :: struct {
 	rate_add: time.Duration,
 }
 
-// Default quota for receiving headers, this is intentionally permissive.
+// Default limits for receiving headers, this is intentionally permissive.
 //
 // Allow at least 20 seconds to receive the headers. If the client sends data, increase the timeout
 // by 1 second for every 500 bytes received. But do not allow more than 40 seconds in total.
 // Only accept up to 64 KiB of data containing the request line and headers.
 @(rodata)
-DEFAULT_HEADERS_QUOTA := Quota{
+DEFAULT_HEADERS_LIMITS := Limits{
 	max_size = 64 * mem.Kilobyte,
 	min      = 20 * time.Second,
 	max      = 40 * time.Second,
@@ -31,12 +31,12 @@ DEFAULT_HEADERS_QUOTA := Quota{
 	rate_add = time.Second,
 }
 
-// Default quota for receiving bodies, this is intentionally permissive.
+// Default limits for receiving bodies, this is intentionally permissive.
 //
 // Allow at least 20 seconds to receive the body. If the client sends data, increase the timeout
 // by 1 second for every 500 bytes received. Up to 10 MiB total, with no absolute duration limit.
 @(rodata)
-DEFAULT_BODY_QUOTA := Quota{
+DEFAULT_BODY_LIMITS := Limits{
 	max_size = 10 * mem.Megabyte,
 	min      = 20 * time.Second,
 	max      = 0,
@@ -44,12 +44,12 @@ DEFAULT_BODY_QUOTA := Quota{
 	rate_add = time.Second,
 }
 
-// Default quota for sending responses, this is intentionally permissive.
+// Default limits for sending responses, this is intentionally permissive.
 //
 // Allow at least 20 seconds to read the body. If the client receives data, increase the timeout
 // by 1 second for every 500 bytes sent. With no total limit (client may receive 500b/s indefinitely).
 @(rodata)
-DEFAULT_SEND_QUOTA := Quota{
+DEFAULT_SEND_LIMITS := Limits{
 	max_size = 0, // No max response size.
 	min      = 20 * time.Second,
 	max      = 0,
@@ -57,9 +57,9 @@ DEFAULT_SEND_QUOTA := Quota{
 	rate_add = time.Second,
 }
 
-// Explicit unlimited quota opt-out for Server_Options fields (since zero Quota selects defaults).
+// Explicit unlimited opt-out for Server_Options fields (since zero Limits selects defaults).
 @(rodata)
-UNLIMITED_QUOTA := Quota{
+NO_LIMITS := Limits{
 	max_size = -1,
 	min      = -1,
 	max      = -1,
@@ -67,8 +67,8 @@ UNLIMITED_QUOTA := Quota{
 	rate_add = -1,
 }
 
-Progression :: struct {
-	quota: ^Quota,
+Budget :: struct {
+	limits: ^Limits,
 
 	// Total transferred.
 	transferred: int,
@@ -86,98 +86,98 @@ Progression :: struct {
 	timeout: time.Duration,
 }
 
-progression_reset :: proc(p: ^Progression, q: ^Quota) {
-	p^ = {}
-	progression_init(p, q)
+budget_reset :: proc(b: ^Budget, l: ^Limits) {
+	b^ = {}
+	budget_init(b, l)
 }
 
-progression_init :: proc(p: ^Progression, q: ^Quota) {
-	assert(p.transferred == 0)
-	assert(p.total == 0)
-	progression_set_quota(p, q)
+budget_init :: proc(b: ^Budget, l: ^Limits) {
+	assert(b.transferred == 0)
+	assert(b.total == 0)
+	budget_set_limits(b, l)
 }
 
-// Recomputes remaining max and timeout from q while accounting for bytes and duration already transferred.
-progression_set_quota :: proc(p: ^Progression, q: ^Quota) {
-	p.quota = q
-	quota := q != nil ? q^ : {}
-	p.max = quota.max_size > 0 ? max(0, quota.max_size - p.transferred) : -1
+// Recomputes remaining max and timeout from l while accounting for bytes and duration already transferred.
+budget_set_limits :: proc(b: ^Budget, l: ^Limits) {
+	b.limits = l
+	limits := l != nil ? l^ : {}
+	b.max = limits.max_size > 0 ? max(0, limits.max_size - b.transferred) : -1
 
-	if quota.min <= 0 && quota.max <= 0 {
-		p.timeout = -1
+	if limits.min <= 0 && limits.max <= 0 {
+		b.timeout = -1
 		return
 	}
 
 	timeout: time.Duration
-	if quota.min > 0 {
-		timeout = quota.min - p.total
-		if quota.min_rate > 0 && quota.rate_add > 0 && p.transferred > 0 {
-			timeout += time.Duration((f64(p.transferred) / f64(quota.min_rate)) * f64(quota.rate_add))
+	if limits.min > 0 {
+		timeout = limits.min - b.total
+		if limits.min_rate > 0 && limits.rate_add > 0 && b.transferred > 0 {
+			timeout += time.Duration((f64(b.transferred) / f64(limits.min_rate)) * f64(limits.rate_add))
 		}
 	} else {
-		timeout = quota.max - p.total
+		timeout = limits.max - b.total
 	}
 
-	if quota.max > 0 {
-		allowed := max(0, quota.max - p.total)
+	if limits.max > 0 {
+		allowed := max(0, limits.max - b.total)
 		timeout = min(timeout, allowed)
 	}
 
-	p.timeout = max(0, timeout)
+	b.timeout = max(0, timeout)
 }
 
-progression_next_timeout :: proc(p: Progression) -> time.Duration {
-	return p.timeout
+budget_next_timeout :: proc(b: Budget) -> time.Duration {
+	return b.timeout
 }
 
-progression_max_transfer :: proc(p: Progression, available: int) -> int {
-	if p.max < 0 {
+budget_max_transfer :: proc(b: Budget, available: int) -> int {
+	if b.max < 0 {
 		return available
 	}
 
-	return min(available, p.max)
+	return min(available, b.max)
 }
 
-progression_is_exhausted :: proc(p: Progression) -> bool {
-	return p.max == 0 || p.timeout == 0
+budget_is_exhausted :: proc(b: Budget) -> bool {
+	return b.max == 0 || b.timeout == 0
 }
 
-progression_update :: proc(p: ^Progression, transferred: int, dur: time.Duration) {
+budget_update :: proc(b: ^Budget, transferred: int, dur: time.Duration) {
 	assert(transferred > 0)
 	assert(dur >= 0)
 
-	q := p.quota != nil ? p.quota^ : {}
-	p.transferred += transferred
-	p.total += dur
+	l := b.limits != nil ? b.limits^ : {}
+	b.transferred += transferred
+	b.total += dur
 
-	if p.max > 0 {
-		p.max -= transferred
-		p.max  = max(0, p.max)
+	if b.max > 0 {
+		b.max -= transferred
+		b.max  = max(0, b.max)
 	}
 
-	if q.min_rate > 0 && dur > 0 {
+	if l.min_rate > 0 && dur > 0 {
 		rate := f64(transferred) / time.duration_seconds(dur)
-		if rate < f64(q.min_rate) {
-			p.timeout = 0
+		if rate < f64(l.min_rate) {
+			b.timeout = 0
 			return
 		}
 	}
 
-	if q.min > 0 {
-		p.timeout -= dur
+	if l.min > 0 {
+		b.timeout -= dur
 
-		if q.min_rate > 0 && q.rate_add > 0 {
-			p.timeout += time.Duration((f64(transferred) / f64(q.min_rate)) * f64(q.rate_add))
+		if l.min_rate > 0 && l.rate_add > 0 {
+			b.timeout += time.Duration((f64(transferred) / f64(l.min_rate)) * f64(l.rate_add))
 		}
 
-		if p.timeout <= 0 {
-			p.timeout = 0
+		if b.timeout <= 0 {
+			b.timeout = 0
 			return
 		}
 	}
 
-	if q.max > 0 {
-		allowed  := max(0, q.max - p.total)
-		p.timeout = min(p.timeout, allowed)
+	if l.max > 0 {
+		allowed  := max(0, l.max - b.total)
+		b.timeout = min(b.timeout, allowed)
 	}
 }

@@ -27,7 +27,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		c.scanner.allocator = &c.transaction_arena
 
 		c.res._state = .Handling
-		c.res.progress.max = 0
+		c.res.budget.max = 0
 		c.res._sends = 1
 
 		if len(payload) > 0 {
@@ -58,7 +58,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st.method = ctx.req.line.method
 			st.wants_body = http.wants_body(ctx)
 
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.write_response_heading(ctx)
 			ctx.res._state = .Sending
@@ -114,14 +114,14 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			id := http.route_param(http.route_params(ctx), "id")
 			st.param_len = copy(st.param_buf[:], id)
 
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.respond_bytes(ctx, transmute([]byte)string("hello"))
 		}))
 		http.route_all(&r, "/*", http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			st := (^Fallback_State)(user_data)
 			st.all_called = true
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.respond(ctx)
 		}))
@@ -158,7 +158,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st := (^Custom_State)(user_data)
 			st.head_called = true
 			st.head_method = ctx.req.line.method
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.respond(ctx)
 		}))
@@ -166,7 +166,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st := (^Custom_State)(user_data)
 			st.get_called = true
 			st.get_method = ctx.req.line.method
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.respond(ctx)
 		}))
@@ -211,7 +211,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st := (^Nested_State)(user_data)
 			st.called = true
 			st.method = ctx.req.line.method
-			ctx.res.progress.max = 0
+			ctx.res.budget.max = 0
 			ctx.res._sends = 1
 			http.respond(ctx)
 		}))
@@ -294,7 +294,7 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 		c.scanner.c             = &c
 		c.scanner.allocator     = &c.transaction_arena
 		c.res._state             = .Handling
-		c.res.progress.max      = 0
+		c.res.budget.max      = 0
 		c.res._sends             = 1
 		c.req.line = {
 			method  = .Get,
@@ -517,7 +517,7 @@ test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
 	c.scanner.allocator       = &c.transaction_arena
 	c.scanner.is_pumping      = true
 	c.res._state              = .Handling
-	c.res.progress.max        = 0
+	c.res.budget.max        = 0
 	c.res._sends              = 0
 	c.req.has_consumed_body   = true
 	c.req.line = {
@@ -616,7 +616,7 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 			c.scanner.c               = &c
 			c.scanner.allocator       = &c.transaction_arena
 			c.res._state              = .Handling
-			c.res.progress.max        = 0
+			c.res.budget.max        = 0
 			c.res._sends              = 1
 			c.req.has_consumed_body   = true
 			c.req.line = {method = .Get, target = target, version = {1, 1}}

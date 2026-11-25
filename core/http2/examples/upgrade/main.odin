@@ -1,5 +1,5 @@
 // Low-level HTTP/1.1 protocol upgrades:
-//   - `/echo`   (in-pool):  stays managed by `http.Server` to keep `Scanner`, quotas, `temp_allocator`,
+//   - `/echo`   (in-pool):  stays managed by `http.Server` to keep `Scanner`, limits, `temp_allocator`,
 //                           `http.send`, `response_defer`, and `connection_close` (like `core/websocket`).
 //   - `/detach` (detached): removes the connection from `http.Server` via `connection_detach` to take
 //                           direct ownership of the `nbio.TCP_Socket` and any unread `buffered` bytes.
@@ -19,7 +19,7 @@ import "core:time"
 import http "core:http2"
 
 @(rodata)
-UPGRADE_RECV_QUOTA := http.Quota{min = 60 * time.Second}
+UPGRADE_RECV_LIMITS := http.Limits{min = 60 * time.Second}
 
 Echo_Conn :: struct {
 	sock:     nbio.TCP_Socket,
@@ -73,9 +73,9 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 		// Low-level HTTP/1.1 connection hook for in-pool protocol takeover.
 		c := http._connection_of_context(ctx)
 
-		// Replace HTTP request/response quotas with protocol-appropriate limits (here: 60s idle recv, unlimited send).
-		http.request_set_quota(&c.req, &UPGRADE_RECV_QUOTA)
-		http.response_set_quota(&c.res, &http.UNLIMITED_QUOTA)
+		// Replace HTTP request/response limits with protocol-appropriate limits (here: 60s idle recv, unlimited send).
+		http.request_set_limits(&c.req, &UPGRADE_RECV_LIMITS)
+		http.response_set_limits(&c.res, &http.NO_LIMITS)
 
 		fmt.printfln("[in-pool] client %v upgraded", c.socket)
 		http.response_defer(ctx, c.socket, proc(_: ^http.Ctx, sock: nbio.TCP_Socket) {
@@ -86,7 +86,7 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 	}
 
 	scan_next_line :: proc(c: ^http.Connection) {
-		http.progression_reset(&c.req.progress, &UPGRADE_RECV_QUOTA)
+		http.budget_reset(&c.req.budget, &UPGRADE_RECV_LIMITS)
 		// `scan_temp_line` reads CRLF-delimited lines into `c.temp_arena` (automatically consuming any
 		// pipelined bytes that already arrived after the HTTP upgrade headers).
 		http.scan_temp_line(&c.scanner, on_line)

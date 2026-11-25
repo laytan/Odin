@@ -306,8 +306,8 @@ SEND_ENTIRE_FILE :: nbio.SEND_ENTIRE_FILE
 
 @(private="file")
 _prepare_send :: proc(c: ^Connection) -> (max: int, timeout: time.Duration, ok: bool) {
-	max     = c.res.progress.max
-	timeout = c.res.progress.timeout
+	max     = c.res.budget.max
+	timeout = c.res.budget.timeout
 	if max == 0 || timeout == 0 {
 		_connection_abort(c, skip_graceful = false)
 		return 0, 0, false

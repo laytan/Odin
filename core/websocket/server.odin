@@ -158,7 +158,7 @@ handler :: proc(s: ^Server) -> http.Handler {
 		})
 		ws.frames.allocator = http.transaction_allocator(ctx)
 		if s.idle_timeout > 0 {
-			ws.recv_quota = {min = s.idle_timeout}
+			ws.recv_limits = {min = s.idle_timeout}
 		}
 
 		http.send_heading(ctx, _on_upgrade)
@@ -381,8 +381,8 @@ _Connection :: struct {
 	close_buf:  [125]byte,
 	frames:     [dynamic]_Frame,
 	arena:      ^http.Arena,
-	recv_quota: http.Quota,
-	send_quota: http.Quota,
+	recv_limits: http.Limits,
+	send_limits: http.Limits,
 	headers:    _Freelist(_Outgoing_Header),
 	pongs:      _Freelist(_Pong_Buf),
 	send_err:   http.Send_Error,
@@ -499,8 +499,8 @@ _serve_connection :: proc(c: ^http.Connection) {
 	ws := http.context_get(&c.ctx, _Connection)
 	s  := ws.s
 
-	http.request_set_quota(&c.req, &ws.recv_quota)
-	http.response_set_quota(&c.res, &ws.send_quota)
+	http.request_set_limits(&c.req, &ws.recv_limits)
+	http.response_set_limits(&c.res, &ws.send_limits)
 
 	http.response_defer(&c.ctx, c, proc(ctx: ^http.Ctx, c: ^http.Connection) {
 		ws := http.context_get(ctx, _Connection)
@@ -811,7 +811,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 			return
 		}
 		if ws.s.idle_timeout > 0 {
-			http.progression_reset(&c.req.progress, &ws.recv_quota)
+			http.budget_reset(&c.req.budget, &ws.recv_limits)
 		}
 		scan(c, ws, size_of(_Frame_Header), on_frame_header)
 	}

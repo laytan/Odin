@@ -68,8 +68,8 @@ _body_buf_cap :: proc(c: ^Connection, retain: bool, hint := -1) -> i32 {
 	if hint >= 0 {
 		cap = min(cap, hint)
 	}
-	if c.req.progress.max >= 0 {
-		cap = min(cap, c.req.progress.max)
+	if c.req.budget.max >= 0 {
+		cap = min(cap, c.req.budget.max)
 	}
 	return i32(clamp(cap, MULTIPLIER, max_cap))
 }
@@ -421,7 +421,7 @@ scanner_pump :: proc(s: ^Scanner) {
 		return
 	}
 
-	max := s.c.req.progress.max
+	max := s.c.req.budget.max
 	if max == 0 {
 		if _is_scanning_request_line(s.c) {
 			invalid_request(s.c, .URI_Too_Long)
@@ -433,7 +433,7 @@ scanner_pump :: proc(s: ^Scanner) {
 		return
 	}
 
-	timeout := s.c.req.progress.timeout
+	timeout := s.c.req.budget.timeout
 	if timeout == 0 {
 		invalid_request(s.c, .Request_Timeout)
 		return
@@ -487,7 +487,7 @@ scanner_pump :: proc(s: ^Scanner) {
 		}
 
 		dur := since(s.last_recv_start)
-		progression_update(&s.c.req.progress, op.recv.received, dur)
+		budget_update(&s.c.req.budget, op.recv.received, dur)
 
 		log.debugf("http[t=%v][c=%v]: received=%v/%v, duration=%b", td.id, s.c.socket, op.recv.received, len(op.recv.bufs[0]), dur)
 		s.write_head += op.recv.received
@@ -727,16 +727,16 @@ _body_chunked_on_size :: proc(c: ^Connection, data: []byte) {
 		return
 	}
 
-	if c.req.progress.max >= 0 && size > c.req.progress.max {
+	if c.req.budget.max >= 0 && size > c.req.budget.max {
 		invalid_request(c, .Payload_Too_Large)
 		return
 	}
 
 	if size == 0 {
-		// Trailers reuse request_quota and scan non-reusably so headers can store zero-copy slices.
-		progression_reset(&c.req.progress, &td.s.opts.request_quota)
+		// Trailers reuse request_limits and scan non-reusably so headers can store zero-copy slices.
+		budget_reset(&c.req.budget, &td.s.opts.request_limits)
 		if buffered := c.scanner.write_head - c.scanner.read_head; buffered > 0 {
-			progression_update(&c.req.progress, buffered, 0)
+			budget_update(&c.req.budget, buffered, 0)
 		}
 		scan_line(&c.scanner, _body_chunked_on_trailer)
 		return
@@ -823,7 +823,7 @@ _body_length :: proc(c: ^Connection) {
 		return
 	}
 
-	if c.req.progress.max >= 0 && clen > c.req.progress.max {
+	if c.req.budget.max >= 0 && clen > c.req.budget.max {
 		invalid_request(c, .Payload_Too_Large)
 		return
 	}
@@ -870,7 +870,7 @@ _maybe_send_continue :: proc(c: ^Connection) -> bool {
 	if c.scanner.write_head > c.scanner.read_head {
 		return true
 	}
-	if c.req.progress.max == 0 || c.req.progress.timeout == 0 {
+	if c.req.budget.max == 0 || c.req.budget.timeout == 0 {
 		return true
 	}
 	if expect, ok := headers_get(c.req.headers, "expect"); ok && _headers_eq(expect, "100-continue") {

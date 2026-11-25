@@ -1,4 +1,4 @@
-// O(1)-memory streaming file upload with per-request quota and pause/resume backpressure.
+// O(1)-memory streaming file upload with per-request limits and pause/resume backpressure.
 //
 // Run: odin run core/http2/examples/file_upload
 //
@@ -16,7 +16,7 @@ import "core:time"
 import http "core:http2"
 
 @(rodata)
-UPLOAD_QUOTA := http.Quota{
+UPLOAD_LIMITS := http.Limits{
 	max_size = 100 * mem.Megabyte,
 	min      = 30 * time.Second,
 	min_rate = 16 * mem.Kilobyte,
@@ -43,7 +43,7 @@ main :: proc() {
 }
 
 handle_upload :: proc(ctx: ^http.Ctx) {
-	http.request_set_quota(&ctx.req, &UPLOAD_QUOTA)
+	http.request_set_limits(&ctx.req, &UPLOAD_LIMITS)
 
 	id := sync.atomic_add(&next_upload_id, 1) + 1
 	tmp_dir, _ := os.temp_dir(context.temp_allocator)

@@ -207,7 +207,7 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		body_quota   = {max_size = 4096, min = 5 * time.Second},
+		body_limits  = {max_size = 4096, min = 5 * time.Second},
 		handlers     = {http.router(&r)},
 	})
 
@@ -300,7 +300,7 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 	testing.expect(t, !ctx.reject_401.saw_100, "expected rejected POST /reject not to receive 100 Continue")
 	testing.expect_value(t, ctx.reject_401.response.status, c.long(401))
 
-	// 3. Oversized POST (413) rejected by body_quota does NOT receive 100 Continue.
+	// 3. Oversized POST (413) rejected by body_limits does NOT receive 100 Continue.
 	testing.expect(t, ctx.too_big_413.handle_ok, "too_big_413: curl.easy_init failed")
 	testing.expect(t, ctx.too_big_413.setopt_ok, "too_big_413: curl.easy_setopt failed")
 	testing.expectf(t, ctx.too_big_413.perform_err == .E_OK, "too_big_413: curl failed: %s", curl.easy_strerror(ctx.too_big_413.perform_err))
@@ -549,7 +549,7 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 		address              = nbio.IP4_Loopback,
 		port                 = http.OS_ASSIGNED_PORT,
 		thread_count         = 1,
-		request_quota        = http.Quota{max_size = 64 * mem.Kilobyte, min = 200 * time.Millisecond, max = 250 * time.Millisecond},
+		request_limits       = http.Limits{max_size = 64 * mem.Kilobyte, min = 200 * time.Millisecond, max = 250 * time.Millisecond},
 		handlers             = {http.router(&r)},
 		thread_initializer = proc() {
 			_tls_test_buf = make([]byte, 16)
@@ -678,10 +678,10 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	testing.expect_value(t, string(ctx.slow_res.body[:]), "slow-ok")
 	testing.expect(t, ctx.slow_saw_conn_close, "expected in-flight response during shutdown to include Connection: close")
 
-	// 3. Stalled active connection keeps shutdown waiting until its request_quota expires with 408.
+	// 3. Stalled active connection keeps shutdown waiting until its request_limits expires with 408.
 	shutdown_elapsed := time.diff(ctx.shutdown_started_at, serve_finished_at)
-	testing.expect(t, shutdown_elapsed >= 100 * time.Millisecond, "expected shutdown to wait for request_quota on stalled active connection")
-	testing.expect(t, shutdown_elapsed < 2 * time.Second, "expected shutdown not to hang past request_quota timeout")
+	testing.expect(t, shutdown_elapsed >= 100 * time.Millisecond, "expected shutdown to wait for request_limits on stalled active connection")
+	testing.expect(t, shutdown_elapsed < 2 * time.Second, "expected shutdown not to hang past request_limits timeout")
 
 	// 4. Idle connection closes immediately; stalled connection receives 408 Request Timeout and closes.
 	eof_buf: [16]byte
@@ -1538,8 +1538,8 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 	c.scanner.allocator      = &c.transaction_arena
 	c.req.line               = {method = .Get, target = "/", version = {1, 1}}
 	c.req.has_consumed_body  = true
-	http.progression_init(&c.req.progress, &http.UNLIMITED_QUOTA)
-	http.progression_init(&c.res.progress, &http.UNLIMITED_QUOTA)
+	http.budget_init(&c.req.budget, &http.NO_LIMITS)
+	http.budget_init(&c.res.budget, &http.NO_LIMITS)
 	c.res.status = .OK
 	c.res._state = .Handling
 
@@ -1912,8 +1912,8 @@ test_http2_free_all_during_inflight_temp_recv :: proc(t: ^testing.T) {
 	c.res._deferred.allocator = tx_alloc
 	c.scanner.c              = c
 	c.scanner.allocator      = &c.transaction_arena
-	http.progression_init(&c.req.progress, &http.UNLIMITED_QUOTA)
-	http.progression_init(&c.res.progress, &http.UNLIMITED_QUOTA)
+	http.budget_init(&c.req.budget, &http.NO_LIMITS)
+	http.budget_init(&c.res.budget, &http.NO_LIMITS)
 	c.res._state = .Sending
 
 	Frame_State :: struct {
@@ -2305,7 +2305,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 		address      = nbio.IP4_Loopback,
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 1,
-		body_quota   = {max_size = 4 * mem.Megabyte, min = 5 * time.Second},
+		body_limits  = {max_size = 4 * mem.Megabyte, min = 5 * time.Second},
 		handlers     = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
@@ -2659,9 +2659,9 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 	server := http.make_server(http.Server_Options{
 		address        = nbio.IP4_Loopback,
 		port           = http.OS_ASSIGNED_PORT,
-		thread_count   = 1,
-		response_quota = http.UNLIMITED_QUOTA,
-		handlers       = {http.router(&r)},
+		thread_count    = 1,
+		response_limits = http.NO_LIMITS,
+		handlers        = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
 	setup_err := http._setup(&server)
@@ -2910,10 +2910,10 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 	server := http.make_server(http.Server_Options{
 		address        = nbio.IP4_Loopback,
 		port           = http.OS_ASSIGNED_PORT,
-		thread_count   = 1,
-		body_quota     = http.UNLIMITED_QUOTA,
-		response_quota = http.UNLIMITED_QUOTA,
-		handlers       = {http.router(&r)},
+		thread_count    = 1,
+		body_limits     = http.NO_LIMITS,
+		response_limits = http.NO_LIMITS,
+		handlers        = {http.router(&r)},
 	}, mem.tracking_allocator(&server_track))
 
 	setup_err := http._setup(&server)

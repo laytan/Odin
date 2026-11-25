@@ -63,8 +63,8 @@ push_test_connection :: proc(
 	c.res._buf.allocator      = tx_alloc
 	c.res._deferred.allocator = tx_alloc
 
-	http.progression_init(&c.req.progress, &env.s.opts.request_quota)
-	http.progression_init(&c.res.progress, &env.s.opts.response_quota)
+	http.budget_init(&c.req.budget, &env.s.opts.request_limits)
+	http.budget_init(&c.res.budget, &env.s.opts.response_limits)
 
 	if len(payload) > 0 {
 		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
@@ -97,7 +97,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		on_sent_called:     bool,
 		temp_alloc_matched: bool,
 		last_err:           http.Send_Error,
-		empty_quota:        http.Quota,
+		empty_limits:       http.Limits,
 	}
 
 	env: Upgrade_Test_Env
@@ -105,7 +105,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 	defer destroy_upgrade_env(&env)
 
 	// 1. 101 Switching Protocols heading omits Content-Length and Connection: close,
-	//    on_send in .Sending runs on_sent with temp_allocator and empty Quota{} clears limits.
+	//    on_send in .Sending runs on_sent with temp_allocator and empty Limits{} clears limits.
 	{
 		c := push_test_connection(t, &env)
 		defer http._connection_destroy(c)
@@ -137,8 +137,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 			chk.last_err           = err
 			chk.temp_alloc_matched = context.temp_allocator.data == http.temp_allocator(c).data
 
-			http.request_set_quota(&c.req, &chk.empty_quota)
-			http.response_set_quota(&c.res, &chk.empty_quota)
+			http.request_set_limits(&c.req, &chk.empty_limits)
+			http.response_set_limits(&c.res, &chk.empty_limits)
 		})
 
 		testing.expect(t, chk.on_sent_called, "expected on_sent callback after 101 flush")
@@ -147,13 +147,13 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
 		testing.expect_value(t, c.res._sends, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 1)
-		testing.expect_value(t, c.req.progress.max, -1)
-		testing.expect_value(t, c.req.progress.timeout, time.Duration(-1))
-		testing.expect_value(t, c.res.progress.max, -1)
-		testing.expect_value(t, c.res.progress.timeout, time.Duration(-1))
+		testing.expect_value(t, c.req.budget.max, -1)
+		testing.expect_value(t, c.req.budget.timeout, time.Duration(-1))
+		testing.expect_value(t, c.res.budget.max, -1)
+		testing.expect_value(t, c.res.budget.timeout, time.Duration(-1))
 	}
 
-	// 2. 0-byte send error via on_send transitions to .Error without tripping progression_update assert.
+	// 2. 0-byte send error via on_send transitions to .Error without tripping budget_update assert.
 	{
 		c := push_test_connection(t, &env)
 		defer destroy_test_connection(c)
@@ -337,10 +337,10 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env, payload = "hi")
 		defer destroy_test_connection(c)
 
-		c.res._state           = .Sending
-		c.res._sends           = 1
-		c.req.progress.max     = -1
-		c.req.progress.timeout = -1
+		c.res._state         = .Sending
+		c.res._sends         = 1
+		c.req.budget.max     = -1
+		c.req.budget.timeout = -1
 
 		c.scanner.scan = {
 			split     = http.split_n(16),
@@ -658,8 +658,8 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		c.res._buf.allocator      = tx_alloc
 		c.res._deferred.allocator = tx_alloc
 
-		http.progression_init(&c.req.progress, &s.opts.request_quota)
-		http.progression_init(&c.res.progress, &s.opts.response_quota)
+		http.budget_init(&c.req.budget, &s.opts.request_limits)
+		http.budget_init(&c.res.budget, &s.opts.response_limits)
 		return c
 	}
 
@@ -911,7 +911,7 @@ test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
 		c.req.line              = {method = .Post, target = "/upload", version = {1, 1}}
 		c.res._state            = .Handling
 		c.req.has_consumed_body = false
-		http.progression_init(&c.req.progress, &env.s.opts.body_quota)
+		http.budget_init(&c.req.budget, &env.s.opts.body_limits)
 		testing.expect_value(t, http.headers_set(&c.req.headers, tc.hdr_key, tc.hdr_val), nil)
 		http._headers_set_readonly(&c.req.headers)
 

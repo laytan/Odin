@@ -44,9 +44,9 @@ Server_Options :: struct {
 	thread_initializer:   proc(),
 	thread_deinitializer: proc(),
 
-	request_quota:  Quota,
-	body_quota:     Quota,
-	response_quota: Quota,
+	request_limits:  Limits,
+	body_limits:     Limits,
+	response_limits: Limits,
 	// Maximum number of request headers (and chunked trailers) accepted. Zero defaults to DEFAULT_MAX_HEADERS; negative disables the limit.
 	max_headers: int,
 }
@@ -76,17 +76,17 @@ Server_Error :: intrinsics.type_merge(
 	},
 )
 
-// Applies default request, body, and response quotas for zero-valued Server_Options fields.
+// Applies default request, body, and response limits for zero-valued Server_Options fields.
 @(private="file")
 _server_options_apply_defaults :: proc(opts: ^Server_Options) {
-	if opts.request_quota == {} {
-		opts.request_quota = DEFAULT_HEADERS_QUOTA
+	if opts.request_limits == {} {
+		opts.request_limits = DEFAULT_HEADERS_LIMITS
 	}
-	if opts.body_quota == {} {
-		opts.body_quota = DEFAULT_BODY_QUOTA
+	if opts.body_limits == {} {
+		opts.body_limits = DEFAULT_BODY_LIMITS
 	}
-	if opts.response_quota == {} {
-		opts.response_quota = DEFAULT_SEND_QUOTA
+	if opts.response_limits == {} {
+		opts.response_limits = DEFAULT_SEND_LIMITS
 	}
 	if opts.max_headers == 0 {
 		opts.max_headers = DEFAULT_MAX_HEADERS
@@ -262,7 +262,7 @@ context_get :: proc(ctx: ^Ctx, $T: typeid) -> ^T {
 }
 
 Request :: struct {
-	progress:          Progression,
+	budget:            Budget,
 	line:              Requestline,
 	has_consumed_body: bool,
 	headers:           Headers,
@@ -276,7 +276,7 @@ _Deferred :: struct {
 }
 
 Response :: struct {
-	progress: Progression,
+	budget:   Budget,
 	status:   Status,
 	headers:  Headers,
 	sent:     int,
@@ -294,16 +294,16 @@ Response :: struct {
 	},
 }
 
-// Overrides the quota applied to receiving the remaining request headers/body.
+// Overrides the limits applied to receiving the remaining request headers/body.
 // The given pointer must live as long as the transaction.
-request_set_quota :: proc(req: ^Request, quota: ^Quota) {
-	progression_set_quota(&req.progress, quota)
+request_set_limits :: proc(req: ^Request, limits: ^Limits) {
+	budget_set_limits(&req.budget, limits)
 }
 
-// Overrides the quota applied to sending the response.
+// Overrides the limits applied to sending the response.
 // The given pointer must live as long as the transaction.
-response_set_quota :: proc(res: ^Response, quota: ^Quota) {
-	progression_set_quota(&res.progress, quota)
+response_set_limits :: proc(res: ^Response, limits: ^Limits) {
+	budget_set_limits(&res.budget, limits)
 }
 
 response_defer :: proc {
@@ -629,19 +629,19 @@ connection_close :: proc(c: ^Connection) {
 	nbio.shutdown(c.socket, .Send)
 
 	@(static) junk: [1024]byte
-	c.req.progress.timeout = CONN_CLOSE_DELAY
+	c.req.budget.timeout = CONN_CLOSE_DELAY
 	c.scanner.last_recv_start = now()
-	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
+	c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.budget.timeout)
 
 	on_recv :: proc(op: ^nbio.Operation, c: ^Connection) {
 		context.temp_allocator = temp_allocator(c)
 		c.curr_recv = nil
-		c.req.progress.timeout -= since(c.scanner.last_recv_start)
-		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.req.progress.timeout)
+		c.req.budget.timeout -= since(c.scanner.last_recv_start)
+		log.debugf("http[t=%v][c=%v]: err=%v, received=%v, closing_for=%v", td.id, c.socket, op.recv.err, op.recv.received, CONN_CLOSE_DELAY-c.req.budget.timeout)
 		if op.recv.err == nil && op.recv.received > 0 {
-			if c.req.progress.timeout > 0 {
+			if c.req.budget.timeout > 0 {
 				c.scanner.last_recv_start = now()
-				c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.progress.timeout)
+				c.curr_recv = nbio.recv_poly(c.socket, {junk[:]}, c, on_recv, all=true, timeout=c.req.budget.timeout)
 				return
 			}
 		}
@@ -771,11 +771,11 @@ _serve_connection :: proc(c: ^Connection) {
 
 	allocator := transaction_allocator(c)
 
-	progression_init(&c.req.progress, &td.s.opts.request_quota)
+	budget_init(&c.req.budget, &td.s.opts.request_limits)
 	if c.scanner.write_head > 0 {
-		progression_update(&c.req.progress, c.scanner.write_head, 0)
+		budget_update(&c.req.budget, c.scanner.write_head, 0)
 	}
-	progression_init(&c.res.progress, &td.s.opts.response_quota)
+	budget_init(&c.res.budget, &td.s.opts.response_limits)
 
 	c.req.headers.allocator  = allocator
 	c.res.headers.allocator  = allocator
@@ -866,7 +866,7 @@ on_headers :: proc(c: ^Connection) {
 	}
 
 	c.res._state = .Handling
-	progression_reset(&c.req.progress, &td.s.opts.body_quota)
+	budget_reset(&c.req.budget, &td.s.opts.body_limits)
 	_headers_set_readonly(&c.req.headers)
 
 	// An options request with the "*" is a no-op/ping request to
@@ -1206,7 +1206,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	}
 
 	if sent > 0 {
-		progression_update(&c.res.progress, sent, since(c.res._last_send))
+		budget_update(&c.res.budget, sent, since(c.res._last_send))
 	}
 
 	if err != nil {
@@ -1254,7 +1254,7 @@ _check_send_done :: proc(c: ^Connection, skip_graceful := false) {
 		return
 	}
 
-	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.progress.transferred)
+	log.debugf("http[t=%v][c=%v]: sent=%v, msg=\"response sent, serving next request\"", td.id, c.socket, c.res.budget.transferred)
 
 	_connection_run_deferred(c)
 
