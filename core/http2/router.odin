@@ -1,5 +1,4 @@
 #+vet explicit-allocators
-#+build !js
 package http
 
 import "base:runtime"
@@ -168,12 +167,20 @@ route_params :: proc(ctx: ^Ctx) -> (params: []Route_Param) {
 }
 
 /*
-Returns the full percent-decoded request path without the query string,
-or `""` outside a `Router`.
+Returns the full percent-decoded request path without the query string.
 */
 route_target :: proc(ctx: ^Ctx) -> string {
 	match := context_get(ctx, _Route_Match)
-	if match == nil { return "" }
+	if match == nil {
+		without_query, _, _ := strings.partition(ctx.req.line.target, "?")
+		target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
+		if !target_ok {
+			return ""
+		}
+
+		return target
+	}
+
 	return match.target
 }
 

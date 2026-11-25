@@ -1,5 +1,4 @@
 #+vet explicit-allocators
-#+build !js
 package http
 
 import "base:intrinsics"
@@ -484,41 +483,19 @@ server_shutdown :: proc(s: ^Server) {
 Contextless, async-signal-safe version of `server_shutdown`.
 
 Enqueues a graceful shutdown onto the server's main event loop via `nbio.exec_urgent` without
-locking mutexes or allocating, making it safe to call from a POSIX `libc.signal` handler or a
-Windows `SetConsoleCtrlHandler` callback.
+locking mutexes or allocating, making it signal safe.
 
 Returns `true` if shutdown was triggered by this call, or `false` if the server is not currently
 serving, shutdown was already requested (e.g. a second Ctrl-C), or the event loop queue is full.
 
 Example:
-	import win "core:sys/windows"
-	import "core:sys/posix"
+	import "core:terminal"
 
-	server: http.Server
+	server := http.make_server()
 
-	when ODIN_OS == .Windows {
-		// Satisfy -vet
-		_ :: posix
-
-		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
-			return win.BOOL(http.server_shutdown_async(&server))
-		}, win.TRUE)
-	} else {
-		// Satisfy -vet
-		_ :: win
-
-		// `server_shutdown_async` is contextless and async-signal-safe; a second signal restores the
-		// default handler to force-exit immediately.
-		on_signal :: proc "c" (sig: posix.Signal) {
-			if !http.server_shutdown_async(&server) {
-				posix.signal(sig, auto_cast posix.SIG_DFL)
-				posix.raise(sig)
-			}
-		}
-
-		posix.signal(.SIGINT, on_signal)
-		posix.signal(.SIGTERM, on_signal)
-	}
+	terminal.set_termination_handler(proc "contextless" (server: rawptr) -> bool {
+		return http.server_shutdown_async((^http.Server)(server))
+	}, &server)
 */
 server_shutdown_async :: proc "contextless" (s: ^Server) -> bool {
 	if sync.atomic_load(&s.shutting_down) {

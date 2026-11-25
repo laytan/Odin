@@ -58,3 +58,37 @@ _fini_terminal :: proc "contextless" () {
 		windows.SetConsoleMode(handle, v.mode)
 	}
 }
+
+@(private="file")
+_termination_handler: Termination_Handler
+@(private="file")
+_termination_handler_user_data: rawptr
+
+_set_termination_handler :: proc(handler: Termination_Handler, user_data: rawptr) -> bool {
+	if handler == nil {
+		if _termination_handler != nil {
+			_ = windows.SetConsoleCtrlHandler(_handler, windows.FALSE)
+		}
+
+		_termination_handler = nil
+		_termination_handler_user_data = nil
+		return true
+	}
+
+	if _termination_handler != nil {
+		return false
+	}
+
+	ok := bool(windows.SetConsoleCtrlHandler(_handler, windows.TRUE))
+	if ok {
+		_termination_handler = handler
+		_termination_handler_user_data = user_data
+	}
+
+	return ok
+
+	_handler :: proc "system" (_: windows.DWORD) -> windows.BOOL {
+		assert_contextless(_termination_handler != nil)
+		return windows.BOOL(_termination_handler(_termination_handler_user_data))
+	}
+}

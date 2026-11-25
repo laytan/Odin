@@ -10,14 +10,11 @@ package main
 import "core:fmt"
 import "core:nbio"
 import "core:sync"
+import "core:terminal"
 import "core:time"
-
-import win "core:sys/windows"
-import "core:sys/posix"
 
 import http "core:http2"
 
-server: http.Server
 next_worker_id: int
 
 // Per-server-thread state initialized in `thread_initializer` and cleaned up in `thread_deinitializer`.
@@ -37,31 +34,7 @@ main :: proc() {
 	http.route_get(&r, "/", handle_fast)
 	http.route_get(&r, "/slow", handle_slow)
 
-	when ODIN_OS == .Windows {
-		// Satisfy -vet
-		_ :: posix
-
-		win.SetConsoleCtrlHandler(proc "system" (_: win.DWORD) -> win.BOOL {
-			return win.BOOL(http.server_shutdown_async(&server))
-		}, win.TRUE)
-	} else {
-		// Satisfy -vet
-		_ :: win
-
-		// `server_shutdown_async` is contextless and async-signal-safe; a second signal restores the
-		// default handler to force-exit immediately.
-		on_signal :: proc "c" (sig: posix.Signal) {
-			if !http.server_shutdown_async(&server) {
-				posix.signal(sig, auto_cast posix.SIG_DFL)
-				posix.raise(sig)
-			}
-		}
-
-		posix.signal(.SIGINT, on_signal)
-		posix.signal(.SIGTERM, on_signal)
-	}
-
-	server = http.make_server(http.Server_Options{
+	server := http.make_server(http.Server_Options{
 		address      = nbio.IP4_Loopback,
 		port         = 8080,
 		thread_count = 2,
@@ -74,6 +47,10 @@ main :: proc() {
 			fmt.printfln("worker %d stopping (served %d requests)", worker_id, worker_requests)
 		},
 	})
+
+	terminal.set_termination_handler(proc "contextless" (server: rawptr) -> bool {
+		return http.server_shutdown_async((^http.Server)(server))
+	}, &server)
 
 	fmt.println("Listening on http://127.0.0.1:8080 (press Ctrl-C to stop)")
 	err := http.listen_and_serve(&server)

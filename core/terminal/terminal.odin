@@ -33,3 +33,18 @@ This value reports the color depth support as reported by the terminal at the
 start of the program.
 */
 color_depth: Color_Depth
+
+Termination_Handler :: #type proc "contextless" (user_data: rawptr) -> bool
+
+/*
+Sets a termination handler to handle CTRL+C like signals.
+
+Set handler to `nil` to remove the custom handler.
+
+The given handler must be signal-safe.
+
+Returns `false` on error or when a handler has already been set.
+*/
+set_termination_handler :: proc(handler: Termination_Handler, user_data: rawptr) -> bool {
+	return _set_termination_handler(handler, user_data)
+}

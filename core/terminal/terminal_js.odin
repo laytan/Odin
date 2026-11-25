@@ -11,3 +11,5 @@ _init_terminal :: proc "contextless" () {
 }
 
 _fini_terminal :: proc "contextless" () { }
+
+_set_termination_handler :: proc(handler: Termination_Handler, user_data: rawptr) -> bool {}
