@@ -3,7 +3,6 @@ package test_core_net_http
 import "base:runtime"
 import "base:sanitizer"
 
-import "core:container/xar"
 import "core:log"
 import "core:mem"
 import "core:nbio"
@@ -12,84 +11,6 @@ import "core:testing"
 import "core:time"
 
 import http "core:http2"
-
-Upgrade_Test_Env :: struct {
-	s:       http.Server,
-	thread:  http.Server_Thread,
-	prev_td: ^http.Server_Thread,
-}
-
-setup_upgrade_env :: proc(t: ^testing.T, env: ^Upgrade_Test_Env) {
-	http.headers_init_hash_secret()
-
-	env.s = http.make_server({})
-
-	env.thread = http.Server_Thread{s = &env.s, id = 1}
-	http.date_write(env.thread.date[:], time.now())
-	xar.init(&env.thread.connections, context.allocator)
-
-	env.prev_td = http.td
-	http.td = &env.thread
-}
-
-destroy_upgrade_env :: proc(env: ^Upgrade_Test_Env) {
-	xar.freelist_destroy(&env.thread.connections)
-	http._server_thread_free_arenas_destroy(&env.thread)
-	http.td = env.prev_td
-}
-
-push_test_connection :: proc(
-	t: ^testing.T,
-	env: ^Upgrade_Test_Env,
-	socket: nbio.TCP_Socket = {},
-	payload: string = "",
-) -> ^http.Connection {
-	c, err := xar.push(&env.thread.connections, http.Connection{
-		socket            = socket,
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	})
-	testing.expect_value(t, err, nil)
-
-	c.transaction_arena.c = c
-	c.temp_arena.c        = c
-	c.scanner.c           = c
-	c.scanner.allocator   = &c.transaction_arena
-
-	tx_alloc := http.transaction_allocator(c)
-	c._vars.allocator         = tx_alloc
-	c.req.headers.allocator  = tx_alloc
-	c.res.headers.allocator  = tx_alloc
-	c.res._buf.allocator      = tx_alloc
-	c.res._deferred.allocator = tx_alloc
-
-	http.budget_init(&c.req.budget, &env.s.opts.request_limits)
-	http.budget_init(&c.res.budget, &env.s.opts.response_limits)
-
-	if len(payload) > 0 {
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-		testing.expect_value(t, buf_err, nil)
-		c.scanner.buf        = buf
-		c.scanner.write_head = copy(buf, payload)
-	}
-
-	return c
-}
-
-destroy_test_connection :: proc(c: ^http.Connection) {
-	// Mock unit tests set c.res._sends > 0 without an active nbio send op to prevent
-	// _check_send_done from destroying the connection before assertions run.
-	c.res._sends = 0
-	http._connection_destroy(c)
-}
-
-active_connection_count :: proc(thread: ^http.Server_Thread) -> (count: int) {
-	iter := xar.freelist_iterator(&thread.connections)
-	for _, _ in xar.freelist_iterate_by_ptr(&iter) {
-		count += 1
-	}
-	return
-}
 
 @(test)
 test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
@@ -100,14 +21,14 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		empty_limits:       http.Limits,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	// 1. 101 Switching Protocols heading omits Content-Length and Connection: close,
 	//    on_send in .Sending runs on_sent with temp_allocator and empty Limits{} clears limits.
 	{
-		c := push_test_connection(t, &env)
+		c := test_conn_push(t, &env)
 		defer http._connection_destroy(c)
 
 		chk := http.context_add(&c.ctx, Upgrade_Check{})
@@ -155,8 +76,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 
 	// 2. 0-byte send error via on_send transitions to .Error without tripping budget_update assert.
 	{
-		c := push_test_connection(t, &env)
-		defer destroy_test_connection(c)
+		c := test_conn_push(t, &env)
+		defer test_conn_destroy_pooled(c)
 
 		chk := http.context_add(&c.ctx, Upgrade_Check{})
 		c.res._state = .Sending
@@ -180,12 +101,12 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 
 	// 3. respond() on a 101 response transitions to .Sent while keeping status == .Switching_Protocols.
 	{
-		c := push_test_connection(t, &env)
-		defer destroy_test_connection(c)
+		c := test_conn_push(t, &env)
+		defer test_conn_destroy_pooled(c)
 
 		c.res.status = .Switching_Protocols
-		c.res._state  = .Sending
-		c.res._sends  = 1
+		c.res._state = .Sending
+		c.res._sends = 1
 		http.respond(&c.ctx)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Sent)
 	}
@@ -197,15 +118,15 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		calls: int,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	// 1. connection_close with pending sends sets .Error, clears scan, ignores send/respond,
 	//    and keeps connection alive while sends > 0.
 	{
-		c := push_test_connection(t, &env, payload = "abcdef")
-		defer destroy_test_connection(c)
+		c := test_conn_push(t, &env, payload = "abcdef")
+		defer test_conn_destroy_pooled(c)
 
 		st := http.context_add(&c.ctx, Close_State{})
 		c.res._state = .Sending
@@ -244,8 +165,8 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 
 	// 2. invalid_request in .Sending state marks .Error without writing an HTTP response heading.
 	{
-		c := push_test_connection(t, &env)
-		defer destroy_test_connection(c)
+		c := test_conn_push(t, &env)
+		defer test_conn_destroy_pooled(c)
 
 		c.res._state = .Sending
 		c.res._sends = 1
@@ -264,22 +185,22 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 		temp_alloc_matched: bool,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	// 1. Transition from transaction_arena into temp_arena and scan 25 frames with
 	//    free_all(context.temp_allocator); memory usage remains flat after warmup.
 	{
 		prev_alloc := env.s.allocator
-		counter := Arena_Counting_Allocator{backing = prev_alloc}
-		env.s.allocator = arena_counting_allocator(&counter)
+		counter := Test_Counting_Allocator{backing = prev_alloc}
+		env.s.allocator = test_counting_allocator(&counter)
 		defer {
 			http._server_thread_free_arenas_destroy(&env.thread)
 			env.s.allocator = prev_alloc
 		}
 
-		c := push_test_connection(t, &env, payload = "AAAA" + "BBBB" + "CCCC")
+		c := test_conn_push(t, &env, payload = "AAAA" + "BBBB" + "CCCC")
 		defer http._connection_destroy(c)
 
 		c.res._state = .Sending
@@ -334,8 +255,8 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 	// 2. Allocator switch on ok == false (transaction_arena -> unused temp_arena with tail == nil),
 	//    and subsequent capacity < MULTIPLIER on temp_arena after free_all emptied s.buf.
 	{
-		c := push_test_connection(t, &env, payload = "hi")
-		defer destroy_test_connection(c)
+		c := test_conn_push(t, &env, payload = "hi")
+		defer test_conn_destroy_pooled(c)
 
 		c.res._state         = .Sending
 		c.res._sends         = 1
@@ -373,7 +294,7 @@ test_scanner_temp_allocator_and_destroy_in_callback :: proc(t: ^testing.T) {
 
 	// 3. Destroying connection from inside Scan_Cb during scanner_pump is ASAN-safe (_destroy_flag).
 	{
-		c := push_test_connection(t, &env, payload = "bye!")
+		c := test_conn_push(t, &env, payload = "bye!")
 		c.res._state = .Sending
 
 		http.scan_temp_bytes(&c.scanner, 4, proc(c: ^http.Connection, data: []byte) {
@@ -391,13 +312,13 @@ test_connection_detach :: proc(t: ^testing.T) {
 		buffered:    []byte,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	// 1. Direct connection_detach clones unread bytes, runs defers LIFO, and releases connection.
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(42), payload = "HTTP\r\nWS\x81\x02hi")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(42), payload = "HTTP\r\nWS\x81\x02hi")
 		c.scanner.read_head = len("HTTP\r\n")
 
 		order := make([dynamic]int, context.allocator)
@@ -419,15 +340,13 @@ test_connection_detach :: proc(t: ^testing.T) {
 		testing.expect_value(t, err, nil)
 		testing.expect_value(t, sock, nbio.TCP_Socket(42))
 		testing.expect_value(t, string(buffered), "WS\x81\x02hi")
-		testing.expect_value(t, len(order), 2)
-		testing.expect_value(t, order[0], 2)
-		testing.expect_value(t, order[1], 1)
+		expect_slice(t, order[:], []int{2, 1})
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 
 	// 2. Empty unread buffer returns buffered == nil.
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(43), payload = "abc")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(43), payload = "abc")
 		c.scanner.read_head = 3
 
 		sock, buffered, err := http.connection_detach(&c.ctx, context.allocator)
@@ -439,7 +358,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 
 	// 3. Detach from inside on_send's on_sent (.Sending, err == nil) and from inside Scan_Cb under ASAN.
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(44), payload = "raw-tail")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(44), payload = "raw-tail")
 		st := Detach_State{t = t}
 		http.context_add(&c.ctx, &st)
 
@@ -461,7 +380,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(45), payload = "HDR!TAIL")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(45), payload = "HDR!TAIL")
 		c.res._state = .Sending
 		st := Detach_State{t = t}
 		http.context_add(&c.ctx, &st)
@@ -486,11 +405,12 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 	Defer_Check :: struct {
 		ran:     bool,
 		matched: bool,
+		socket:  nbio.TCP_Socket,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	outer_buf: [1024]byte
 	outer_arena: mem.Arena
@@ -504,15 +424,16 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		c := http._connection_of_context(ctx)
 		chk.ran     = true
 		chk.matched = context.temp_allocator.data == http.temp_allocator(c).data
+		chk.socket  = c.socket
 
 		scratch, err := make([]byte, 64, context.temp_allocator)
 		assert(err == nil && len(scratch) == 64)
 		assert(c.temp_arena.tail != nil)
 	}
 
-	// 1. _connection_destroy binds context.temp_allocator = temp_allocator(c) for defers and reclaims blocks.
+	// 1. _connection_destroy binds temp_allocator(c) and reclaims blocks.
 	{
-		c := push_test_connection(t, &env)
+		c := test_conn_push(t, &env)
 		chk: Defer_Check
 		http.context_add(&c.ctx, &chk)
 		http.response_defer(&c.ctx, run_check_defer)
@@ -528,7 +449,7 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 
 	// 2. connection_detach binds context.temp_allocator = temp_allocator(c) for defers.
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(77), payload = "tail")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(77), payload = "tail")
 		chk: Defer_Check
 		http.context_add(&c.ctx, &chk)
 		http.response_defer(&c.ctx, run_check_defer)
@@ -541,145 +462,23 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(buffered), "tail")
 		testing.expect(t, chk.ran, "expected response_defer to run on connection_detach")
 		testing.expect(t, chk.matched, "expected temp_allocator(c) bound inside connection_detach defer")
+		testing.expect_value(t, chk.socket, nbio.TCP_Socket(77))
 		testing.expect_value(t, outer_arena.offset, 0)
 		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 }
 
 @(test)
-test_scanner_free_all_pins_buf_while_recv_in_flight :: proc(t: ^testing.T) {
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
-
-	c := push_test_connection(t, &env)
-	defer http._connection_destroy(c)
-
-	dummy_recv: nbio.Operation
-	defer c.curr_recv = nil
-
-	buf, buf_err := make([]byte, http.MULTIPLIER, http.temp_allocator(c))
-	testing.expect_value(t, buf_err, nil)
-	buf[0] = 'x'
-	buf[1] = 'y'
-	c.scanner.allocator  = &c.temp_arena
-	c.scanner.buf        = buf
-	c.scanner.read_head  = 0
-	c.scanner.write_head = 2
-
-	orig_buf_ptr := raw_data(c.scanner.buf)
-	orig_block   := c.temp_arena.tail
-	testing.expect(t, orig_block != nil, "expected scanner buffer block in temp_arena")
-
-	c.curr_recv = &dummy_recv
-
-	scratch1, err1 := make([]byte, 128, http.temp_allocator(c))
-	testing.expect_value(t, err1, nil)
-	scratch1[0] = 1
-
-	scratch2, err2 := make([]byte, 5000, http.temp_allocator(c))
-	testing.expect_value(t, err2, nil)
-	scratch2[0] = 2
-	testing.expect(t, c.temp_arena.tail != orig_block, "expected 5000-byte allocation to push an 8 KiB overflow block")
-
-	free_all(http.temp_allocator(c))
-
-	testing.expect(t, raw_data(c.scanner.buf) == orig_buf_ptr, "expected scanner buffer pointer preserved while recv is in flight")
-	testing.expect_value(t, c.scanner.read_head, 0)
-	testing.expect_value(t, c.scanner.write_head, 2)
-	testing.expect_value(t, string(c.scanner.buf[:2]), "xy")
-	testing.expect(t, c.temp_arena.tail == orig_block, "expected pinned block to become temp_arena.tail")
-	testing.expect(t, orig_block.prev == nil, "expected overflow block unlinked from pinned block")
-	testing.expect(t, env.thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
-	testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer to remain unpoisoned")
-
-	expected_offset := int(uintptr(raw_data(c.scanner.buf)) - uintptr(raw_data(orig_block.data))) + len(c.scanner.buf)
-	testing.expect_value(t, orig_block.offset, expected_offset)
-	testing.expect(t, orig_block.last == raw_data(c.scanner.buf), "expected orig_block.last set to scanner buffer")
-
-	reused, reuse_err := make([]byte, 64, http.temp_allocator(c))
-	testing.expect_value(t, reuse_err, nil)
-	reused[0] = 3
-	testing.expect(t, c.temp_arena.tail == orig_block, "expected trailing space in pinned block to be reused after rewind")
-
-	c.curr_recv = nil
-	c.scanner.read_head = 2
-	free_all(http.temp_allocator(c))
-	testing.expect(t, c.scanner.buf == nil, "expected empty scanner buf cleared once curr_recv == nil")
-	testing.expect(t, c.temp_arena.tail == nil, "expected temp_arena freed once curr_recv == nil")
-}
-
-@(test)
 test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
-	Fail_Toggle_Allocator :: struct {
-		backing: mem.Allocator,
-		fail:    bool,
-	}
-
-	fail_toggle_allocator :: proc(ft: ^Fail_Toggle_Allocator) -> mem.Allocator {
-		return {
-			data = ft,
-			procedure = proc(
-				allocator_data: rawptr,
-				mode: mem.Allocator_Mode,
-				size, alignment: int,
-				old_memory: rawptr,
-				old_size: int,
-				location := #caller_location,
-			) -> ([]byte, mem.Allocator_Error) {
-				ft := (^Fail_Toggle_Allocator)(allocator_data)
-				if ft.fail {
-					#partial switch mode {
-					case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-						return nil, .Out_Of_Memory
-					}
-				}
-				return ft.backing.procedure(ft.backing.data, mode, size, alignment, old_memory, old_size, location)
-			},
-		}
-	}
-
-	make_oom_conn :: proc(t: ^testing.T, s: ^http.Server, thread: ^http.Server_Thread) -> ^http.Connection {
-		c, err := xar.push(&thread.connections, http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		})
-		testing.expect_value(t, err, nil)
-
-		c.transaction_arena.c = c
-		c.temp_arena.c        = c
-		c.scanner.c           = c
-		c.scanner.allocator   = &c.transaction_arena
-
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator         = tx_alloc
-		c.req.headers.allocator  = tx_alloc
-		c.res.headers.allocator  = tx_alloc
-		c.res._buf.allocator      = tx_alloc
-		c.res._deferred.allocator = tx_alloc
-
-		http.budget_init(&c.req.budget, &s.opts.request_limits)
-		http.budget_init(&c.res.budget, &s.opts.response_limits)
-		return c
-	}
-
 	// 1. context_add, response_defer, mid-heading write_response_heading OOM, and send_heading teardown.
 	{
-		ft := Fail_Toggle_Allocator{backing = context.allocator}
-		s := http.make_server({}, fail_toggle_allocator(&ft))
+		ft := Test_Fail_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_fail_allocator(&ft), with_connections = true)
+		defer test_env_destroy(&env)
 
-		thread := http.Server_Thread{s = &s, id = 1}
-		http.date_write(thread.date[:], time.now())
-		xar.init(&thread.connections, context.allocator)
-		defer xar.freelist_destroy(&thread.connections)
-
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
-
-		c := make_oom_conn(t, &s, &thread)
-		http._server_thread_free_arenas_destroy(&thread)
+		c := test_conn_push(t, &env)
+		http._server_thread_free_arenas_destroy(&env.thread)
 		ft.fail = true
 
 		ptr, add_err := http.context_add(&c.ctx, int(42))
@@ -719,25 +518,17 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		context.logger = log.nil_logger()
 		http.send_heading(&c.ctx)
 		context.logger = prev_logger
-		testing.expect_value(t, active_connection_count(&thread), 0)
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 
 	// 2. scanner_reset OOM, _scanner_free_all OOM fallback pinning, and scanner_pump OOM teardown.
 	{
-		ft := Fail_Toggle_Allocator{backing = context.allocator}
-		s := http.make_server({}, fail_toggle_allocator(&ft))
+		ft := Test_Fail_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_fail_allocator(&ft), with_connections = true)
+		defer test_env_destroy(&env)
 
-		thread := http.Server_Thread{s = &s, id = 1}
-		http.date_write(thread.date[:], time.now())
-		xar.init(&thread.connections, context.allocator)
-		defer xar.freelist_destroy(&thread.connections)
-
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
-
-		c := make_oom_conn(t, &s, &thread)
+		c := test_conn_push(t, &env)
 		c.scanner.allocator = &c.temp_arena
 
 		buf, buf_err := make([]byte, http.MULTIPLIER, http.temp_allocator(c))
@@ -753,7 +544,7 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		overflow[0] = 1
 		testing.expect(t, c.temp_arena.tail != orig_block, "expected overflow block in temp_arena")
 
-		http._server_thread_free_arenas_destroy(&thread)
+		http._server_thread_free_arenas_destroy(&env.thread)
 		ft.fail = true
 
 		reset_err := http.scanner_reset(&c.scanner, c)
@@ -762,17 +553,17 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 
 		free_all(http.temp_allocator(c))
 		testing.expect(t, c.temp_arena.tail == orig_block, "expected _scanner_free_all OOM fallback to pin existing buf block")
-		testing.expect(t, thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
+		testing.expect(t, env.thread.free_arenas[1].head != nil, "expected 8 KiB overflow block returned to thread freelist")
 		testing.expect(t, sanitizer.address_region_is_poisoned(c.scanner.buf) == nil, "expected pinned scanner buffer unpoisoned")
 		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "hello")
 
-		http._server_thread_free_arenas_destroy(&thread)
+		http._server_thread_free_arenas_destroy(&env.thread)
 		c.res._state = .Handling
 		prev_logger := context.logger
 		context.logger = log.nil_logger()
 		http.scan_bytes(&c.scanner, 16, proc(c: ^http.Connection, data: []byte) {})
 		context.logger = prev_logger
-		testing.expect_value(t, active_connection_count(&thread), 0)
+		testing.expect_value(t, active_connection_count(&env.thread), 0)
 	}
 }
 
@@ -787,13 +578,13 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 		got_bytes:   [4]byte,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	// 1. on_sent calls _connection_destroy(c) when err != nil; no double-destroy or UAF.
 	{
-		c := push_test_connection(t, &env)
+		c := test_conn_push(t, &env)
 		st: Cb_State
 		http.context_add(&c.ctx, &st)
 		c.res._state = .Sending
@@ -817,7 +608,7 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 
 	// 2. on_sent calls connection_detach(c) when err != nil; clones unread bytes and skips _check_send_done.
 	{
-		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(88), payload = "leftover")
+		c := test_conn_push(t, &env, socket = nbio.TCP_Socket(88), payload = "leftover")
 		st: Cb_State
 		http.context_add(&c.ctx, &st)
 		c.res._state = .Sending
@@ -846,7 +637,7 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 
 	// 3. Nested on_send (err != nil) -> on_sent -> scan_temp_bytes -> Scan_Cb -> _connection_destroy(c).
 	{
-		c := push_test_connection(t, &env, payload = "ABCD")
+		c := test_conn_push(t, &env, payload = "ABCD")
 		st: Cb_State
 		http.context_add(&c.ctx, &st)
 		c.res._state = .Sending
@@ -897,9 +688,9 @@ test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
 		socket:  nbio.TCP_Socket,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
 	cases := []Body_Case{
 		{"content-length", "Content-Length", "10", "hello", nbio.TCP_Socket(91)},
@@ -907,13 +698,12 @@ test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
 	}
 
 	for tc in cases {
-		c := push_test_connection(t, &env, socket = tc.socket, payload = tc.payload)
+		c := test_conn_push(t, &env, socket = tc.socket, payload = tc.payload)
 		c.req.line              = {method = .Post, target = "/upload", version = {1, 1}}
 		c.res._state            = .Handling
 		c.req.has_consumed_body = false
 		http.budget_init(&c.req.budget, &env.s.opts.body_limits)
-		testing.expect_value(t, http.headers_set(&c.req.headers, tc.hdr_key, tc.hdr_val), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, c, {{tc.hdr_key, tc.hdr_val}})
 
 		st: Body_Detach_State
 		http.context_add(&c.ctx, &st)
@@ -944,11 +734,11 @@ test_keepalive_deferred_lifo_and_next_request :: proc(t: ^testing.T) {
 		temp_matched: bool,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
-	c := push_test_connection(t, &env, payload = "next")
+	c := test_conn_push(t, &env, payload = "next")
 	defer http._connection_destroy(c)
 
 	c.req.line              = {method = .Get, target = "/", version = {1, 1}}
@@ -982,12 +772,7 @@ test_keepalive_deferred_lifo_and_next_request :: proc(t: ^testing.T) {
 	http._check_send_done(c)
 
 	testing.expect(t, st.temp_matched, "expected temp_allocator(c) bound during keep-alive response_defer")
-	testing.expect_value(t, len(st.order), 3)
-	if len(st.order) == 3 {
-		testing.expect_value(t, st.order[0], 2)
-		testing.expect_value(t, st.order[1], 3)
-		testing.expect_value(t, st.order[2], 1)
-	}
+	expect_slice(t, st.order[:], []int{2, 3, 1})
 	testing.expect_value(t, len(c.res._deferred), 0)
 	testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "next")
 	testing.expect_value(t, active_connection_count(&env.thread), 1)
@@ -1014,11 +799,11 @@ test_response_defer_with_user_data :: proc(t: ^testing.T) {
 		v:   u16,
 	}
 
-	env: Upgrade_Test_Env
-	setup_upgrade_env(t, &env)
-	defer destroy_upgrade_env(&env)
+	env: Test_Env
+	test_env_init(&env, with_connections = true)
+	defer test_env_destroy(&env)
 
-	c := push_test_connection(t, &env)
+	c := test_conn_push(t, &env)
 	defer http._connection_destroy(c)
 	c.req.line              = {method = .Get, target = "/", version = {1, 1}}
 	c.req.has_consumed_body = true
@@ -1067,7 +852,6 @@ test_response_defer_with_user_data :: proc(t: ^testing.T) {
 	testing.expect_value(t, http.response_defer(&c.ctx, local_large, proc(_: ^http.Ctx, lp: Large_Payload) {
 		append(lp.out, Event{kind = "large", tag = lp.tag, n = lp.n})
 	}), nil)
-	// Clobber caller stack copy to prove defer observes cloned payload.
 	local_large = {}
 
 	// 2-arg form interoperates in the same LIFO stack.
@@ -1079,12 +863,11 @@ test_response_defer_with_user_data :: proc(t: ^testing.T) {
 	http._check_send_done(c)
 
 	testing.expect_value(t, len(c.res._deferred), 0)
-	testing.expect_value(t, len(events), 5)
-	if len(events) == 5 {
-		testing.expect_value(t, events[0], Event{kind = "plain"})
-		testing.expect_value(t, events[1], Event{kind = "large", tag = "cloned", n = 99})
-		testing.expect_value(t, events[2], Event{kind = "time", nsec = 123456789})
-		testing.expect_value(t, events[3], Event{kind = "u16", u16v = 0xBEEF})
-		testing.expect_value(t, events[4], Event{kind = "ptr"})
-	}
+	expect_slice(t, events[:], []Event{
+		{kind = "plain"},
+		{kind = "large", tag = "cloned", n = 99},
+		{kind = "time", nsec = 123456789},
+		{kind = "u16", u16v = 0xBEEF},
+		{kind = "ptr"},
+	})
 }

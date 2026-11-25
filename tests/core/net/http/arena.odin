@@ -1,55 +1,17 @@
 package test_core_net_http
 
-import "base:runtime"
-
 import "core:mem"
-import "core:sync"
 import "core:testing"
 import "core:thread"
 
 import http "core:http2"
 
-Arena_Counting_Allocator :: struct {
-	backing:     mem.Allocator,
-	alloc_count: int,
-	free_count:  int,
-}
-
-arena_counting_allocator :: proc(c: ^Arena_Counting_Allocator) -> mem.Allocator {
-	return {
-		data = c,
-		procedure = proc(
-			allocator_data: rawptr,
-			mode: mem.Allocator_Mode,
-			size, alignment: int,
-			old_memory: rawptr,
-			old_size: int,
-			location := #caller_location,
-		) -> ([]byte, mem.Allocator_Error) {
-			c := (^Arena_Counting_Allocator)(allocator_data)
-			#partial switch mode {
-			case .Alloc, .Alloc_Non_Zeroed:
-				sync.atomic_add(&c.alloc_count, 1)
-			case .Free:
-				if old_memory != nil {
-					sync.atomic_add(&c.free_count, 1)
-				}
-			}
-			return c.backing.procedure(c.backing.data, mode, size, alignment, old_memory, old_size, location)
-		},
-	}
-}
-
 @(test)
 test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
 	a1 := http.get_arena(nil)
 	bs1, alloc_err1 := http.arena_alloc(&a1, 5000, mem.DEFAULT_ALIGNMENT)
@@ -62,8 +24,8 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	first_block := a1.tail
 
 	http.arena_destroy(&a1)
-	testing.expect(t, thread.free_arenas[1].head == first_block, "expected 8 KiB block in bucket 1 freelist")
-	testing.expect(t, thread.free_arenas[0].head == nil, "expected bucket 0 freelist to remain empty")
+	testing.expect(t, env.thread.free_arenas[1].head == first_block, "expected 8 KiB block in bucket 1 freelist")
+	testing.expect(t, env.thread.free_arenas[0].head == nil, "expected bucket 0 freelist to remain empty")
 
 	a2 := http.get_arena(nil)
 	bs2, alloc_err2 := http.arena_alloc(&a2, 5000, mem.DEFAULT_ALIGNMENT)
@@ -71,22 +33,18 @@ test_arena_reuses_non_power_of_two_block :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(bs2), 5000)
 	testing.expect(t, a2.tail == first_block, "expected bucket 1 block to be reused")
 	testing.expect_value(t, counter.alloc_count, 1)
-	testing.expect(t, thread.free_arenas[1].head == nil, "expected bucket 1 freelist to be empty after reuse")
+	testing.expect(t, env.thread.free_arenas[1].head == nil, "expected bucket 1 freelist to be empty after reuse")
 
 	http.arena_destroy(&a2)
-	http._server_thread_free_arenas_destroy(&thread)
+	http._server_thread_free_arenas_destroy(&env.thread)
 	testing.expect_value(t, counter.free_count, counter.alloc_count)
 }
 
 @(test)
 test_arena_resize_and_free :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	a := http.get_arena(nil)
 	defer http.arena_destroy(&a)
@@ -122,13 +80,9 @@ test_arena_resize_and_free :: proc(t: ^testing.T) {
 
 @(test)
 test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	a_big := http.get_arena(nil)
 	big_bs, big_err := http.arena_alloc(&a_big, 50_000, mem.DEFAULT_ALIGNMENT)
@@ -139,7 +93,7 @@ test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(big_block.data), 64 * mem.Kilobyte)
 
 	http.arena_destroy(&a_big)
-	testing.expect(t, thread.free_arenas[4].head == big_block, "expected 64 KiB block cached in bucket 4")
+	testing.expect(t, env.thread.free_arenas[4].head == big_block, "expected 64 KiB block cached in bucket 4")
 
 	// Small 4 KiB request must NOT steal the cached 64 KiB block from bucket 4.
 	a_small := http.get_arena(nil)
@@ -149,19 +103,15 @@ test_arena_no_giant_block_stealing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(small_bs), 64)
 	testing.expect(t, a_small.tail != big_block, "expected small request not to steal cached 64 KiB block")
 	testing.expect_value(t, len(a_small.tail.data), 4096)
-	testing.expect(t, thread.free_arenas[4].head == big_block, "expected 64 KiB block to remain in bucket 4")
+	testing.expect(t, env.thread.free_arenas[4].head == big_block, "expected 64 KiB block to remain in bucket 4")
 }
 
 @(test)
 test_arena_oversized_block_not_pooled :: proc(t: ^testing.T) {
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
 	max_pooled := 16 * mem.Megabyte
 	req_size := max_pooled + 4096
@@ -175,7 +125,7 @@ test_arena_oversized_block_not_pooled :: proc(t: ^testing.T) {
 	testing.expect_value(t, counter.alloc_count, 1)
 
 	http.arena_destroy(&a)
-	for b in thread.free_arenas {
+	for b in env.thread.free_arenas {
 		testing.expect(t, b.head == nil, "expected oversized block not to be placed in free_arenas")
 	}
 	testing.expect_value(t, counter.free_count, 1)
@@ -183,13 +133,9 @@ test_arena_oversized_block_not_pooled :: proc(t: ^testing.T) {
 
 @(test)
 test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	a := http.bootstrap_arena(nil)
 	testing.expect(t, a != nil && a.tail != nil, "expected bootstrapped arena and initial block")
@@ -204,19 +150,15 @@ test_bootstrap_arena_destroy :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(large), 5000)
 
 	http.arena_destroy(a)
-	testing.expect(t, thread.free_arenas[0].head != nil, "expected initial 4 KiB block in bucket 0 freelist")
-	testing.expect(t, thread.free_arenas[1].head != nil, "expected overflow 8 KiB block in bucket 1 freelist")
+	testing.expect(t, env.thread.free_arenas[0].head != nil, "expected initial 4 KiB block in bucket 0 freelist")
+	testing.expect(t, env.thread.free_arenas[1].head != nil, "expected overflow 8 KiB block in bucket 1 freelist")
 }
 
 @(test)
 test_arena_resize_shrink_and_aliasing :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	// 1. Non-tail shrink with stricter alignment forcing a new block.
 	{
@@ -260,15 +202,11 @@ test_arena_resize_shrink_and_aliasing :: proc(t: ^testing.T) {
 
 		b1, b1_err := http.arena_alloc(&a, 64, 8)
 		testing.expect_value(t, b1_err, nil)
-		for &b in b1 {
-			b = 0x11
-		}
+		for &b in b1 { b = 0x11 }
 
 		b2, b2_err := http.arena_alloc(&a, 64, 8)
 		testing.expect_value(t, b2_err, nil)
-		for &b in b2 {
-			b = 0x22
-		}
+		for &b in b2 { b = 0x22 }
 
 		same, same_err := http.arena_resize(&a, b1, 64, 8)
 		testing.expect_value(t, same_err, nil)
@@ -350,13 +288,9 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 	backing_arena: mem.Arena
 	mem.arena_init(&backing_arena, backing_buf)
 
-	s := http.make_server({}, mem.arena_allocator(&backing_arena))
-
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env, allocator = mem.arena_allocator(&backing_arena))
+	defer test_env_destroy(&env)
 
 	// 1. Pooled 4 KiB block with worst-case offset for align = 128.
 	{
@@ -382,7 +316,7 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 
 	// 2. Pooled 8 KiB block with worst-case offset for align = 4096.
 	{
-		http._server_thread_free_arenas_destroy(&thread)
+		http._server_thread_free_arenas_destroy(&env.thread)
 		mem.arena_free_all(&backing_arena)
 		misalign_next_block_data_start(t, &backing_arena, 4096)
 
@@ -406,7 +340,7 @@ test_arena_high_alignment_reuse_and_block_alignment :: proc(t: ^testing.T) {
 
 	// 3. align = 1 first allocation after unaligned offset in backing still yields aligned _Arena_Block.
 	{
-		http._server_thread_free_arenas_destroy(&thread)
+		http._server_thread_free_arenas_destroy(&env.thread)
 		mem.arena_free_all(&backing_arena)
 		_, bump_err := mem.arena_alloc_bytes(&backing_arena, 1, 1)
 		testing.expect_value(t, bump_err, nil)
@@ -447,13 +381,10 @@ test_arena_oom_propagation :: proc(t: ^testing.T) {
 	backing_buf: [1024]byte
 	backing_arena: mem.Arena
 	mem.arena_init(&backing_arena, backing_buf[:])
-	s := http.make_server({}, mem.arena_allocator(&backing_arena))
 
-	thread := http.Server_Thread{s = &s}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env, allocator = mem.arena_allocator(&backing_arena))
+	defer test_env_destroy(&env)
 
 	blk, blk_err := http._server_thread_get_free_arena()
 	testing.expect_value(t, blk_err, mem.Allocator_Error.Out_Of_Memory)
@@ -482,18 +413,13 @@ test_arena_oom_propagation :: proc(t: ^testing.T) {
 @(test)
 test_arena_cross_thread_worker_destroy :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track)
 	defer mem.tracking_allocator_destroy(&track)
 
-	counter := Arena_Counting_Allocator{backing = mem.tracking_allocator(&track)}
-	s := http.make_server({}, arena_counting_allocator(&counter))
-
-	srv_thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &srv_thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&srv_thread)
+	counter := Test_Counting_Allocator{backing = mem.tracking_allocator(&track)}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
 	boot, boot_err := http.bootstrap_arena(nil)
 	testing.expect_value(t, boot_err, nil)
@@ -556,7 +482,7 @@ test_arena_cross_thread_worker_destroy :: proc(t: ^testing.T) {
 	testing.expect(t, work.td_was_nil, "expected http.td to be nil on spawned worker thread")
 	testing.expect(t, work.bytes_valid, "expected arena bytes intact across threads")
 	testing.expect(t, val_arena.tail == nil, "expected val_arena.tail cleared after worker destroy")
-	for b in srv_thread.free_arenas {
+	for b in env.thread.free_arenas {
 		testing.expect(t, b.head == nil, "expected worker destroy not to push into server free_arenas")
 	}
 	testing.expect_value(t, counter.free_count, 4)
@@ -567,21 +493,16 @@ test_arena_cross_thread_worker_destroy :: proc(t: ^testing.T) {
 @(test)
 test_arena_cross_thread_worker_alloc_and_server_reclaim :: proc(t: ^testing.T) {
 	server_track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&server_track, context.allocator)
-	server_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&server_track)
 	defer mem.tracking_allocator_destroy(&server_track)
 
 	worker_track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&worker_track, context.allocator)
-	worker_track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&worker_track)
 	defer mem.tracking_allocator_destroy(&worker_track)
 
-	s := http.make_server({}, mem.tracking_allocator(&server_track))
-	srv_thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &srv_thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&srv_thread)
+	env: Test_Env
+	test_env_init(&env, allocator = mem.tracking_allocator(&server_track))
+	defer test_env_destroy(&env)
 
 	a := http.get_arena(nil)
 
@@ -651,10 +572,10 @@ test_arena_cross_thread_worker_alloc_and_server_reclaim :: proc(t: ^testing.T) {
 
 	// Destroying back on the server thread recycles worker-allocated power-of-two blocks into free_arenas.
 	http.arena_destroy(&a)
-	testing.expect(t, srv_thread.free_arenas[0].head != nil, "expected 4 KiB block recycled into server thread bucket 0")
-	testing.expect(t, srv_thread.free_arenas[1].head != nil, "expected 8 KiB blocks recycled into server thread bucket 1")
+	testing.expect(t, env.thread.free_arenas[0].head != nil, "expected 4 KiB block recycled into server thread bucket 0")
+	testing.expect(t, env.thread.free_arenas[1].head != nil, "expected 8 KiB blocks recycled into server thread bucket 1")
 
-	http._server_thread_free_arenas_destroy(&srv_thread)
+	http._server_thread_free_arenas_destroy(&env.thread)
 	testing.expect_value(t, server_track.current_memory_allocated, 0)
 	testing.expect_value(t, len(server_track.bad_free_array), 0)
 }
@@ -662,11 +583,9 @@ test_arena_cross_thread_worker_alloc_and_server_reclaim :: proc(t: ^testing.T) {
 @(test)
 test_arena_cross_thread_destroy_after_server_out_of_scope :: proc(t: ^testing.T) {
 	make_bootstrapped_from_local_server :: proc(t: ^testing.T, backing: mem.Allocator) -> (^http.Arena, []byte) {
-		s := http.make_server({}, backing)
-		local_thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &local_thread
-		defer http.td = prev_td
+		env: Test_Env
+		test_env_init(&env, allocator = backing)
+		defer http.td = env.prev_td
 
 		boot, err := http.bootstrap_arena(nil)
 		testing.expect_value(t, err, nil)
@@ -677,8 +596,7 @@ test_arena_cross_thread_destroy_after_server_out_of_scope :: proc(t: ^testing.T)
 	}
 
 	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track)
 	defer mem.tracking_allocator_destroy(&track)
 
 	boot, payload := make_bootstrapped_from_local_server(t, mem.tracking_allocator(&track))
@@ -712,13 +630,11 @@ test_arena_cross_thread_destroy_after_server_out_of_scope :: proc(t: ^testing.T)
 @(test)
 test_arena_multi_server_allocator_isolation :: proc(t: ^testing.T) {
 	track_a: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track_a, context.allocator)
-	track_a.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track_a)
 	defer mem.tracking_allocator_destroy(&track_a)
 
 	track_b: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track_b, context.allocator)
-	track_b.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track_b)
 	defer mem.tracking_allocator_destroy(&track_b)
 
 	s_a := http.make_server({}, mem.tracking_allocator(&track_a))
@@ -771,8 +687,8 @@ test_arena_multi_server_allocator_isolation :: proc(t: ^testing.T) {
 
 @(test)
 test_arena_same_server_different_worker_thread :: proc(t: ^testing.T) {
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	s := http.make_server({}, test_counting_allocator(&counter))
 
 	thread_1 := http.Server_Thread{s = &s, id = 1}
 	thread_2 := http.Server_Thread{s = &s, id = 2}
@@ -821,16 +737,12 @@ test_arena_same_server_different_worker_thread :: proc(t: ^testing.T) {
 @(test)
 test_arena_temp_free_all_without_td :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track)
 	defer mem.tracking_allocator_destroy(&track)
 
-	s := http.make_server({}, mem.tracking_allocator(&track))
-	srv_thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &srv_thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&srv_thread)
+	env: Test_Env
+	test_env_init(&env, allocator = mem.tracking_allocator(&track))
+	defer test_env_destroy(&env)
 
 	c := http.Connection{
 		temp_arena = http.get_arena(nil),
@@ -879,4 +791,105 @@ test_arena_temp_free_all_without_td :: proc(t: ^testing.T) {
 	testing.expect(t, work.preserved_unread, "expected unread scanner bytes preserved across _scanner_free_all on worker thread")
 	testing.expect_value(t, track.current_memory_allocated, 0)
 	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(test)
+test_free_arenas_low_watermark_trim :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	test_tracking_init(&track)
+	defer mem.tracking_allocator_destroy(&track)
+
+	env: Test_Env
+	test_env_init(&env, allocator = mem.tracking_allocator(&track))
+	defer test_env_destroy(&env)
+
+	push_blocks :: proc(t: ^testing.T, n: int, size: int) {
+		blocks := make([]^http._Arena_Block, n, context.temp_allocator)
+		for i in 0 ..< n {
+			b, err := http._server_thread_get_free_arena(size)
+			testing.expect_value(t, err, nil)
+			blocks[i] = b
+		}
+		for b in blocks {
+			http._server_thread_put_free_arena(b)
+		}
+	}
+
+	// 1. Steady traffic (all cached blocks acquired and released during interval) frees 0 blocks.
+	push_blocks(t, 4, 1)
+	http._server_thread_free_arenas_trim(&env.thread) // Latch watermark at 4.
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(4))
+	testing.expect_value(t, env.thread.free_arenas[0].min_count, u32(4))
+
+	push_blocks(t, 4, 1) // Acquires and releases all 4, dropping min_count to 0.
+	testing.expect_value(t, env.thread.free_arenas[0].min_count, u32(0))
+	http._server_thread_free_arenas_trim(&env.thread)
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(4))
+
+	// 2. Idle excess halves each trim interval until fully reclaimed (4 -> 2 -> 1 -> 0).
+	http._server_thread_free_arenas_trim(&env.thread)
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(2))
+	http._server_thread_free_arenas_trim(&env.thread)
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(1))
+	http._server_thread_free_arenas_trim(&env.thread)
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(0))
+	testing.expect(t, env.thread.free_arenas[0].head == nil, "expected empty freelist after full decay")
+	testing.expect_value(t, track.current_memory_allocated, 0)
+
+	// 3. Partial activity trims only half of the untouched low-watermark excess.
+	push_blocks(t, 6, 1)
+	http._server_thread_free_arenas_trim(&env.thread) // Latch watermark at 6.
+	push_blocks(t, 2, 1)                              // Uses 2 blocks, lowering min_count to 4.
+	testing.expect_value(t, env.thread.free_arenas[0].min_count, u32(4))
+	http._server_thread_free_arenas_trim(&env.thread) // Frees (4+1)/2 = 2 blocks.
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(4))
+
+	http._server_thread_free_arenas_destroy(&env.thread)
+	testing.expect_value(t, track.current_memory_allocated, 0)
+
+	// 4. Per-tick budget caps frees at MAX_ARENA_TRIM_PER_TICK and drains larger buckets first.
+	push_blocks(t, 160, 1)             // Bucket 0 (4 KiB)
+	push_blocks(t, 4, 16*1024 - 128)   // Bucket 2 (16 KiB)
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(160))
+	testing.expect_value(t, env.thread.free_arenas[2].count, u32(4))
+
+	http._server_thread_free_arenas_trim(&env.thread) // Latch watermarks.
+	http._server_thread_free_arenas_trim(&env.thread) // Trims 2 from bucket 2 and 62 from bucket 0 (64 total).
+	testing.expect_value(t, env.thread.free_arenas[2].count, u32(2))
+	testing.expect_value(t, env.thread.free_arenas[0].count, u32(98))
+
+	http._server_thread_free_arenas_destroy(&env.thread)
+	testing.expect_value(t, track.current_memory_allocated, 0)
+	testing.expect_value(t, len(track.bad_free_array), 0)
+}
+
+@(test)
+test_arena_free_computes_offset_from_ptr :: proc(t: ^testing.T) {
+	arena := http.Arena{backing = context.allocator}
+	defer http.arena_destroy(&arena)
+
+	a, err_a := http.arena_alloc(&arena, 16, 8)
+	testing.expect_value(t, err_a, nil)
+	for &x in a { x = 0xAA }
+
+	b, err_b := http.arena_alloc(&arena, 128, 64)
+	testing.expect_value(t, err_b, nil)
+
+	// Shrink b in place to 1 byte, then free with the stale pre-shrink size (128).
+	b_shrunk, resize_err := http.arena_resize(&arena, b, 1, 64)
+	testing.expect_value(t, resize_err, nil)
+
+	free_err := http.arena_free(&arena, raw_data(b_shrunk), 128)
+	testing.expect_value(t, free_err, nil)
+	testing.expect(t, arena.tail.offset >= size_of(http._Arena_Block) + len(a), "arena offset must not underflow past earlier allocations or block header")
+
+	c, err_c := http.arena_alloc(&arena, 32, 8)
+	testing.expect_value(t, err_c, nil)
+	testing.expect_value(t, len(c), 32)
+	for x in a {
+		testing.expect_value(t, x, u8(0xAA))
+	}
+
+	non_tail_err := http.arena_free(&arena, raw_data(a), len(a))
+	testing.expect_value(t, non_tail_err, mem.Allocator_Error.Mode_Not_Implemented)
 }

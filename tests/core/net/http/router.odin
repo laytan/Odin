@@ -7,43 +7,53 @@ import "core:testing"
 import http "core:http2"
 
 @(test)
+test_route_conflicts :: proc(t: ^testing.T) {
+	Case :: struct {
+		a, b:     string,
+		conflict: bool,
+	}
+
+	cases := [?]Case{
+		{"/a/b",          "/a/b",              true},
+		{"/a/:param",     "/a/:param2",        true},
+		{"/a/b",          "/a/:param",         false},
+		{"/a/b/c",        "/a/b/:param",       false},
+		{"/a/:param",     "/:param/:param2",   false},
+		{"/a/:param",     "/:param/b",         true},
+		{"/a/:param/c",   "/:param/b/c",       true},
+		{"/a/b/:param",   "/a/c/:param",       false},
+		{"/a/:param",     "/b/:param",         false},
+		{"/a/b",          "/a/b/c",            false},
+		{"/:param",       "/:param/:param2",   false},
+		{"/a/:param/c",   "/:param/b/:param",  false},
+		{"/a/b/c",        "/a/:param/:param2", false},
+		{"/:param",       "/users/:id",        false},
+		{"/:param/b",     "/a/:param",         true},
+		{"/v1/:id/name",  "/v1/:id/type",      false},
+		{"/apple/:param", "/banana/:param",    false},
+		{"/a/:year/11",   "/a/year/:month",    true},
+		{"/static/*",     "/static/*",         true},
+		{"/static",       "/static/*",         false},
+		{"/*",            "/*",                true},
+		{"*",             "*",                 true},
+	}
+
+	noop := proc(ctx: ^http.Ctx) {}
+
+	for tc, i in cases {
+		tt: http._Route_Trie
+		tt.segments.allocator = context.allocator
+		defer http._route_trie_destroy(tt, context.allocator)
+
+		http._route_trie_add(&tt, tc.a, {noop}, context.allocator)
+		_, got_conflict := http._route_trie_check_conflicts(tt, tc.b).?
+		testing.expectf(t, got_conflict == tc.conflict, "%d: routes %q and %q expected conflict=%v, got %v", i, tc.a, tc.b, tc.conflict, got_conflict)
+	}
+}
+
+@(test)
 test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
-	http.headers_init_hash_secret()
-
-	setup_conn :: proc(t: ^testing.T, c: ^http.Connection, payload: string) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c = c
-
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.res.headers.allocator = tx_alloc
-		c.res._buf.allocator = tx_alloc
-		c.scanner.c = c
-		c.scanner.allocator = &c.transaction_arena
-
-		c.res._state = .Handling
-		c.res.budget.max = 0
-		c.res._sends = 1
-
-		if len(payload) > 0 {
-			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-			testing.expect_value(t, buf_err, nil)
-			c.scanner.buf = buf
-			c.scanner.write_head = copy(buf, payload)
-		}
-	}
-
-	cleanup_conn :: proc(c: ^http.Connection) {
-		http.temp_allocator_destroy(c)
-		http.transaction_allocator_destroy(c)
-	}
-
-	// 1. Direct handler on Server_Options.handler sees .Head (not rewritten to .Get).
+	// 1. Direct handler on Server_Options.handlers sees .Head (not rewritten to .Get).
 	{
 		Direct_State :: struct {
 			called:     bool,
@@ -65,17 +75,13 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			http.respond(ctx)
 		})
 
-		s := http.make_server({handlers = {h}})
-
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		env: Test_Env
+		test_env_init(&env, opts = {handlers = {h}})
+		defer test_env_destroy(&env)
 
 		c: http.Connection
-		setup_conn(t, &c, "HEAD /direct HTTP/1.1\r\nHost: localhost\r\n\r\n")
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, payload = "HEAD /direct HTTP/1.1\r\nHost: localhost\r\n\r\n", mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
 
 		http._serve_connection(&c)
 		testing.expect(t, state.called, "expected direct handler to run")
@@ -83,13 +89,9 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		testing.expect(t, !state.wants_body, "expected wants_body to be false for HEAD")
 	}
 
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	// 2. Router falls back from .Head to .Get (before route_all), preserves .Head, and extracts :param.
 	{
@@ -126,11 +128,11 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			http.respond(ctx)
 		}))
 
-		s.opts.handlers = {http.router(&r)}
+		env.s.opts.handlers = {http.router(&r)}
 
 		c: http.Connection
-		setup_conn(t, &c, "HEAD /users/42 HTTP/1.1\r\nHost: localhost\r\n\r\n")
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, payload = "HEAD /users/42 HTTP/1.1\r\nHost: localhost\r\n\r\n", mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
 
 		http._serve_connection(&c)
 		testing.expect(t, state.get_called, "expected HEAD to fall back to GET route")
@@ -171,12 +173,12 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			http.respond(ctx)
 		}))
 
-		s.opts.handlers = {http.router(&r)}
+		env.s.opts.handlers = {http.router(&r)}
 
 		{
 			c: http.Connection
-			setup_conn(t, &c, "HEAD /custom HTTP/1.1\r\nHost: localhost\r\n\r\n")
-			defer cleanup_conn(&c)
+			test_conn_init(t, &c, &env, payload = "HEAD /custom HTTP/1.1\r\nHost: localhost\r\n\r\n", mock_send = true, init_budgets = false)
+			defer test_conn_destroy(&c)
 
 			http._serve_connection(&c)
 			testing.expect(t, state.head_called, "expected explicit route_head handler")
@@ -187,8 +189,8 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		state = {}
 		{
 			c: http.Connection
-			setup_conn(t, &c, "GET /custom HTTP/1.1\r\nHost: localhost\r\n\r\n")
-			defer cleanup_conn(&c)
+			test_conn_init(t, &c, &env, payload = "GET /custom HTTP/1.1\r\nHost: localhost\r\n\r\n", mock_send = true, init_budgets = false)
+			defer test_conn_destroy(&c)
 
 			http._serve_connection(&c)
 			testing.expect(t, state.get_called, "expected GET handler")
@@ -220,11 +222,11 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		defer http.router_destroy(root)
 		http.route_all(&root, "/api/*", http.router(&api))
 
-		s.opts.handlers = {http.router(&root)}
+		env.s.opts.handlers = {http.router(&root)}
 
 		c: http.Connection
-		setup_conn(t, &c, "HEAD /api/items HTTP/1.1\r\nHost: localhost\r\n\r\n")
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, payload = "HEAD /api/items HTTP/1.1\r\nHost: localhost\r\n\r\n", mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
 
 		http._serve_connection(&c)
 		testing.expect(t, state.called, "expected nested sub-router GET route to handle HEAD")
@@ -238,13 +240,9 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 		http.route_post(&r, "/only-post", proc(ctx: ^http.Ctx) {})
 
 		c: http.Connection
-		setup_conn(t, &c, "")
-		defer cleanup_conn(&c)
-		c.req.line = {
-			method  = .Head,
-			target  = "/only-post",
-			version = {1, 1},
-		}
+		test_conn_init(t, &c, &env, mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.line = {method = .Head, target = "/only-post", version = {1, 1}}
 
 		http.handle({http.router(&r)}, &c.ctx)
 		testing.expect_value(t, c.res.status, http.Status.Not_Found)
@@ -253,15 +251,9 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 
 @(test)
 test_router_target_and_suffix :: proc(t: ^testing.T) {
-	http.headers_init_hash_secret()
-
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	Capture :: struct {
 		matched:    string,
@@ -273,35 +265,12 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 		id_len:     int,
 	}
 
-	dispatch :: proc(t: ^testing.T, r: ^http.Router, raw_target: string, cap: ^Capture) {
+	dispatch :: proc(t: ^testing.T, env: ^Test_Env, r: ^http.Router, raw_target: string, cap: ^Capture) {
 		cap^ = {}
-
 		c: http.Connection
-		c.transaction_arena = http.get_arena(nil)
-		c.temp_arena        = http.get_arena(nil)
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer {
-			http.temp_allocator_destroy(&c)
-			http.transaction_allocator_destroy(&c)
-		}
-
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator        = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.res.headers.allocator = tx_alloc
-		c.res._buf.allocator     = tx_alloc
-		c.scanner.c             = &c
-		c.scanner.allocator     = &c.transaction_arena
-		c.res._state             = .Handling
-		c.res.budget.max      = 0
-		c.res._sends             = 1
-		c.req.line = {
-			method  = .Get,
-			target  = raw_target,
-			version = {1, 1},
-		}
-
+		test_conn_init(t, &c, env, mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.line = {method = .Get, target = raw_target, version = {1, 1}}
 		http.handle({http.router(r)}, &c.ctx)
 	}
 
@@ -324,30 +293,21 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 			st.suffix_len = copy(st.suffix_buf[:], http.route_suffix(ctx))
 		}))
 
-		dispatch(t, &r, "/static", &cap)
-		testing.expect_value(t, cap.matched, "bare")
-		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/static")
-		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "")
-
-		dispatch(t, &r, "/static/", &cap)
-		testing.expect_value(t, cap.matched, "wild")
-		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/static/")
-		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/")
-
-		dispatch(t, &r, "/static/a", &cap)
-		testing.expect_value(t, cap.matched, "wild")
-		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/static/a")
-		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/a")
-
-		dispatch(t, &r, "/static/a/b/c?x=1", &cap)
-		testing.expect_value(t, cap.matched, "wild")
-		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/static/a/b/c")
-		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/a/b/c")
-
-		dispatch(t, &r, "/static/hello%20world.txt", &cap)
-		testing.expect_value(t, cap.matched, "wild")
-		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/static/hello world.txt")
-		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/hello world.txt")
+		Case :: struct {
+			raw, matched, target, suffix: string,
+		}
+		for tc in ([?]Case{
+			{"/static",                  "bare", "/static",                 ""},
+			{"/static/",                 "wild", "/static/",                "/"},
+			{"/static/a",                "wild", "/static/a",               "/a"},
+			{"/static/a/b/c?x=1",        "wild", "/static/a/b/c",           "/a/b/c"},
+			{"/static/hello%20world.txt","wild", "/static/hello world.txt", "/hello world.txt"},
+		}) {
+			dispatch(t, &env, &r, tc.raw, &cap)
+			testing.expect_value(t, cap.matched, tc.matched)
+			testing.expect_value(t, string(cap.target_buf[:cap.target_len]), tc.target)
+			testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), tc.suffix)
+		}
 	}
 
 	// 2. Root wildcard (/*) without explicit "/" vs with explicit "/".
@@ -363,12 +323,12 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 			st.suffix_len = copy(st.suffix_buf[:], http.route_suffix(ctx))
 		}))
 
-		dispatch(t, &r, "/", &cap)
+		dispatch(t, &env, &r, "/", &cap)
 		testing.expect_value(t, cap.matched, "root-wild")
 		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/")
 
-		dispatch(t, &r, "/file.txt", &cap)
+		dispatch(t, &env, &r, "/file.txt", &cap)
 		testing.expect_value(t, cap.matched, "root-wild")
 		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/file.txt")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/file.txt")
@@ -380,7 +340,7 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 			st.suffix_len = copy(st.suffix_buf[:], http.route_suffix(ctx))
 		}))
 
-		dispatch(t, &r, "/", &cap)
+		dispatch(t, &env, &r, "/", &cap)
 		testing.expect_value(t, cap.matched, "root-exact")
 		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "")
@@ -399,11 +359,11 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 			st.suffix_len = copy(st.suffix_buf[:], http.route_suffix(ctx))
 		}))
 
-		dispatch(t, &r, "/", &cap)
+		dispatch(t, &env, &r, "/", &cap)
 		testing.expect_value(t, cap.matched, "star")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/")
 
-		dispatch(t, &r, "/foo/bar", &cap)
+		dispatch(t, &env, &r, "/foo/bar", &cap)
 		testing.expect_value(t, cap.matched, "star")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/foo/bar")
 	}
@@ -432,13 +392,13 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 		defer http.router_destroy(root)
 		http.route_all(&root, "/api/*", http.router(&api))
 
-		dispatch(t, &root, "/api/users/42", &cap)
+		dispatch(t, &env, &root, "/api/users/42", &cap)
 		testing.expect_value(t, cap.matched, "api-user")
 		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/api/users/42")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "")
 		testing.expect_value(t, string(cap.id_buf[:cap.id_len]), "42")
 
-		dispatch(t, &root, "/api/files/dir/a.txt", &cap)
+		dispatch(t, &env, &root, "/api/files/dir/a.txt", &cap)
 		testing.expect_value(t, cap.matched, "api-files")
 		testing.expect_value(t, string(cap.target_buf[:cap.target_len]), "/api/files/dir/a.txt")
 		testing.expect_value(t, string(cap.suffix_buf[:cap.suffix_len]), "/dir/a.txt")
@@ -447,8 +407,6 @@ test_router_target_and_suffix :: proc(t: ^testing.T) {
 
 @(test)
 test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
-	http.headers_init_hash_secret()
-
 	Mw_State :: struct {
 		orig_user_data: rawptr,
 		inner_called:   bool,
@@ -457,12 +415,9 @@ test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
 		defer_ud_ok:    bool,
 	}
 
-	s := http.make_server({})
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	st: Mw_State
 	st.orig_user_data = &st
@@ -498,33 +453,15 @@ test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
 	http.route_all(&root, "/api/*", mw, http.router(&api))
 
 	c: http.Connection
-	c.transaction_arena   = http.get_arena(nil)
-	c.temp_arena          = http.get_arena(nil)
-	c.transaction_arena.c = &c
-	c.temp_arena.c        = &c
-	defer {
-		http.temp_allocator_destroy(&c)
-		http.transaction_allocator_destroy(&c)
-	}
+	test_conn_init(t, &c, &env, init_budgets = false)
+	defer test_conn_destroy(&c)
 
-	tx_alloc := http.transaction_allocator(&c)
-	c._vars.allocator         = tx_alloc
-	c.req.headers.allocator   = tx_alloc
-	c.res.headers.allocator   = tx_alloc
-	c.res._buf.allocator      = tx_alloc
-	c.res._deferred.allocator = tx_alloc
-	c.scanner.c               = &c
-	c.scanner.allocator       = &c.transaction_arena
-	c.scanner.is_pumping      = true
-	c.res._state              = .Handling
+	c.scanner.is_pumping    = true
+	c.res._state            = .Handling
 	c.res.budget.max        = 0
-	c.res._sends              = 0
-	c.req.has_consumed_body   = true
-	c.req.line = {
-		method  = .Get,
-		target  = "/api/items",
-		version = {1, 1},
-	}
+	c.res._sends            = 0
+	c.req.has_consumed_body = true
+	c.req.line = {method = .Get, target = "/api/items", version = {1, 1}}
 
 	http.handle({http.router(&root)}, &c.ctx)
 	http._check_send_done(&c)
@@ -537,14 +474,9 @@ test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
 
 @(test)
 test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.T) {
-	http.headers_init_hash_secret()
-
-	s := http.make_server({})
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	Chain_Log :: struct {
 		events: [8]string,
@@ -584,8 +516,7 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 	}
 
 	track: mem.Tracking_Allocator
-	mem.tracking_allocator_init(&track, context.allocator)
-	track.bad_free_callback = mem.tracking_allocator_bad_free_callback_add_to_array
+	test_tracking_init(&track)
 	defer mem.tracking_allocator_destroy(&track)
 
 	st: Chain_Log
@@ -596,29 +527,11 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 		http.route_get(&r, "/chain", http.handler(&st, mw1), http.handler(&st, mw2), http.handler(&st, endpoint))
 		http.route_all(&r, "/prefix/*", http.handler(&st, mw1), http.handler(&st, endpoint))
 
-		run_req :: proc(r: ^http.Router, target: string) -> http.Status {
+		run_req :: proc(t: ^testing.T, env: ^Test_Env, r: ^http.Router, target: string) -> http.Status {
 			c: http.Connection
-			c.transaction_arena   = http.get_arena(nil)
-			c.temp_arena          = http.get_arena(nil)
-			c.transaction_arena.c = &c
-			c.temp_arena.c        = &c
-			defer {
-				http.temp_allocator_destroy(&c)
-				http.transaction_allocator_destroy(&c)
-			}
-
-			tx_alloc := http.transaction_allocator(&c)
-			c._vars.allocator         = tx_alloc
-			c.req.headers.allocator   = tx_alloc
-			c.res.headers.allocator   = tx_alloc
-			c.res._buf.allocator      = tx_alloc
-			c.res._deferred.allocator = tx_alloc
-			c.scanner.c               = &c
-			c.scanner.allocator       = &c.transaction_arena
-			c.res._state              = .Handling
-			c.res.budget.max        = 0
-			c.res._sends              = 1
-			c.req.has_consumed_body   = true
+			test_conn_init(t, &c, env, mock_send = true, init_budgets = false)
+			defer test_conn_destroy(&c)
+			c.req.has_consumed_body = true
 			c.req.line = {method = .Get, target = target, version = {1, 1}}
 
 			http.handle({http.router(r)}, &c.ctx)
@@ -626,32 +539,18 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 		}
 
 		// 1. Full middleware chain runs in order (before -> inner -> after).
-		status1 := run_req(&r, "/chain")
-		testing.expect_value(t, status1, http.Status.OK)
-		testing.expect_value(t, st.count, 5)
-		testing.expect_value(t, st.events[0], "mw1:before")
-		testing.expect_value(t, st.events[1], "mw2:before")
-		testing.expect_value(t, st.events[2], "endpoint")
-		testing.expect_value(t, st.events[3], "mw2:after")
-		testing.expect_value(t, st.events[4], "mw1:after")
+		testing.expect_value(t, run_req(t, &env, &r, "/chain"), http.Status.OK)
+		expect_slice(t, st.events[:st.count], []string{"mw1:before", "mw2:before", "endpoint", "mw2:after", "mw1:after"})
 
 		// 2. Short-circuiting in mw2 skips endpoint and mw2:after while mw1:after still runs.
 		st = {block = true}
-		status2 := run_req(&r, "/chain")
-		testing.expect_value(t, status2, http.Status.Forbidden)
-		testing.expect_value(t, st.count, 3)
-		testing.expect_value(t, st.events[0], "mw1:before")
-		testing.expect_value(t, st.events[1], "mw2:before")
-		testing.expect_value(t, st.events[2], "mw1:after")
+		testing.expect_value(t, run_req(t, &env, &r, "/chain"), http.Status.Forbidden)
+		expect_slice(t, st.events[:st.count], []string{"mw1:before", "mw2:before", "mw1:after"})
 
 		// 3. Prefix wildcard route also runs multi-handler chain.
 		st = {}
-		status3 := run_req(&r, "/prefix/hello")
-		testing.expect_value(t, status3, http.Status.OK)
-		testing.expect_value(t, st.count, 3)
-		testing.expect_value(t, st.events[0], "mw1:before")
-		testing.expect_value(t, st.events[1], "endpoint")
-		testing.expect_value(t, st.events[2], "mw1:after")
+		testing.expect_value(t, run_req(t, &env, &r, "/prefix/hello"), http.Status.OK)
+		expect_slice(t, st.events[:st.count], []string{"mw1:before", "endpoint", "mw1:after"})
 	}
 
 	testing.expect_value(t, track.current_memory_allocated, 0)

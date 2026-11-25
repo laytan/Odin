@@ -12,23 +12,23 @@ import "core:time"
 
 import http "core:http2"
 
+@(private="file")
+finish_mock_response :: proc(c: ^http.Connection, pending_sends := 0) {
+	http.write_response_heading(&c.ctx)
+	c.res._state = .Sending
+	c.res._sends = pending_sends
+	http.respond(&c.ctx)
+}
+
 @(test)
 test_scanner_reset_frees_transaction_arena_when_empty :: proc(t: ^testing.T) {
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
-
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c = &c
+	c: http.Connection
+	test_conn_init(t, &c, &env, init_budgets = false)
 
 	allocs_after_first: int
 	for cycle in 0..<5 {
@@ -68,29 +68,12 @@ test_scanner_reset_preserves_pipelined_bytes :: proc(t: ^testing.T) {
 		called:   bool,
 	}
 
-	s := http.make_server({})
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
-
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c = &c
-	c._vars.allocator = http.transaction_allocator(&c)
-	c.scanner.c = &c
-	c.scanner.allocator = &c.transaction_arena
-
-	pipelined := "GET /first HTTP/1.1\r\nGET /second HTTP/1.1\r\n"
-	buf, buf_err := make([]byte, http.MULTIPLIER, http.transaction_allocator(&c))
-	testing.expect_value(t, buf_err, nil)
-	c.scanner.buf = buf
-	c.scanner.write_head = copy(buf, pipelined)
+	c: http.Connection
+	test_conn_init(t, &c, &env, payload = "GET /first HTTP/1.1\r\nGET /second HTTP/1.1\r\n", init_budgets = false)
 
 	exp := http.context_add(&c.ctx, Scan_Expectation{
 		t        = t,
@@ -179,54 +162,31 @@ test_header_allowed_trailer :: proc(t: ^testing.T) {
 	}
 }
 
-Chunked_Body_Expectation :: struct {
-	t:           ^testing.T,
-	buf:         [64]byte,
-	len:         int,
-	done_called: bool,
-}
-
 @(test)
 test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
-
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
+	Chunked_Body_Expectation :: struct {
+		t:           ^testing.T,
+		buf:         [64]byte,
+		len:         int,
+		done_called: bool,
 	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c = &c
-	defer http.temp_allocator_destroy(&c)
-	defer http.transaction_allocator_destroy(&c)
 
-	tx_alloc := http.transaction_allocator(&c)
-	c._vars.allocator = tx_alloc
-	c.req.headers.allocator = tx_alloc
-	c.scanner.c = &c
-	c.scanner.allocator = &c.transaction_arena
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
+
+	c: http.Connection
+	test_conn_init(t, &c, &env, payload = "5;ext=1\r\nhello\r\n0\r\nX-Checksum: abc123\r\nContent-Length: 999\r\n\r\n", init_budgets = false)
+	defer test_conn_destroy(&c)
+
 	http.budget_init(&c.req.budget, nil)
-
-	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-	testing.expect_value(t, http.headers_set(&c.req.headers, "Trailer", "X-Checksum"), nil)
-	http._headers_set_readonly(&c.req.headers)
-
-	payload := "5;ext=1\r\nhello\r\n0\r\nX-Checksum: abc123\r\nContent-Length: 999\r\n\r\n"
-	buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-	testing.expect_value(t, buf_err, nil)
-	c.scanner.buf = buf
-	c.scanner.write_head = copy(buf, payload)
-
-	exp := http.context_add(&c.ctx, Chunked_Body_Expectation{
-		t = t,
+	test_req_set_headers(t, &c, {
+		{"Host", "localhost"},
+		{"Transfer-Encoding", "chunked"},
+		{"Trailer", "X-Checksum"},
 	})
 
+	exp := http.context_add(&c.ctx, Chunked_Body_Expectation{t = t})
 	http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
 		exp := http.context_get(ctx, Chunked_Body_Expectation)
 		if len(body) > 0 {
@@ -259,33 +219,13 @@ test_scan_temp_line_uses_temp_arena :: proc(t: ^testing.T) {
 		called:   bool,
 	}
 
-	s := http.make_server({})
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
-
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c = &c
-	defer http.temp_allocator_destroy(&c)
-	defer http.transaction_allocator_destroy(&c)
-
-	tx_alloc := http.transaction_allocator(&c)
-	c._vars.allocator = tx_alloc
-	c.scanner.c = &c
-	c.scanner.allocator = &c.transaction_arena
-
-	payload := "hello temp\r\n"
-	buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-	testing.expect_value(t, buf_err, nil)
-	c.scanner.buf = buf
-	c.scanner.write_head = copy(buf, payload)
+	c: http.Connection
+	test_conn_init(t, &c, &env, payload = "hello temp\r\n", init_budgets = false)
+	defer test_conn_destroy(&c)
 
 	testing.expect(t, c.temp_arena.tail == nil, "expected temp_arena to start empty")
 
@@ -314,43 +254,18 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 		called: bool,
 	}
 
-	s := http.make_server({})
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	c: http.Connection
+	test_conn_init(t, &c, &env, payload = "5\r\nhello\r\n2\r\n, \r\n6\r\nworld!\r\n0\r\n\r\n", init_budgets = false)
+	defer test_conn_destroy(&c)
 
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c = &c
-	defer http.temp_allocator_destroy(&c)
-	defer http.transaction_allocator_destroy(&c)
-
-	tx_alloc := http.transaction_allocator(&c)
-	c._vars.allocator = tx_alloc
-	c.req.headers.allocator = tx_alloc
-	c.scanner.c = &c
-	c.scanner.allocator = &c.transaction_arena
 	http.budget_init(&c.req.budget, nil)
+	test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}})
 
-	testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-	testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-	http._headers_set_readonly(&c.req.headers)
-
-	payload := "5\r\nhello\r\n2\r\n, \r\n6\r\nworld!\r\n0\r\n\r\n"
-	buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-	testing.expect_value(t, buf_err, nil)
-	c.scanner.buf = buf
-	c.scanner.write_head = copy(buf, payload)
-
-	exp := http.context_add(&c.ctx, Stream_Expectation{
-		t = t,
-	})
+	exp := http.context_add(&c.ctx, Stream_Expectation{t = t})
 
 	next := proc(ctx: ^http.Ctx) {
 		exp := http.context_get(ctx, Stream_Expectation)
@@ -429,16 +344,9 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 	testing.expect(t, exp.called, "expected body_parser to invoke next handler")
 
 	// Verify empty body stream behavior (off=0 -> .EOF, off>0 -> .Invalid_Offset).
-	empty_c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	empty_c.transaction_arena.c = &empty_c
-	empty_c.temp_arena.c = &empty_c
-	defer http.temp_allocator_destroy(&empty_c)
-	defer http.transaction_allocator_destroy(&empty_c)
-
-	empty_c._vars.allocator = http.transaction_allocator(&empty_c)
+	empty_c: http.Connection
+	test_conn_init(t, &empty_c, &env, init_budgets = false)
+	defer test_conn_destroy(&empty_c)
 	http.context_add(&empty_c.ctx, http.Body_Parser_State{})
 
 	empty_bps: http.Body_Parser_Stream
@@ -457,53 +365,16 @@ test_body_parser_stream_and_iterator :: proc(t: ^testing.T) {
 
 @(test)
 test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
-
-	setup_conn :: proc(t: ^testing.T, c: ^http.Connection, payload: string, req_max: int) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c = c
-
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.res.headers.allocator = tx_alloc
-		c.res._buf.allocator = tx_alloc
-		c.scanner.c = c
-		c.scanner.allocator = &c.transaction_arena
-
-		// Prevent invalid_request -> respond -> _do_send from calling nbio without an event loop.
-		c.res.budget.max = 0
-		c.res._sends = 1
-		c.req.budget.max = req_max
-
-		if len(payload) > 0 {
-			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-			testing.expect_value(t, buf_err, nil)
-			c.scanner.buf = buf
-			c.scanner.write_head = copy(buf, payload)
-		}
-	}
-
-	cleanup_conn :: proc(c: ^http.Connection) {
-		http.temp_allocator_destroy(c)
-		http.transaction_allocator_destroy(c)
-	}
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	// 1. Exhausted request limits before request-line completes -> 414 URI Too Long.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "GET /too-long-uri-without-crlf", 0)
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, payload = "GET /too-long-uri-without-crlf", mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.budget.max = 0
 
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.URI_Too_Long)
@@ -513,8 +384,9 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 	// 2. Exhausted request limits after request-line during header scanning -> 431 Request Header Fields Too Large.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "GET / HTTP/1.1\r\nHost: localhost\r\nX-Big: incomplete", 0)
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, payload = "GET / HTTP/1.1\r\nHost: localhost\r\nX-Big: incomplete", mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.budget.max = 0
 
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
@@ -524,13 +396,14 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 	// 3. Header count exceeding max_headers (default 128) -> 431 Request Header Fields Too Large.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "", s.opts.request_limits.max_size)
-		defer cleanup_conn(&c)
+		test_conn_init(t, &c, &env, mock_send = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.budget.max = env.s.opts.request_limits.max_size
 
 		tx_alloc := http.transaction_allocator(&c)
 		b := strings.builder_make(tx_alloc)
 		strings.write_string(&b, "GET / HTTP/1.1\r\nHost: localhost\r\n")
-		for i in 0 ..< s.opts.max_headers {
+		for i in 0 ..< env.s.opts.max_headers {
 			fmt.sbprintf(&b, "X-H%d: 1\r\n", i)
 		}
 		strings.write_string(&b, "\r\n")
@@ -544,19 +417,16 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		http.scan_line(&c.scanner, http.on_rline1)
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
 		testing.expect(t, c.res._state == .Error)
-		testing.expect_value(t, http.headers_len(c.req.headers), s.opts.max_headers)
+		testing.expect_value(t, http.headers_len(c.req.headers), env.s.opts.max_headers)
 	}
 
 	// 4a. Content-Length exceeding body_limits.max_size -> 413 Payload Too Large.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "", 10 * mem.Megabyte)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "10485761"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_conn_init(t, &c, &env, mock_handling = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.budget.max = 10 * mem.Megabyte
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Content-Length", "10485761"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
@@ -566,13 +436,10 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 	// 4b. Exhausted body limits during body scanning -> 413 Payload Too Large.
 	{
 		c: http.Connection
-		setup_conn(t, &c, "5\r\nhe", 0)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_conn_init(t, &c, &env, payload = "5\r\nhe", mock_handling = true, init_budgets = false)
+		defer test_conn_destroy(&c)
+		c.req.budget.max = 0
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
@@ -582,13 +449,9 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 
 @(test)
 test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	Header_Pair :: struct {
 		k, v: string,
@@ -601,110 +464,28 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 	}
 
 	cases := []Validate_Case{
-		{
-			desc    = "valid HTTP/1.1 with Content-Length",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", "42"}},
-			ok      = true,
-		},
-		{
-			desc    = "valid HTTP/1.1 with single case-insensitive chunked TE",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "CHUNKED"}},
-			ok      = true,
-		},
-		{
-			desc    = "reject missing Host",
-			version = {1, 1},
-			headers = {{"Content-Length", "0"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject duplicate Host",
-			version = {1, 1},
-			headers = {{"Host", "a"}, {"Host", "b"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject both Transfer-Encoding and Content-Length",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Content-Length", "5"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject Content-Length before Transfer-Encoding",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", "0"}, {"Transfer-Encoding", "chunked"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject duplicate Transfer-Encoding headers (TE.TE smuggling)",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Transfer-Encoding", "chunked"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject stacked gzip, chunked Transfer-Encoding",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}, {"Transfer-Encoding", "chunked"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject combined single-line gzip, chunked Transfer-Encoding",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip, chunked"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject non-chunked Transfer-Encoding",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject Transfer-Encoding on HTTP/1.0",
-			version = {1, 0},
-			headers = {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject duplicate Content-Length headers (even identical)",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", "5"}, {"Content-Length", "5"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject invalid Content-Length values",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", ""}},
-			ok      = false,
-		},
-		{
-			desc    = "reject negative Content-Length",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", "-5"}},
-			ok      = false,
-		},
-		{
-			desc    = "reject non-numeric Content-Length",
-			version = {1, 1},
-			headers = {{"Host", "localhost"}, {"Content-Length", "5a"}},
-			ok      = false,
-		},
+		{"valid HTTP/1.1 with Content-Length",                  {1, 1}, {{"Host", "localhost"}, {"Content-Length", "42"}},                                   true},
+		{"valid HTTP/1.1 with single case-insensitive chunked", {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "CHUNKED"}},                           true},
+		{"reject missing Host",                                 {1, 1}, {{"Content-Length", "0"}},                                                           false},
+		{"reject duplicate Host",                               {1, 1}, {{"Host", "a"}, {"Host", "b"}},                                                      false},
+		{"reject both Transfer-Encoding and Content-Length",    {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Content-Length", "5"}},  false},
+		{"reject Content-Length before Transfer-Encoding",      {1, 1}, {{"Host", "localhost"}, {"Content-Length", "0"}, {"Transfer-Encoding", "chunked"}},  false},
+		{"reject duplicate Transfer-Encoding headers",          {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Transfer-Encoding", "chunked"}}, false},
+		{"reject stacked gzip, chunked Transfer-Encoding",      {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}, {"Transfer-Encoding", "chunked"}}, false},
+		{"reject combined gzip, chunked Transfer-Encoding",     {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "gzip, chunked"}},                     false},
+		{"reject non-chunked Transfer-Encoding",                {1, 1}, {{"Host", "localhost"}, {"Transfer-Encoding", "gzip"}},                              false},
+		{"reject Transfer-Encoding on HTTP/1.0",                {1, 0}, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}},                           false},
+		{"reject duplicate Content-Length headers",             {1, 1}, {{"Host", "localhost"}, {"Content-Length", "5"}, {"Content-Length", "5"}},           false},
+		{"reject empty Content-Length",                         {1, 1}, {{"Host", "localhost"}, {"Content-Length", ""}},                                     false},
+		{"reject negative Content-Length",                      {1, 1}, {{"Host", "localhost"}, {"Content-Length", "-5"}},                                   false},
+		{"reject non-numeric Content-Length",                   {1, 1}, {{"Host", "localhost"}, {"Content-Length", "5a"}},                                   false},
 	}
 
 	for tc in cases {
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		c: http.Connection
+		test_conn_init(t, &c, &env, init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		tx_alloc := http.transaction_allocator(&c)
-		c.req.headers.allocator = tx_alloc
 		c.req.line.version = tc.version
 		for pair in tc.headers {
 			testing.expect_value(t, http.headers_add(&c.req.headers, pair.k, pair.v), nil)
@@ -716,36 +497,12 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 
 	// Verify chunk-size line with CTL byte is rejected with 400 Bad Request.
 	{
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
-
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.res.headers.allocator = tx_alloc
-		c.res._buf.allocator = tx_alloc
-		c.scanner.c = &c
-		c.scanner.allocator = &c.transaction_arena
-		c.res._state = .Handling
-		c.res.budget.max = 0
-		c.res._sends = 1
+		c: http.Connection
+		test_conn_init(t, &c, &env, payload = "5;ext=\x07\r\nhello\r\n0\r\n\r\n", mock_handling = true, init_budgets = false)
+		defer test_conn_destroy(&c)
 
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "CHUNKED"), nil)
-		http._headers_set_readonly(&c.req.headers)
-
-		payload := "5;ext=\x07\r\nhello\r\n0\r\n\r\n"
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-		testing.expect_value(t, buf_err, nil)
-		c.scanner.buf = buf
-		c.scanner.write_head = copy(buf, payload)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "CHUNKED"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
@@ -770,142 +527,98 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		body_received:  [64]byte,
 		body_len:       int,
 		body_finished:  bool,
-		finish:         proc(c: ^http.Connection, pending_sends := 0),
-	}
-
-	Test_Env :: struct {
-		s:        http.Server,
-		handlers: [1]http.Handler,
-		thread:   http.Server_Thread,
-		prev:     ^http.Server_Thread,
-		c:        http.Connection,
-	}
-
-	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
-		http.write_response_heading(&c.ctx)
-		c.res._state = .Sending
-		c.res._sends = pending_sends
-		http.respond(&c.ctx)
 	}
 
 	test_handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
 		state := (^Test_State)(user_data)
-			c := http._connection_of_context(ctx)
-			state.req_count += 1
+		c := http._connection_of_context(ctx)
+		state.req_count += 1
 
-			if state.req_count == 2 {
-				state.second_target = strings.clone(ctx.req.line.target, context.allocator)
-				finish_test_response(c, pending_sends = 1)
-				return
-			}
-
-			switch state.mode {
-			case .Unconsumed:
-				state.must_close_1 = http.response_must_close(c)
-				finish_test_response(c, pending_sends = 1)
-				state.res1_had_close = strings.contains(string(c.res._buf[:]), "Connection: close\r\n")
-
-			case .Consumed_Keepalive:
-				state.finish = finish_test_response
-				http.context_add(ctx, state)
-				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
-					state := http.context_get(ctx, ^Test_State)^
-					c := http._connection_of_context(ctx)
-
-					state.body_cb_calls += 1
-					if len(data) > 0 {
-						n := copy(state.body_received[state.body_len:], data)
-						state.body_len += n
-					}
-					if !is_partial {
-						state.body_finished = true
-						state.must_close_1 = http.response_must_close(c)
-						state.finish(c, 0)
-					}
-				})
-
-			case .Partial_Cb_Respond:
-				state.finish = finish_test_response
-				http.context_add(ctx, state)
-				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
-					state := http.context_get(ctx, ^Test_State)^
-					c := http._connection_of_context(ctx)
-
-					state.body_cb_calls += 1
-					if len(data) > 0 {
-						n := copy(state.body_received[state.body_len:], data)
-						state.body_len += n
-					}
-					if is_partial {
-						state.must_close_1 = http.response_must_close(c)
-						state.finish(c, 1)
-					}
-				})
-			}
-	}
-
-	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: http.Data_Handle_Proc, payload: string, env: ^Test_Env) {
-		env.handlers = {http.handler(state, test_handler)}
-		env.s = http.make_server({handlers = env.handlers[:]})
-
-		env.thread = http.Server_Thread{s = &env.s, id = 1}
-		env.prev = http.td
-		http.td = &env.thread
-
-		env.c = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
+		if state.req_count == 2 {
+			state.second_target = strings.clone(ctx.req.line.target, context.allocator)
+			finish_mock_response(c, pending_sends = 1)
+			return
 		}
-		env.c.transaction_arena.c = &env.c
-		env.c.temp_arena.c = &env.c
 
-		tx_alloc := http.transaction_allocator(&env.c)
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-		testing.expect_value(t, buf_err, nil)
-		env.c.scanner.buf = buf
-		env.c.scanner.write_head = copy(buf, payload)
-		env.c.scanner.allocator = &env.c.transaction_arena
+		switch state.mode {
+		case .Unconsumed:
+			state.must_close_1 = http.response_must_close(c)
+			finish_mock_response(c, pending_sends = 1)
+			state.res1_had_close = strings.contains(string(c.res._buf[:]), "Connection: close\r\n")
 
-		http._serve_connection(&env.c)
+		case .Consumed_Keepalive:
+			http.context_add(ctx, state)
+			http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
+				state := http.context_get(ctx, ^Test_State)^
+				c := http._connection_of_context(ctx)
+
+				state.body_cb_calls += 1
+				if len(data) > 0 {
+					n := copy(state.body_received[state.body_len:], data)
+					state.body_len += n
+				}
+				if !is_partial {
+					state.body_finished = true
+					state.must_close_1 = http.response_must_close(c)
+					finish_mock_response(c, 0)
+				}
+			})
+
+		case .Partial_Cb_Respond:
+			http.context_add(ctx, state)
+			http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
+				state := http.context_get(ctx, ^Test_State)^
+				c := http._connection_of_context(ctx)
+
+				state.body_cb_calls += 1
+				if len(data) > 0 {
+					n := copy(state.body_received[state.body_len:], data)
+					state.body_len += n
+				}
+				if is_partial {
+					state.must_close_1 = http.response_must_close(c)
+					finish_mock_response(c, 1)
+				}
+			})
+		}
 	}
 
-	cleanup_env :: proc(env: ^Test_Env) {
-		http.temp_allocator_destroy(&env.c)
-		http.transaction_allocator_destroy(&env.c)
-		http._server_thread_free_arenas_destroy(&env.thread)
-		http.td = env.prev
+	run_payload :: proc(t: ^testing.T, state: ^Test_State, test_handler: http.Data_Handle_Proc, payload: string, env: ^Test_Env, c: ^http.Connection) {
+		test_env_init(env)
+		env.handlers[0] = http.handler(state, test_handler)
+		env.s.opts.handlers = env.handlers[:]
+		test_conn_init(t, c, env, payload = payload, init_budgets = false)
+		http._serve_connection(c)
 	}
 
 	// 1. Unconsumed Content-Length body requires closing, writes Connection: close, and schedules no body scan.
 	{
 		state := Test_State{t = t, mode = .Unconsumed}
 		env: Test_Env
-		run_payload(t, &state, test_handler,
-			"POST /unconsumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		run_payload(t, &state, test_handler, "POST /unconsumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected unconsumed Content-Length body to require closing")
 		testing.expect(t, state.res1_had_close, "expected Connection: close header for unconsumed Content-Length")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no body scan scheduled")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected no body scan scheduled")
 	}
 
 	// 2. Unconsumed Transfer-Encoding: chunked body requires closing, writes Connection: close, and schedules no body scan.
 	{
 		state := Test_State{t = t, mode = .Unconsumed}
 		env: Test_Env
-		run_payload(t, &state, test_handler,
-			"POST /unconsumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		run_payload(t, &state, test_handler, "POST /unconsumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected unconsumed chunked body to require closing")
 		testing.expect(t, state.res1_had_close, "expected Connection: close header for unconsumed chunked body")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no body scan scheduled")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected no body scan scheduled")
 	}
 
 	// 3. Fully consumed Content-Length body stays keep-alive and serves the pipelined next request.
@@ -913,12 +626,14 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		state := Test_State{t = t, mode = .Consumed_Keepalive}
 		defer delete(state.second_target)
 		env: Test_Env
+		c: http.Connection
 		run_payload(t, &state, test_handler,
 			"POST /consumed-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello" +
 			"GET /after-consumed-cl HTTP/1.1\r\nHost: localhost\r\n\r\n",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect(t, state.body_finished, "expected consumed Content-Length body to finish")
 		testing.expect(t, !state.must_close_1, "expected consumed Content-Length body not to force Connection: close")
@@ -932,13 +647,15 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 		state := Test_State{t = t, mode = .Consumed_Keepalive}
 		defer delete(state.second_target)
 		env: Test_Env
+		c: http.Connection
 		run_payload(t, &state, test_handler,
 			"POST /consumed-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"5\r\nhello\r\n0\r\n\r\n" +
 			"GET /after-consumed-chunked HTTP/1.1\r\nHost: localhost\r\n\r\n",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect(t, state.body_finished, "expected consumed chunked body to finish")
 		testing.expect(t, !state.must_close_1, "expected consumed chunked body not to force Connection: close")
@@ -951,37 +668,41 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	{
 		state := Test_State{t = t, mode = .Partial_Cb_Respond}
 		env: Test_Env
+		c: http.Connection
 		run_payload(t, &state, test_handler,
 			"POST /partial-chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n" +
 			"GET /should-not-run HTTP/1.1\r\nHost: localhost\r\n\r\n",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, state.body_cb_calls, 1)
 		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected partial chunked respond to require closing")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial chunked respond")
-		testing.expect(t, strings.contains(string(env.c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback to stop after partial chunked respond")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
 	}
 
 	{
 		state := Test_State{t = t, mode = .Partial_Cb_Respond}
 		env: Test_Env
+		c: http.Connection
 		run_payload(t, &state, test_handler,
 			"POST /partial-cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, state.body_cb_calls, 1)
 		testing.expect_value(t, string(state.body_received[:state.body_len]), "hello")
 		testing.expect_value(t, state.req_count, 1)
 		testing.expect(t, state.must_close_1, "expected partial Content-Length respond to require closing")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stop after partial Content-Length respond")
-		testing.expect(t, strings.contains(string(env.c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback to stop after partial Content-Length respond")
+		testing.expect(t, strings.contains(string(c.res._buf[:]), "Connection: close\r\n"), "expected Connection: close header")
 	}
 }
 
@@ -995,131 +716,93 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	}
 
 	Pause_State :: struct {
-		mode:              Pause_Mode,
-		req_count:         int,
-		cb_calls:          int,
-		body_received:     [128]byte,
-		body_len:          int,
-		saved_slice:       []byte,
-		finished:          bool,
-		consumed_on_end:   bool,
-		trailer_ok:        bool,
-		second_target:     string,
+		mode:                  Pause_Mode,
+		req_count:             int,
+		cb_calls:              int,
+		body_received:         [128]byte,
+		body_len:              int,
+		saved_slice:           []byte,
+		finished:              bool,
+		consumed_on_end:       bool,
+		trailer_ok:            bool,
+		second_target:         string,
 		early_respond_pending: bool,
-	}
-
-	Test_Env :: struct {
-		s:        http.Server,
-		handlers: [1]http.Handler,
-		thread:   http.Server_Thread,
-		prev:     ^http.Server_Thread,
-		c:        http.Connection,
-	}
-
-	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
-		http.write_response_heading(&c.ctx)
-		c.res._state = .Sending
-		c.res._sends = pending_sends
-		http.respond(&c.ctx)
 	}
 
 	handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
 		st := (^Pause_State)(user_data)
-			c := http._connection_of_context(ctx)
-			st.req_count += 1
+		c := http._connection_of_context(ctx)
+		st.req_count += 1
 
-			if st.req_count == 2 {
-				st.second_target = strings.clone(ctx.req.line.target, context.allocator)
-				finish_test_response(c, pending_sends = 1)
+		if st.req_count == 2 {
+			st.second_target = strings.clone(ctx.req.line.target, context.allocator)
+			finish_mock_response(c, pending_sends = 1)
+			return
+		}
+
+		http.context_add(ctx, st)
+		if st.mode == .Pause_Before_Body_And_On_Final {
+			// No-ops before body() is called.
+			http.body_pause(&c.ctx)
+			http.body_resume(&c.ctx)
+		}
+
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
+			st := http.context_get(ctx, ^Pause_State)^
+			c := http._connection_of_context(ctx)
+			st.cb_calls += 1
+
+			if len(data) > 0 {
+				n := copy(st.body_received[st.body_len:], data)
+				st.body_len += n
+			}
+
+			if !is_partial {
+				if st.mode == .Pause_Before_Body_And_On_Final {
+					// No-ops on final callback once body has been consumed.
+					http.body_pause(ctx)
+					http.body_resume(ctx)
+				}
+				st.finished = true
+				st.consumed_on_end = ctx.req.has_consumed_body
+				if tr, ok := http.get_header(ctx, "X-Tr"); ok && tr == "ok" {
+					st.trailer_ok = true
+				}
+				finish_mock_response(c, st.early_respond_pending ? 1 : 0)
 				return
 			}
 
-			http.context_add(ctx, st)
-			if st.mode == .Pause_Before_Body_And_On_Final {
-				// No-ops before body() is called.
-				http.body_pause(&c.ctx)
-				http.body_resume(&c.ctx)
-			}
-
-			http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
-				st := http.context_get(ctx, ^Pause_State)^
-				c := http._connection_of_context(ctx)
-				st.cb_calls += 1
-
-				if len(data) > 0 {
-					n := copy(st.body_received[st.body_len:], data)
-					st.body_len += n
-				}
-
-				if !is_partial {
-					if st.mode == .Pause_Before_Body_And_On_Final {
-						// No-ops on final callback once body has been consumed.
-						http.body_pause(ctx)
-						http.body_resume(ctx)
-					}
-					st.finished = true
-					st.consumed_on_end = ctx.req.has_consumed_body
-					if tr, ok := http.get_header(ctx, "X-Tr"); ok && tr == "ok" {
-						st.trailer_ok = true
-					}
-					pending := st.early_respond_pending ? 1 : 0
-					http.write_response_heading(ctx)
-					c.res._state = .Sending
-					c.res._sends = pending
-					http.respond(ctx)
-					return
-				}
-
-				switch st.mode {
-				case .Async_Paused, .Pause_Before_Body_And_On_Final:
+			switch st.mode {
+			case .Async_Paused, .Pause_Before_Body_And_On_Final:
+				st.saved_slice = data
+				http.body_pause(ctx)
+			case .Sync_Pause_Resume:
+				http.body_pause(ctx)
+				http.body_resume(ctx)
+			case .Sync_Pause_Resume_Pause:
+				if st.cb_calls == 1 {
 					st.saved_slice = data
 					http.body_pause(ctx)
-				case .Sync_Pause_Resume:
+					http.body_resume(ctx)
+					http.body_pause(ctx)
+				} else {
 					http.body_pause(ctx)
 					http.body_resume(ctx)
-				case .Sync_Pause_Resume_Pause:
-					if st.cb_calls == 1 {
-						st.saved_slice = data
-						http.body_pause(ctx)
-						http.body_resume(ctx)
-						http.body_pause(ctx)
-					} else {
-						http.body_pause(ctx)
-						http.body_resume(ctx)
-					}
 				}
-			})
+			}
+		})
 	}
 
-	setup_and_run :: proc(t: ^testing.T, st: ^Pause_State, h: http.Data_Handle_Proc, payload: string, env: ^Test_Env) {
-		env.handlers = {http.handler(st, h)}
-		env.s = http.make_server({handlers = env.handlers[:]})
-		env.thread = http.Server_Thread{s = &env.s, id = 1}
-		env.prev = http.td
-		http.td = &env.thread
-
-		env.c = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		env.c.transaction_arena.c = &env.c
-		env.c.temp_arena.c = &env.c
-
-		tx_alloc := http.transaction_allocator(&env.c)
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, 1024), tx_alloc)
+	setup_and_run :: proc(t: ^testing.T, st: ^Pause_State, h: http.Data_Handle_Proc, payload: string, env: ^Test_Env, c: ^http.Connection) {
+		test_env_init(env)
+		env.handlers[0] = http.handler(st, h)
+		env.s.opts.handlers = env.handlers[:]
+		test_conn_init(t, c, env, init_budgets = false)
+		buf, buf_err := make([]byte, max(http.MULTIPLIER, 1024), http.transaction_allocator(c))
 		testing.expect_value(t, buf_err, nil)
-		env.c.scanner.buf = buf
-		env.c.scanner.write_head = copy(buf, payload)
-		env.c.scanner.allocator = &env.c.transaction_arena
-
-		http._serve_connection(&env.c)
-	}
-
-	cleanup_env :: proc(env: ^Test_Env) {
-		http.temp_allocator_destroy(&env.c)
-		http.transaction_allocator_destroy(&env.c)
-		http._server_thread_free_arenas_destroy(&env.thread)
-		http.td = env.prev
+		c.scanner.buf        = buf
+		c.scanner.write_head = copy(buf, payload)
+		http._serve_connection(c)
 	}
 
 	append_bytes :: proc(c: ^http.Connection, more: string) {
@@ -1131,35 +814,34 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Async_Paused}
 		defer delete(st.second_target)
 		env: Test_Env
-		setup_and_run(t, &st, handler,
-			"POST /cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		setup_and_run(t, &st, handler, "POST /cl HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, st.req_count, 1)
 		testing.expect_value(t, st.cb_calls, 1)
 		testing.expect(t, !st.finished, "expected Content-Length body to pause before finishing")
-		testing.expect(t, !env.c.req.has_consumed_body, "expected has_consumed_body false while paused")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no scan scheduled while paused")
-		testing.expect(t, !env.c.scanner.is_pumping, "expected scanner not pumping while paused")
+		testing.expect(t, !c.req.has_consumed_body, "expected has_consumed_body false while paused")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected no scan scheduled while paused")
+		testing.expect(t, !c.scanner.is_pumping, "expected scanner not pumping while paused")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
 		// Redundant pause is idempotent, and appending unread bytes does not overwrite saved_slice while paused.
-		http.body_pause(&env.c.ctx)
-		append_bytes(&env.c, "worldGET /after-cl HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		http.body_pause(&c.ctx)
+		append_bytes(&c, "worldGET /after-cl HTTP/1.1\r\nHost: localhost\r\n\r\n")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.ctx)
+		http.body_resume(&c.ctx)
 
 		// Paused after final Content-Length data chunk (curr_size == 0) before uniform (nil, false) EOF.
 		testing.expect_value(t, st.cb_calls, 2)
 		testing.expect(t, !st.finished, "expected pause after final Content-Length chunk before EOF")
-		testing.expect(t, !env.c.req.has_consumed_body, "expected has_consumed_body false while paused before EOF")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil while paused before EOF")
+		testing.expect(t, !c.req.has_consumed_body, "expected has_consumed_body false while paused before EOF")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback nil while paused before EOF")
 		testing.expect_value(t, string(st.saved_slice), "world")
 
-		http.body_resume(&env.c.ctx)
+		http.body_resume(&c.ctx)
 
 		testing.expect(t, st.finished, "expected Content-Length body to emit (nil, false) on resume")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
@@ -1174,39 +856,32 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Async_Paused}
 		defer delete(st.second_target)
 		env: Test_Env
-		setup_and_run(t, &st, handler,
-			"POST /ch HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\na\r\nhello",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		setup_and_run(t, &st, handler, "POST /ch HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\na\r\nhello", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
-		// Paused mid-chunk (5 bytes left in first chunk).
 		testing.expect_value(t, st.cb_calls, 1)
 		testing.expect(t, !st.finished, "expected mid-chunk pause")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil mid-chunk pause")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback nil mid-chunk pause")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		append_bytes(&env.c, "world\r\n5\r\n!!!!!\r\n0\r\nX-Tr: ok\r\n\r\nGET /after-ch HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		append_bytes(&c, "world\r\n5\r\n!!!!!\r\n0\r\nX-Tr: ok\r\n\r\nGET /after-ch HTTP/1.1\r\nHost: localhost\r\n\r\n")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.ctx)
-
-		// Paused on exact chunk boundary (curr_size == 0 before \r\n); next chunk must not run yet.
+		http.body_resume(&c.ctx)
 		testing.expect_value(t, st.cb_calls, 2)
 		testing.expect(t, !st.finished, "expected pause at chunk 1 boundary")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk boundary")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback nil at chunk boundary")
 		testing.expect_value(t, string(st.saved_slice), "world")
 
-		http.body_resume(&env.c.ctx)
-
-		// Paused on second exact chunk boundary before final 0-chunk + trailers.
+		http.body_resume(&c.ctx)
 		testing.expect_value(t, st.cb_calls, 3)
 		testing.expect(t, !st.finished, "expected pause at chunk 2 boundary")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk 2 boundary")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback nil at chunk 2 boundary")
 		testing.expect_value(t, string(st.saved_slice), "!!!!!")
 
-		http.body_resume(&env.c.ctx)
-
+		http.body_resume(&c.ctx)
 		testing.expect(t, st.finished, "expected chunked body to complete after trailers")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on chunked end")
 		testing.expect(t, st.trailer_ok, "expected allowed trailer X-Tr to be parsed")
@@ -1221,13 +896,15 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		st := Pause_State{mode = .Sync_Pause_Resume}
 		defer delete(st.second_target)
 		env: Test_Env
+		c: http.Connection
 		setup_and_run(t, &st, handler,
 			"POST /sync HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n" +
 			"GET /after-sync HTTP/1.1\r\nHost: localhost\r\n\r\n",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect(t, st.finished, "expected sync pause+resume to finish iteratively")
 		testing.expect_value(t, st.cb_calls, 3)
@@ -1240,19 +917,21 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Sync_Pause_Resume_Pause, early_respond_pending = true}
 		env: Test_Env
+		c: http.Connection
 		setup_and_run(t, &st, handler,
 			"POST /prp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n" +
 			"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n",
-			&env,
+			&env, &c,
 		)
-		defer cleanup_env(&env)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, st.cb_calls, 1)
 		testing.expect(t, !st.finished, "expected second pause inside Body_Cb to keep stream paused")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil after pause->resume->pause")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback nil after pause->resume->pause")
 		testing.expect_value(t, string(st.saved_slice), "abc")
 
-		http.body_resume(&env.c.ctx)
+		http.body_resume(&c.ctx)
 
 		testing.expect(t, st.finished, "expected external resume to complete buffered body")
 		testing.expect_value(t, st.cb_calls, 3)
@@ -1263,73 +942,69 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	{
 		st := Pause_State{mode = .Pause_Before_Body_And_On_Final, early_respond_pending = true}
 		env: Test_Env
-		setup_and_run(t, &st, handler,
-			"POST /edge-final HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		setup_and_run(t, &st, handler, "POST /edge-final HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, st.cb_calls, 1)
 		testing.expect(t, !st.finished, "expected Content-Length chunk to pause before (nil, false) EOF")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.ctx)
+		http.body_resume(&c.ctx)
 
 		testing.expect(t, st.finished, "expected resume after final Content-Length chunk to deliver (nil, false) EOF")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
 		testing.expect_value(t, st.cb_calls, 2)
-		// Redundant resume when not paused / already consumed must be a safe no-op.
-		http.body_resume(&env.c.ctx)
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no scan after redundant resume")
+		http.body_resume(&c.ctx)
+		testing.expect(t, c.scanner.scan.callback == nil, "expected no scan after redundant resume")
 	}
 
 	{
 		st := Pause_State{mode = .Async_Paused}
 		env: Test_Env
-		setup_and_run(t, &st, handler,
-			"POST /early-resp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		setup_and_run(t, &st, handler, "POST /early-resp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, st.cb_calls, 1)
-		append_bytes(&env.c, "world")
-		finish_test_response(&env.c, pending_sends = 1)
-		testing.expect(t, env.c.res._state == .Sent, "expected response state Sent")
+		append_bytes(&c, "world")
+		finish_mock_response(&c, pending_sends = 1)
+		testing.expect(t, c.res._state == .Sent, "expected response state Sent")
 
 		// Stray resume after respond() must not re-arm scanning.
-		http.body_resume(&env.c.ctx)
+		http.body_resume(&c.ctx)
 		testing.expect(t, !st.finished, "expected stray resume after respond not to deliver further body chunks")
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stay nil after Sent")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected scan callback to stay nil after Sent")
 	}
 
 	{
 		st := Pause_State{mode = .Async_Paused, early_respond_pending = true}
 		env: Test_Env
-		setup_and_run(t, &st, handler,
-			"POST /pending-scan HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc",
-			&env,
-		)
-		defer cleanup_env(&env)
+		c: http.Connection
+		setup_and_run(t, &st, handler, "POST /pending-scan HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc", &env, &c)
+		defer test_env_destroy(&env)
+		defer test_conn_destroy(&c)
 
 		testing.expect_value(t, st.cb_calls, 1)
-		testing.expect(t, env.c.scanner.scan.callback == nil, "expected paused at chunk boundary")
+		testing.expect(t, c.scanner.scan.callback == nil, "expected paused at chunk boundary")
 
 		sentinel_cb :: proc(c: ^http.Connection, data: []byte) {}
-		env.c.scanner.scan = {
+		c.scanner.scan = {
 			split     = http.split_line(),
-			allocator = &env.c.transaction_arena,
+			allocator = &c.transaction_arena,
 			callback  = sentinel_cb,
 		}
 		// External pause + resume while another scan is already pending must not clobber the pending scan.
-		http.body_pause(&env.c.ctx)
-		http.body_resume(&env.c.ctx)
-		testing.expect(t, env.c.scanner.scan.callback == sentinel_cb, "expected body_resume not to overwrite active scan.callback")
+		http.body_pause(&c.ctx)
+		http.body_resume(&c.ctx)
+		testing.expect(t, c.scanner.scan.callback == sentinel_cb, "expected body_resume not to overwrite active scan.callback")
 
-		env.c.scanner.scan = {}
-		http.body_pause(&env.c.ctx)
-		append_bytes(&env.c, "\r\n0\r\n\r\n")
-		http.body_resume(&env.c.ctx)
+		c.scanner.scan = {}
+		http.body_pause(&c.ctx)
+		append_bytes(&c, "\r\n0\r\n\r\n")
+		http.body_resume(&c.ctx)
 		testing.expect(t, st.finished, "expected chunked body to finish after clearing sentinel and resuming")
 		testing.expect_value(t, string(st.body_received[:st.body_len]), "abc")
 	}
@@ -1337,41 +1012,11 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 
 @(test)
 test_lazy_expect_continue :: proc(t: ^testing.T) {
-	http.headers_init_hash_secret()
-
-	setup_conn :: proc(t: ^testing.T, thread: ^http.Server_Thread, c: ^http.Connection, payload: string, req_max := 100) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c = c
-
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.res.headers.allocator = tx_alloc
-		c.res._buf.allocator = tx_alloc
-		c.scanner.c = c
-		c.scanner.allocator = &c.transaction_arena
-
-		c.req.budget.max = req_max
+	setup_expect_conn :: proc(t: ^testing.T, env: ^Test_Env, c: ^http.Connection, payload: string, req_max := 100, handling := true) {
+		test_conn_init(t, c, env, payload = payload, mock_send = !handling, mock_handling = handling, init_budgets = false)
+		c.res.status         = {}
+		c.req.budget.max     = req_max
 		c.req.budget.timeout = -1
-		// Prevent send_continue/respond -> _do_send from calling nbio without an event loop.
-		c.res.budget.max = 0
-		c.res._sends = 1
-
-		if len(payload) > 0 {
-			buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-			testing.expect_value(t, buf_err, nil)
-			c.scanner.buf = buf
-			c.scanner.write_head = copy(buf, payload)
-		}
-	}
-
-	cleanup_conn :: proc(c: ^http.Connection) {
-		http.temp_allocator_destroy(c)
-		http.transaction_allocator_destroy(c)
 	}
 
 	// 1. on_headers rejects (401) without calling body() -> never sends 100 Continue.
@@ -1382,29 +1027,22 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 			sent_seen:  int,
 		}
 		state: Reject_State
-		s := http.make_server({handlers = {http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
+		handlers := [1]http.Handler{http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			st := (^Reject_State)(user_data)
 			st.handled = true
 			st.sends_seen = ctx.res._sends
 			st.sent_seen = ctx.res.sent
 			ctx.res.status = .Unauthorized
-			http.write_response_heading(ctx)
-			ctx.res._state = .Sending
-			ctx.res._sends = 1
-			http.respond(ctx)
-		})}})
+			finish_mock_response(http._connection_of_context(ctx), 1)
+		})}
 
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		env: Test_Env
+		test_env_init(&env, opts = {handlers = handlers[:]})
+		defer test_env_destroy(&env)
 
 		c: http.Connection
-		setup_conn(t, &thread, &c,
-			"POST /reject HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
-		)
-		defer cleanup_conn(&c)
+		setup_expect_conn(t, &env, &c, "POST /reject HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n", handling = false)
+		defer test_conn_destroy(&c)
 
 		http._serve_connection(&c)
 		testing.expect(t, state.handled, "expected handler to be invoked")
@@ -1413,26 +1051,17 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 401 Unauthorized\r\n"), "expected 401 status line")
 	}
 
-	s := http.make_server({})
-
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	env: Test_Env
+	test_env_init(&env)
+	defer test_env_destroy(&env)
 
 	// 2. Content-Length exceeding body_limits.max_size -> 413 Payload Too Large and no 100 Continue.
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "101"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "101"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
@@ -1443,21 +1072,16 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	// 3. Content-Length: 0 -> finishes immediately and does not send 100 Continue.
 	{
 		Zero_State :: struct {
-			calls:       int,
-			is_partial:  bool,
+			calls:      int,
+			is_partial: bool,
 		}
 
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
-		c.req.line.version = {1, 1}
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
+		c.req.line.version      = {1, 1}
 		c.req.has_consumed_body = true
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "0"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "0"}})
 
 		zs := http.context_add(&c.ctx, Zero_State{})
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
@@ -1480,15 +1104,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		}
 
 		c: http.Connection
-		setup_conn(t, &thread, &c, "hello", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
+		setup_expect_conn(t, &env, &c, "hello", 100)
+		defer test_conn_destroy(&c)
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "5"}})
 
 		bs := http.context_add(&c.ctx, Buffered_State{})
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
@@ -1509,16 +1128,11 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	// 5. HTTP/1.0 with Expect: 100-continue -> does not send 100 Continue and schedules scan.
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
-		c.req.line.version = {1, 0}
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
+		c.req.line.version   = {1, 0}
 		c.scanner.is_pumping = true
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "5"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Handling)
@@ -1529,15 +1143,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	// 6. HTTP/1.1 Content-Length with no buffered bytes -> sends 100 Continue lazily.
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "5"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
@@ -1548,15 +1157,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	// 7. HTTP/1.1 chunked body(): sends 100 Continue when limits allow, rejects 413 without 100 Continue when max == 0.
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-Continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-Continue"}, {"Transfer-Encoding", "chunked"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
@@ -1565,15 +1169,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	}
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 0)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Handling
+		setup_expect_conn(t, &env, &c, "", 0)
+		defer test_conn_destroy(&c)
 		c.req.line.version = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Transfer-Encoding", "chunked"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
@@ -1584,16 +1183,12 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 	// 8. Already sending response -> does not send 100 Continue.
 	{
 		c: http.Connection
-		setup_conn(t, &thread, &c, "", 100)
-		defer cleanup_conn(&c)
-
-		c.res._state = .Sending
-		c.req.line.version = {1, 1}
+		setup_expect_conn(t, &env, &c, "", 100)
+		defer test_conn_destroy(&c)
+		c.res._state         = .Sending
+		c.req.line.version   = {1, 1}
 		c.scanner.is_pumping = true
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Expect", "100-continue"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Expect", "100-continue"}, {"Content-Length", "5"}})
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
@@ -1622,13 +1217,10 @@ test_scanner_buf_size_bucket_alignment :: proc(t: ^testing.T) {
 	testing.expect_value(t, http._scanner_buf_size(4096 - hdr + 512, http._arena_grow_size(4096 - hdr)), 8192 - hdr)
 
 	// Verify 512 -> 1024 -> 2048 -> (4096 - hdr) resizes in-place inside a single 4 KiB block.
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
 	a := http.get_arena(nil)
 	defer http.arena_destroy(&a)
@@ -1650,44 +1242,14 @@ test_scanner_buf_size_bucket_alignment :: proc(t: ^testing.T) {
 
 	next_size := http._scanner_buf_size(len(buf) + 1, http._arena_grow_size(len(buf)))
 	testing.expect_value(t, next_size, 8192 - hdr)
-	next_buf, nerr := make([]byte, next_size, alloc)
+	_, nerr := make([]byte, next_size, alloc)
 	testing.expect_value(t, nerr, nil)
-	buf = next_buf
 	testing.expect_value(t, len(a.tail.data), 8192)
 	testing.expect_value(t, counter.alloc_count, 2)
 }
 
 @(test)
 test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^testing.T) {
-	setup_req_conn :: proc(
-		t: ^testing.T,
-		s: ^http.Server,
-		thread: ^http.Server_Thread,
-		c: ^http.Connection,
-		payload: string,
-	) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c        = c
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator         = tx_alloc
-		c.req.headers.allocator   = tx_alloc
-		c.res.headers.allocator   = tx_alloc
-		c.res._buf.allocator      = tx_alloc
-		c.res._deferred.allocator = tx_alloc
-		c.scanner.c               = c
-		c.scanner.allocator       = &c.transaction_arena
-		http.budget_init(&c.req.budget, &s.opts.request_limits)
-
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-		testing.expect_value(t, buf_err, nil)
-		c.scanner.buf        = buf
-		c.scanner.write_head = copy(buf, payload)
-	}
-
 	// 1. Lying 1 GiB Content-Length with NO_LIMITS caps detached reusable buffer at BODY_BUF_SIZE (16 KiB block)
 	//    and compacts in place across repeated chunks without touching headers or temp_allocator allocations.
 	{
@@ -1698,34 +1260,26 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		}
 
 		st := State{t = t}
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({
-			body_limits = http.NO_LIMITS,
-			handlers   = {http.handler(&st, proc(user_data: rawptr, ctx: ^http.Ctx) {
-				st := (^State)(user_data)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		handlers := [1]http.Handler{http.handler(&st, proc(user_data: rawptr, ctx: ^http.Ctx) {
+			st := (^State)(user_data)
 
-				temp, terr := make([]byte, 256, context.temp_allocator)
-				testing.expect_value(st.t, terr, nil)
-				for &b in temp { b = 0x5A }
-				st.temp_sentinel = temp
+			temp, terr := make([]byte, 256, context.temp_allocator)
+			testing.expect_value(st.t, terr, nil)
+			for &b in temp { b = 0x5A }
+			st.temp_sentinel = temp
 
-				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
-			})},
-		}, arena_counting_allocator(&counter))
+			http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
+		})}
 
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		env: Test_Env
+		test_env_init(&env, opts = {body_limits = http.NO_LIMITS, handlers = handlers[:]}, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
+		env.s.opts.handlers = handlers[:]
 
 		c: http.Connection
-		setup_req_conn(
-			t, &s, &thread, &c,
-			"POST /upload HTTP/1.1\r\nHost: localhost\r\nX-Tag: keep-me\r\nContent-Length: 1073741824\r\n\r\n",
-		)
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		test_conn_init(t, &c, &env, payload = "POST /upload HTTP/1.1\r\nHost: localhost\r\nX-Tag: keep-me\r\nContent-Length: 1073741824\r\n\r\n")
+		defer test_conn_destroy(&c)
 
 		st.orig_hdr_ptr = raw_data(c.scanner.buf)
 		c.scanner.scan = {
@@ -1745,8 +1299,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 		reusable_ptr := raw_data(c.scanner.buf)
 
-		// Empty rewind on subsequent streaming cycle reuses the exact same 16 KiB buffer with 0 allocations
-		// when the previous recv did not fill the buffer.
+		// Empty rewind on subsequent streaming cycle reuses the exact same 16 KiB buffer with 0 allocations.
 		for round in 0..<10 {
 			for &b in c.scanner.buf { b = u8('A' + (round % 26)) }
 			c.scanner.read_head  = 4096
@@ -1809,8 +1362,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 			testing.expect_value(t, counter.alloc_count, 4 + idx)
 		}
 
-		// Abandoned intermediate .Reuse blocks (16K/32K/64K/128K) were reclaimed back to td.free_arenas,
-		// leaving only the active 256 KiB block and the initial 4 KiB header block in c.transaction_arena.
+		// Abandoned intermediate .Reuse blocks (16K/32K/64K/128K) were reclaimed back to td.free_arenas.
 		arena_blocks := 0
 		for b := c.transaction_arena.tail; b != nil; b = b.prev {
 			arena_blocks += 1
@@ -1849,12 +1401,8 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 		// Concurrent second connection reuses the reclaimed 16K/32K/64K/128K blocks with 0 new backing allocs.
 		c2: http.Connection
-		setup_req_conn(
-			t, &s, &thread, &c2,
-			"POST /upload2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1073741824\r\n\r\n",
-		)
-		defer http.temp_allocator_destroy(&c2)
-		defer http.transaction_allocator_destroy(&c2)
+		test_conn_init(t, &c2, &env, payload = "POST /upload2 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1073741824\r\n\r\n")
+		defer test_conn_destroy(&c2)
 
 		testing.expect_value(t, counter.alloc_count, 8) // 4 KiB header block for c2.
 		c2.scanner.scan = {
@@ -1863,8 +1411,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 			callback  = http.on_rline1,
 		}
 		testing.expect(t, http._scanner_pump_buffered(&c2.scanner))
-		// s.opts.handler allocates c2's 4 KiB temp_arena sentinel before detaching body buffer.
-		testing.expect_value(t, counter.alloc_count, 9)
+		testing.expect_value(t, counter.alloc_count, 9) // 4 KiB temp_arena sentinel before detaching body buffer.
 		testing.expect(t, http._scanner_prepare_recv_buf(&c2.scanner))
 		testing.expect_value(t, len(c2.scanner.buf), http.BODY_BUF_SIZE)
 		testing.expect_value(t, counter.alloc_count, 9)
@@ -1888,27 +1435,18 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 	// 2. Lying 1 GiB chunk size with NO_LIMITS starts detached reusable buffer at BODY_BUF_SIZE (16 KiB block).
 	{
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({
-			body_limits = http.NO_LIMITS,
-			handlers   = {proc(ctx: ^http.Ctx) {
-				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
-			}},
-		}, arena_counting_allocator(&counter))
-
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		handlers := [1]http.Handler{proc(ctx: ^http.Ctx) {
+			http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
+		}}
+		env: Test_Env
+		test_env_init(&env, opts = {body_limits = http.NO_LIMITS, handlers = handlers[:]}, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
+		env.s.opts.handlers = handlers[:]
 
 		c: http.Connection
-		setup_req_conn(
-			t, &s, &thread, &c,
-			"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n40000000\r\n",
-		)
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		test_conn_init(t, &c, &env, payload = "POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n40000000\r\n")
+		defer test_conn_destroy(&c)
 
 		c.scanner.scan = {
 			split     = http.split_line(),
@@ -1926,27 +1464,18 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 	// 3. Small split Content-Length (200 bytes) caps reusable buffer at MULTIPLIER (512 bytes) inside existing 4 KiB block.
 	{
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({
-			body_limits = http.NO_LIMITS,
-			handlers   = {proc(ctx: ^http.Ctx) {
-				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
-			}},
-		}, arena_counting_allocator(&counter))
-
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		handlers := [1]http.Handler{proc(ctx: ^http.Ctx) {
+			http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
+		}}
+		env: Test_Env
+		test_env_init(&env, opts = {body_limits = http.NO_LIMITS, handlers = handlers[:]}, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
+		env.s.opts.handlers = handlers[:]
 
 		c: http.Connection
-		setup_req_conn(
-			t, &s, &thread, &c,
-			"POST /small HTTP/1.1\r\nHost: localhost\r\nContent-Length: 200\r\n\r\n",
-		)
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		test_conn_init(t, &c, &env, payload = "POST /small HTTP/1.1\r\nHost: localhost\r\nContent-Length: 200\r\n\r\n")
+		defer test_conn_destroy(&c)
 
 		c.scanner.scan = {
 			split     = http.split_line(),
@@ -1968,22 +1497,16 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 			done: bool,
 		}
 
-		s := http.make_server({})
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		env: Test_Env
+		test_env_init(&env)
+		defer test_env_destroy(&env)
 
 		c: http.Connection
-		setup_req_conn(t, &s, &thread, &c, "")
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		test_conn_init(t, &c, &env, init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Trailer", "X-Trailer"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		http.budget_init(&c.req.budget, nil)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Trailer", "X-Trailer"}})
 
 		payload := "0\r\nX-Trailer: val\r\n\r\nGET /next HTTP/1.1\r\n"
 		rbuf, rerr := make([]byte, http.BODY_BUF_SIZE, http.transaction_allocator(&c))
@@ -2014,51 +1537,29 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 	// 1. body_parser uses retain = true for true zero-copy parts (zero extra clone allocations).
 	{
 		Parser_State :: struct {
-			t:          ^testing.T,
-			called:     bool,
-			buf_start:  uintptr,
-			buf_end:    uintptr,
+			t:         ^testing.T,
+			called:    bool,
+			buf_start: uintptr,
+			buf_end:   uintptr,
 		}
 
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({}, arena_counting_allocator(&counter))
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
 
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		c: http.Connection
+		test_conn_init(t, &c, &env, payload = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n", init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator       = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.scanner.c             = &c
-		c.scanner.allocator     = &c.transaction_arena
 		http.budget_init(&c.req.budget, nil)
-
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
-
-		payload := "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
-		buf, buf_err := make([]byte, max(http.MULTIPLIER, len(payload)), tx_alloc)
-		testing.expect_value(t, buf_err, nil)
-		c.scanner.buf        = buf
-		c.scanner.write_head = copy(buf, payload)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}})
 		testing.expect_value(t, counter.alloc_count, 1)
 
 		ps := http.context_add(&c.ctx, Parser_State{
 			t         = t,
-			buf_start = uintptr(raw_data(buf)),
-			buf_end   = uintptr(raw_data(buf)) + uintptr(len(buf)),
+			buf_start = uintptr(raw_data(c.scanner.buf)),
+			buf_end   = uintptr(raw_data(c.scanner.buf)) + uintptr(len(c.scanner.buf)),
 		})
 		next := proc(ctx: ^http.Ctx) {
 			ps := http.context_get(ctx, Parser_State)
@@ -2087,25 +1588,14 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 	// 2. .Retain mode starts <= 16 KiB, progressively doubles 16K -> 32K -> 64K when blocks fill,
 	//    and clamps cleanly to remaining buf_cap without overwriting previously yielded slices.
 	{
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({}, arena_counting_allocator(&counter))
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
 
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
-
-		c.scanner.c         = &c
-		c.scanner.allocator = &c.transaction_arena
+		c: http.Connection
+		test_conn_init(t, &c, &env, init_budgets = false)
+		defer test_conn_destroy(&c)
 
 		trigger_retain :: proc(t: ^testing.T, c: ^http.Connection, cap := i32(http.RETAIN_MAX_BUF_SIZE)) {
 			c.scanner.scan = {
@@ -2171,27 +1661,12 @@ test_body_retain_and_body_parser_zero_copy_capped_blocks :: proc(t: ^testing.T) 
 
 @(test)
 test_scanner_pre_alloc_limits_and_timeout_rejection :: proc(t: ^testing.T) {
-	setup_conn :: proc(t: ^testing.T, s: ^http.Server, c: ^http.Connection, max_bytes: int, timeout: int) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.Arena{backing = context.allocator},
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c        = c
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator         = tx_alloc
-		c.req.headers.allocator   = tx_alloc
-		c.res.headers.allocator   = tx_alloc
-		c.res._buf.allocator      = tx_alloc
-		c.res._deferred.allocator = tx_alloc
-		c.scanner.c               = c
-		c.scanner.allocator       = &c.transaction_arena
-		c.res._state              = .Handling
-		c.res.budget.max          = 0
-		c.res._sends              = 1
-		c.req.budget.max          = max_bytes
-		c.req.budget.timeout      = time.Duration(timeout)
-		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
+	setup_conn :: proc(t: ^testing.T, env: ^Test_Env, c: ^http.Connection, max_bytes: int, timeout: int) {
+		c.temp_arena = http.Arena{backing = context.allocator}
+		test_conn_init(t, c, env, mock_handling = true, init_budgets = false)
+		c.req.budget.max     = max_bytes
+		c.req.budget.timeout = time.Duration(timeout)
+		buf, err := make([]byte, http.MULTIPLIER, http.transaction_allocator(c))
 		testing.expect_value(t, err, nil)
 		c.scanner.buf = buf
 	}
@@ -2199,18 +1674,14 @@ test_scanner_pre_alloc_limits_and_timeout_rejection :: proc(t: ^testing.T) {
 	for reuse in ([?]bool{true, false}) {
 		// 1. budget.max == 0 rejects with 413 Payload Too Large and 0 extra allocations.
 		{
-			counter := Arena_Counting_Allocator{backing = context.allocator}
-			s := http.make_server({}, arena_counting_allocator(&counter))
-			thread := http.Server_Thread{s = &s, id = 1}
-			prev_td := http.td
-			http.td = &thread
-			defer http.td = prev_td
-			defer http._server_thread_free_arenas_destroy(&thread)
+			counter := Test_Counting_Allocator{backing = context.allocator}
+			env: Test_Env
+			test_env_init(&env, allocator = test_counting_allocator(&counter))
+			defer test_env_destroy(&env)
 
 			c: http.Connection
-			setup_conn(t, &s, &c, 0, -1)
-			defer http.temp_allocator_destroy(&c)
-			defer http.transaction_allocator_destroy(&c)
+			setup_conn(t, &env, &c, 0, -1)
+			defer test_conn_destroy(&c)
 
 			before_allocs := counter.alloc_count
 			orig_tail := c.transaction_arena.tail
@@ -2230,18 +1701,14 @@ test_scanner_pre_alloc_limits_and_timeout_rejection :: proc(t: ^testing.T) {
 
 		// 2. budget.timeout == 0 rejects with 408 Request Timeout and 0 extra allocations.
 		{
-			counter := Arena_Counting_Allocator{backing = context.allocator}
-			s := http.make_server({}, arena_counting_allocator(&counter))
-			thread := http.Server_Thread{s = &s, id = 1}
-			prev_td := http.td
-			http.td = &thread
-			defer http.td = prev_td
-			defer http._server_thread_free_arenas_destroy(&thread)
+			counter := Test_Counting_Allocator{backing = context.allocator}
+			env: Test_Env
+			test_env_init(&env, allocator = test_counting_allocator(&counter))
+			defer test_env_destroy(&env)
 
 			c: http.Connection
-			setup_conn(t, &s, &c, 1024, 0)
-			defer http.temp_allocator_destroy(&c)
-			defer http.transaction_allocator_destroy(&c)
+			setup_conn(t, &env, &c, 1024, 0)
+			defer test_conn_destroy(&c)
 
 			before_allocs := counter.alloc_count
 			orig_tail := c.transaction_arena.tail
@@ -2263,49 +1730,23 @@ test_scanner_pre_alloc_limits_and_timeout_rejection :: proc(t: ^testing.T) {
 
 @(test)
 test_chunked_framing_bounds :: proc(t: ^testing.T) {
-	setup_chunked_conn :: proc(t: ^testing.T, s: ^http.Server, c: ^http.Connection, payload: string, buf_len := http.MULTIPLIER) {
-		c^ = http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.Arena{backing = context.allocator},
-		}
-		c.transaction_arena.c = c
-		c.temp_arena.c        = c
-		tx_alloc := http.transaction_allocator(c)
-		c._vars.allocator         = tx_alloc
-		c.req.headers.allocator   = tx_alloc
-		c.res.headers.allocator   = tx_alloc
-		c.res._buf.allocator      = tx_alloc
-		c.res._deferred.allocator = tx_alloc
-		c.scanner.c               = c
-		c.scanner.allocator       = &c.transaction_arena
-		http.budget_init(&c.req.budget, &s.opts.body_limits)
-		c.res._state              = .Handling
-		c.res.budget.max          = 0
-		c.res._sends              = 1
-		c.req.line.version        = {1, 1}
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
-
-		buf, err := make([]byte, max(buf_len, len(payload)), tx_alloc)
-		testing.expect_value(t, err, nil)
-		c.scanner.buf        = buf
-		c.scanner.write_head = copy(buf, payload)
+	setup_chunked_conn :: proc(t: ^testing.T, env: ^Test_Env, c: ^http.Connection, payload: string) {
+		c.temp_arena = http.Arena{backing = context.allocator}
+		test_conn_init(t, c, env, payload = payload, mock_handling = true, init_budgets = false)
+		http.budget_init(&c.req.budget, &env.s.opts.body_limits)
+		c.req.line.version = {1, 1}
+		test_req_set_headers(t, c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}})
 	}
 
 	// 1. Non-CRLF bytes after chunk data -> immediate 400 Bad Request on 2 bytes in both retain = false and retain = true.
 	for retain in ([?]bool{false, true}) {
-		s := http.make_server({body_limits = http.NO_LIMITS})
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		env: Test_Env
+		test_env_init(&env, opts = {body_limits = http.NO_LIMITS})
+		defer test_env_destroy(&env)
 
 		c: http.Connection
-		setup_chunked_conn(t, &s, &c, "5\r\nhelloXX")
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		setup_chunked_conn(t, &env, &c, "5\r\nhelloXX")
+		defer test_conn_destroy(&c)
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {}, retain = retain)
 		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
@@ -2314,15 +1755,12 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 
 	// 2a. Single huge incomplete trailer line (> request_limits.max_size) -> 431 Request Header Fields Too Large.
 	{
-		s := http.make_server({
+		env: Test_Env
+		test_env_init(&env, opts = {
 			request_limits = {max_size = 512, min = -1},
 			body_limits    = http.NO_LIMITS,
 		})
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		defer test_env_destroy(&env)
 
 		b := strings.builder_make()
 		defer strings.builder_destroy(&b)
@@ -2332,9 +1770,8 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		}
 
 		c: http.Connection
-		setup_chunked_conn(t, &s, &c, strings.to_string(b))
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		setup_chunked_conn(t, &env, &c, strings.to_string(b))
+		defer test_conn_destroy(&c)
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
@@ -2343,20 +1780,16 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 
 	// 2b. Multiple incomplete trailer lines exceeding request_limits.max_size (needing recv) -> 431.
 	{
-		s := http.make_server({
+		env: Test_Env
+		test_env_init(&env, opts = {
 			request_limits = {max_size = 32, min = -1},
 			body_limits    = http.NO_LIMITS,
 		})
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		defer test_env_destroy(&env)
 
 		c: http.Connection
-		setup_chunked_conn(t, &s, &c, "0\r\nX-A: 123456789012\r\nX-B: 123456789012\r\n")
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		setup_chunked_conn(t, &env, &c, "0\r\nX-A: 123456789012\r\nX-B: 123456789012\r\n")
+		defer test_conn_destroy(&c)
 
 		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
@@ -2372,36 +1805,19 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 
 	// 1. .Reuse (256 KiB full, < 512 bytes left) transitioning to on_trailer compacts in place with 0 new allocs.
 	{
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({}, arena_counting_allocator(&counter))
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
 
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		c: http.Connection
+		test_conn_init(t, &c, &env, init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator       = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.scanner.c             = &c
-		c.scanner.allocator     = &c.transaction_arena
 		http.budget_init(&c.req.budget, nil)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}, {"Trailer", "X-Tr"}})
 
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Trailer", "X-Tr"), nil)
-		http._headers_set_readonly(&c.req.headers)
-
-		buf, err := make([]byte, http.STREAM_MAX_BUF_SIZE, tx_alloc)
+		buf, err := make([]byte, http.STREAM_MAX_BUF_SIZE, http.transaction_allocator(&c))
 		testing.expect_value(t, err, nil)
 		orig_ptr := raw_data(buf)
 
@@ -2421,7 +1837,6 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 			split     = http.split_line(),
 			allocator = &c.transaction_arena,
 			callback  = proc(c: ^http.Connection, data: []byte) {
-				// Simulate _body_chunked's on_size seeing "0" and transitioning to trailer scan.
 				assert(string(data) == "0")
 				http.scan_line(&c.scanner, proc(c: ^http.Connection, tr: []byte) {
 					if len(tr) == 0 {
@@ -2466,37 +1881,21 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 	// 2. .Retain (64 KiB full, < 512 bytes left) transitioning to .Grow detaches to a small 4 KiB block (not 128 KiB)
 	//    and preserves previously retained slices untouched.
 	{
-		counter := Arena_Counting_Allocator{backing = context.allocator}
-		s := http.make_server({}, arena_counting_allocator(&counter))
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		counter := Test_Counting_Allocator{backing = context.allocator}
+		env: Test_Env
+		test_env_init(&env, allocator = test_counting_allocator(&counter))
+		defer test_env_destroy(&env)
 
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.get_arena(nil),
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		c: http.Connection
+		test_conn_init(t, &c, &env, init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator       = tx_alloc
-		c.req.headers.allocator = tx_alloc
-		c.scanner.c             = &c
-		c.scanner.allocator     = &c.transaction_arena
 		http.budget_init(&c.req.budget, nil)
-
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Host", "localhost"), nil)
-		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
-		http._headers_set_readonly(&c.req.headers)
+		test_req_set_headers(t, &c, {{"Host", "localhost"}, {"Transfer-Encoding", "chunked"}})
 		ts := http.context_add(&c.ctx, Transition_State{})
 
 		buf_size := 64 * mem.Kilobyte - size_of(http._Arena_Block)
-		buf, err := make([]byte, buf_size, tx_alloc)
+		buf, err := make([]byte, buf_size, http.transaction_allocator(&c))
 		testing.expect_value(t, err, nil)
 		for &b in buf[:len(buf)-16] { b = 'Z' }
 		retained := buf[:1024]
@@ -2555,75 +1954,25 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 
 @(test)
 test_scanner_allocator_switch_oom_preserves_consistency :: proc(t: ^testing.T) {
-	Fail_Allocator :: struct {
-		backing: mem.Allocator,
-		fail:    bool,
-	}
-
-	fail_allocator :: proc(fa: ^Fail_Allocator) -> mem.Allocator {
-		return {
-			data = fa,
-			procedure = proc(
-				allocator_data: rawptr,
-				mode: mem.Allocator_Mode,
-				size, alignment: int,
-				old_memory: rawptr,
-				old_size: int,
-				location := #caller_location,
-			) -> ([]byte, mem.Allocator_Error) {
-				fa := (^Fail_Allocator)(allocator_data)
-				if fa.fail {
-					#partial switch mode {
-					case .Alloc, .Alloc_Non_Zeroed, .Resize, .Resize_Non_Zeroed:
-						return nil, .Out_Of_Memory
-					}
-				}
-				return fa.backing.procedure(fa.backing.data, mode, size, alignment, old_memory, old_size, location)
-			},
-		}
-	}
-
 	for payload in ([?]string{"hello", "hello\r\n"}) {
-		fa := Fail_Allocator{backing = context.allocator, fail = true}
-		s := http.make_server({})
-		thread := http.Server_Thread{s = &s, id = 1}
-		prev_td := http.td
-		http.td = &thread
-		defer http.td = prev_td
-		defer http._server_thread_free_arenas_destroy(&thread)
+		fa := Test_Fail_Allocator{backing = context.allocator, fail = true}
+		env: Test_Env
+		test_env_init(&env)
+		defer test_env_destroy(&env)
 
-		c := http.Connection{
-			transaction_arena = http.get_arena(nil),
-			temp_arena        = http.Arena{backing = fail_allocator(&fa)},
-		}
-		c.transaction_arena.c = &c
-		c.temp_arena.c        = &c
-		defer http.temp_allocator_destroy(&c)
-		defer http.transaction_allocator_destroy(&c)
+		c: http.Connection
+		c.temp_arena = http.Arena{backing = test_fail_allocator(&fa)}
+		test_conn_init(t, &c, &env, payload = payload, mock_handling = true, init_budgets = false)
+		defer test_conn_destroy(&c)
 
-		tx_alloc := http.transaction_allocator(&c)
-		c._vars.allocator         = tx_alloc
-		c.req.headers.allocator   = tx_alloc
-		c.res.headers.allocator   = tx_alloc
-		c.res._buf.allocator      = tx_alloc
-		c.res._deferred.allocator = tx_alloc
-		c.scanner.c               = &c
-		c.scanner.allocator       = &c.transaction_arena
-		c.res._state              = .Handling
-		c.res.budget.max          = 0
-		c.res._sends              = 1
-		c.req.budget.max          = -1
-		c.req.budget.timeout      = -1
-
-		buf, err := make([]byte, http.MULTIPLIER, tx_alloc)
-		testing.expect_value(t, err, nil)
-		c.scanner.buf        = buf
-		c.scanner.write_head = copy(buf, payload)
+		c.req.budget.max     = -1
+		c.req.budget.timeout = -1
 
 		prev_logger := context.logger
 		context.logger = log.nil_logger()
 		http.scan_temp_line(&c.scanner, proc(c: ^http.Connection, data: []byte) {})
 		context.logger = prev_logger
+
 		testing.expect_value(t, c.res.status, http.Status.Internal_Server_Error)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.scanner.allocator, &c.transaction_arena)
@@ -2634,29 +1983,17 @@ test_scanner_allocator_switch_oom_preserves_consistency :: proc(t: ^testing.T) {
 
 @(test)
 test_scanner_reset_after_reusable_body_and_alignment :: proc(t: ^testing.T) {
-	counter := Arena_Counting_Allocator{backing = context.allocator}
-	s := http.make_server({}, arena_counting_allocator(&counter))
-	thread := http.Server_Thread{s = &s, id = 1}
-	prev_td := http.td
-	http.td = &thread
-	defer http.td = prev_td
-	defer http._server_thread_free_arenas_destroy(&thread)
+	counter := Test_Counting_Allocator{backing = context.allocator}
+	env: Test_Env
+	test_env_init(&env, allocator = test_counting_allocator(&counter))
+	defer test_env_destroy(&env)
 
-	c := http.Connection{
-		transaction_arena = http.get_arena(nil),
-		temp_arena        = http.get_arena(nil),
-	}
-	c.transaction_arena.c = &c
-	c.temp_arena.c        = &c
-	defer http.temp_allocator_destroy(&c)
-	defer http.transaction_allocator_destroy(&c)
-
-	tx_alloc := http.transaction_allocator(&c)
-	c.scanner.c         = &c
-	c.scanner.allocator = &c.transaction_arena
+	c: http.Connection
+	test_conn_init(t, &c, &env, init_budgets = false)
+	defer test_conn_destroy(&c)
 
 	// 1. scanner_reset after detached .Reuse body preserves pipelined bytes and resets mode/flag.
-	buf, err := make([]byte, http.BODY_BUF_SIZE, tx_alloc)
+	buf, err := make([]byte, http.BODY_BUF_SIZE, http.transaction_allocator(&c))
 	testing.expect_value(t, err, nil)
 	pipelined := "GET /next HTTP/1.1\r\n"
 	c.scanner.buf          = buf
