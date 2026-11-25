@@ -123,6 +123,8 @@
       - Expose the small cross-package seam in `core:net/http`: `headers_set_readonly(h: ^Headers, readonly: bool)`, `headers_eq`, and `headers_valid_value`.
     - Move server files (`server.odin`, `scanner.odin`, `arena.odin`, `respond.odin`, `router.odin`, `handlers.odin`, `main.odin`) into `core/net/http_server` (`package http_server`), re-exporting common protocol aliases (`Status`, `Method`, `Version`, `Headers`, `Cookie`, `Cookie_Same_Site`, `Limits`, `NO_LIMITS`, `Mime_Type`, etc.) from `core:net/http` so typical servers only need one import.
     - Update `core/websocket/server.odin`, `core/http2/examples/`, and `tests/core/net/http/` (splitting into `tests/core/net/http/` and `tests/core/net/http_server/` if desired) to the new package paths.
+ - [ ] rebase onto master and remove non-http-server packages (first pr will just be the http server)
+     - [ ] squash commits
 
 ### Memory Management Follow-Ups (For Further Review)
 
