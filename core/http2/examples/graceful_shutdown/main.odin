@@ -60,7 +60,7 @@ main :: proc() {
 
 handle_fast :: proc(ctx: ^http.Ctx) {
 	worker_requests += 1
-	http.respond_plain(&ctx.res, fmt.tprintf("served by worker %d (total=%d)\n", worker_id, worker_requests))
+	http.respond_plain(ctx, fmt.tprintf("served by worker %d (total=%d)\n", worker_id, worker_requests))
 }
 
 handle_slow :: proc(ctx: ^http.Ctx) {
@@ -78,6 +78,6 @@ handle_slow :: proc(ctx: ^http.Ctx) {
 		context.temp_allocator = http.temp_allocator(ctx)
 		state := http.context_get(ctx, Slow_State)
 		state.timer = nil
-		http.respond_plain(&ctx.res, fmt.tprintf("slow request drained cleanly on worker %d\n", worker_id))
+		http.respond_plain(ctx, fmt.tprintf("slow request drained cleanly on worker %d\n", worker_id))
 	})
 }

@@ -56,13 +56,13 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st := (^Direct_State)(user_data)
 			st.called = true
 			st.method = ctx.req.line.method
-			st.wants_body = http.wants_body(&ctx.req)
+			st.wants_body = http.wants_body(ctx)
 
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.write_response_heading(&ctx.res)
+			http.write_response_heading(ctx)
 			ctx.res._state = .Sending
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		})
 
 		s := http.make_server({handlers = {h}})
@@ -110,20 +110,20 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st := (^Fallback_State)(user_data)
 			st.get_called = true
 			st.method = ctx.req.line.method
-			st.wants_body = http.wants_body(&ctx.req)
+			st.wants_body = http.wants_body(ctx)
 			id := http.route_param(http.route_params(ctx), "id")
 			st.param_len = copy(st.param_buf[:], id)
 
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.respond_bytes(&ctx.res, transmute([]byte)string("hello"))
+			http.respond_bytes(ctx, transmute([]byte)string("hello"))
 		}))
 		http.route_all(&r, "/*", http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			st := (^Fallback_State)(user_data)
 			st.all_called = true
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		}))
 
 		s.opts.handlers = {http.router(&r)}
@@ -160,7 +160,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st.head_method = ctx.req.line.method
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		}))
 		http.route_get(&r, "/custom", http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			st := (^Custom_State)(user_data)
@@ -168,7 +168,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st.get_method = ctx.req.line.method
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		}))
 
 		s.opts.handlers = {http.router(&r)}
@@ -213,7 +213,7 @@ test_head_method_preserved_and_router_fallback :: proc(t: ^testing.T) {
 			st.method = ctx.req.line.method
 			ctx.res.progress.max = 0
 			ctx.res._sends = 1
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		}))
 
 		root: http.Router
@@ -473,7 +473,7 @@ test_subrouter_middleware_user_data_preserved :: proc(t: ^testing.T) {
 		st := (^Mw_State)(user_data)
 		st.inner_called = true
 		ctx.res.status  = .OK
-		http.write_response_heading(&ctx.res)
+		http.write_response_heading(ctx)
 		ctx.res._state = .Sent
 	}))
 
@@ -568,7 +568,7 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 		record(st, "mw2:before")
 		if st.block {
 			ctx.res.status = .Forbidden
-			http.write_response_heading(&ctx.res)
+			http.write_response_heading(ctx)
 			ctx.res._state = .Sent
 			return
 		}
@@ -579,7 +579,7 @@ test_route_middleware_chain_order_short_circuit_and_cleanup :: proc(t: ^testing.
 		st := (^Chain_Log)(user_data)
 		record(st, "endpoint")
 		ctx.res.status = .OK
-		http.write_response_heading(&ctx.res)
+		http.write_response_heading(ctx)
 		ctx.res._state = .Sent
 	}
 

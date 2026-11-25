@@ -227,8 +227,8 @@ test_chunked_body_trailers_filtering :: proc(t: ^testing.T) {
 		t = t,
 	})
 
-	http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-		exp := http.context_get(http.context_of_request(req), Chunked_Body_Expectation)
+	http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
+		exp := http.context_get(ctx, Chunked_Body_Expectation)
 		if len(body) > 0 {
 			n := copy(exp.buf[exp.len:], body)
 			testing.expect_value(exp.t, n, len(body))
@@ -558,7 +558,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "10485761"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect(t, c.res._state == .Error)
 	}
@@ -574,7 +574,7 @@ test_request_size_and_header_count_limits :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect(t, c.res._state == .Error)
 	}
@@ -747,7 +747,7 @@ test_validate_headers_smuggling_defenses :: proc(t: ^testing.T) {
 		c.scanner.buf = buf
 		c.scanner.write_head = copy(buf, payload)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
 		testing.expect(t, c.res._state == .Error)
 	}
@@ -782,15 +782,15 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 	}
 
 	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
-		http.write_response_heading(&c.res)
+		http.write_response_heading(&c.ctx)
 		c.res._state = .Sending
 		c.res._sends = pending_sends
-		http.respond(&c.res)
+		http.respond(&c.ctx)
 	}
 
 	test_handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
 		state := (^Test_State)(user_data)
-			c := http.connection_of_context(ctx)
+			c := http._connection_of_context(ctx)
 			state.req_count += 1
 
 			if state.req_count == 2 {
@@ -808,10 +808,9 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 			case .Consumed_Keepalive:
 				state.finish = finish_test_response
 				http.context_add(ctx, state)
-				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
-					ctx := http.context_of_request(req)
+				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
 					state := http.context_get(ctx, ^Test_State)^
-					c := http.connection_of_request(req)
+					c := http._connection_of_context(ctx)
 
 					state.body_cb_calls += 1
 					if len(data) > 0 {
@@ -828,10 +827,9 @@ test_unconsumed_and_inflight_body_keepalive :: proc(t: ^testing.T) {
 			case .Partial_Cb_Respond:
 				state.finish = finish_test_response
 				http.context_add(ctx, state)
-				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
-					ctx := http.context_of_request(req)
+				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
 					state := http.context_get(ctx, ^Test_State)^
-					c := http.connection_of_request(req)
+					c := http._connection_of_context(ctx)
 
 					state.body_cb_calls += 1
 					if len(data) > 0 {
@@ -1019,15 +1017,15 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 	}
 
 	finish_test_response :: proc(c: ^http.Connection, pending_sends := 0) {
-		http.write_response_heading(&c.res)
+		http.write_response_heading(&c.ctx)
 		c.res._state = .Sending
 		c.res._sends = pending_sends
-		http.respond(&c.res)
+		http.respond(&c.ctx)
 	}
 
 	handler := proc(user_data: rawptr, ctx: ^http.Ctx) {
 		st := (^Pause_State)(user_data)
-			c := http.connection_of_context(ctx)
+			c := http._connection_of_context(ctx)
 			st.req_count += 1
 
 			if st.req_count == 2 {
@@ -1039,14 +1037,13 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 			http.context_add(ctx, st)
 			if st.mode == .Pause_Before_Body_And_On_Final {
 				// No-ops before body() is called.
-				http.body_pause(&c.req)
-				http.body_resume(&c.req)
+				http.body_pause(&c.ctx)
+				http.body_resume(&c.ctx)
 			}
 
-			http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
-				ctx := http.context_of_request(req)
+			http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
 				st := http.context_get(ctx, ^Pause_State)^
-				c := http.connection_of_request(req)
+				c := http._connection_of_context(ctx)
 				st.cb_calls += 1
 
 				if len(data) > 0 {
@@ -1057,38 +1054,38 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 				if !is_partial {
 					if st.mode == .Pause_Before_Body_And_On_Final {
 						// No-ops on final callback once body has been consumed.
-						http.body_pause(req)
-						http.body_resume(req)
+						http.body_pause(ctx)
+						http.body_resume(ctx)
 					}
 					st.finished = true
-					st.consumed_on_end = req.has_consumed_body
-					if tr, ok := http.get_header(req, "X-Tr"); ok && tr == "ok" {
+					st.consumed_on_end = ctx.req.has_consumed_body
+					if tr, ok := http.get_header(ctx, "X-Tr"); ok && tr == "ok" {
 						st.trailer_ok = true
 					}
 					pending := st.early_respond_pending ? 1 : 0
-					http.write_response_heading(&c.res)
+					http.write_response_heading(ctx)
 					c.res._state = .Sending
 					c.res._sends = pending
-					http.respond(&c.res)
+					http.respond(ctx)
 					return
 				}
 
 				switch st.mode {
 				case .Async_Paused, .Pause_Before_Body_And_On_Final:
 					st.saved_slice = data
-					http.body_pause(req)
+					http.body_pause(ctx)
 				case .Sync_Pause_Resume:
-					http.body_pause(req)
-					http.body_resume(req)
+					http.body_pause(ctx)
+					http.body_resume(ctx)
 				case .Sync_Pause_Resume_Pause:
 					if st.cb_calls == 1 {
 						st.saved_slice = data
-						http.body_pause(req)
-						http.body_resume(req)
-						http.body_pause(req)
+						http.body_pause(ctx)
+						http.body_resume(ctx)
+						http.body_pause(ctx)
 					} else {
-						http.body_pause(req)
-						http.body_resume(req)
+						http.body_pause(ctx)
+						http.body_resume(ctx)
 					}
 				}
 			})
@@ -1149,11 +1146,11 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
 		// Redundant pause is idempotent, and appending unread bytes does not overwrite saved_slice while paused.
-		http.body_pause(&env.c.req)
+		http.body_pause(&env.c.ctx)
 		append_bytes(&env.c, "worldGET /after-cl HTTP/1.1\r\nHost: localhost\r\n\r\n")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		// Paused after final Content-Length data chunk (curr_size == 0) before uniform (nil, false) EOF.
 		testing.expect_value(t, st.cb_calls, 2)
@@ -1162,7 +1159,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil while paused before EOF")
 		testing.expect_value(t, string(st.saved_slice), "world")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		testing.expect(t, st.finished, "expected Content-Length body to emit (nil, false) on resume")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
@@ -1192,7 +1189,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		append_bytes(&env.c, "world\r\n5\r\n!!!!!\r\n0\r\nX-Tr: ok\r\n\r\nGET /after-ch HTTP/1.1\r\nHost: localhost\r\n\r\n")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		// Paused on exact chunk boundary (curr_size == 0 before \r\n); next chunk must not run yet.
 		testing.expect_value(t, st.cb_calls, 2)
@@ -1200,7 +1197,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk boundary")
 		testing.expect_value(t, string(st.saved_slice), "world")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		// Paused on second exact chunk boundary before final 0-chunk + trailers.
 		testing.expect_value(t, st.cb_calls, 3)
@@ -1208,7 +1205,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil at chunk 2 boundary")
 		testing.expect_value(t, string(st.saved_slice), "!!!!!")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		testing.expect(t, st.finished, "expected chunked body to complete after trailers")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on chunked end")
@@ -1255,7 +1252,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback nil after pause->resume->pause")
 		testing.expect_value(t, string(st.saved_slice), "abc")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		testing.expect(t, st.finished, "expected external resume to complete buffered body")
 		testing.expect_value(t, st.cb_calls, 3)
@@ -1276,13 +1273,13 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, !st.finished, "expected Content-Length chunk to pause before (nil, false) EOF")
 		testing.expect_value(t, string(st.saved_slice), "hello")
 
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 
 		testing.expect(t, st.finished, "expected resume after final Content-Length chunk to deliver (nil, false) EOF")
 		testing.expect(t, st.consumed_on_end, "expected has_consumed_body true on final callback")
 		testing.expect_value(t, st.cb_calls, 2)
 		// Redundant resume when not paused / already consumed must be a safe no-op.
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected no scan after redundant resume")
 	}
 
@@ -1301,7 +1298,7 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 		testing.expect(t, env.c.res._state == .Sent, "expected response state Sent")
 
 		// Stray resume after respond() must not re-arm scanning.
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 		testing.expect(t, !st.finished, "expected stray resume after respond not to deliver further body chunks")
 		testing.expect(t, env.c.scanner.scan.callback == nil, "expected scan callback to stay nil after Sent")
 	}
@@ -1325,14 +1322,14 @@ test_body_pause_resume :: proc(t: ^testing.T) {
 			callback  = sentinel_cb,
 		}
 		// External pause + resume while another scan is already pending must not clobber the pending scan.
-		http.body_pause(&env.c.req)
-		http.body_resume(&env.c.req)
+		http.body_pause(&env.c.ctx)
+		http.body_resume(&env.c.ctx)
 		testing.expect(t, env.c.scanner.scan.callback == sentinel_cb, "expected body_resume not to overwrite active scan.callback")
 
 		env.c.scanner.scan = {}
-		http.body_pause(&env.c.req)
+		http.body_pause(&env.c.ctx)
 		append_bytes(&env.c, "\r\n0\r\n\r\n")
-		http.body_resume(&env.c.req)
+		http.body_resume(&env.c.ctx)
 		testing.expect(t, st.finished, "expected chunked body to finish after clearing sentinel and resuming")
 		testing.expect_value(t, string(st.body_received[:st.body_len]), "abc")
 	}
@@ -1391,10 +1388,10 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 			st.sends_seen = ctx.res._sends
 			st.sent_seen = ctx.res.sent
 			ctx.res.status = .Unauthorized
-			http.write_response_heading(&ctx.res)
+			http.write_response_heading(ctx)
 			ctx.res._state = .Sending
 			ctx.res._sends = 1
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		})}})
 
 		thread := http.Server_Thread{s = &s, id = 1}
@@ -1437,7 +1434,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "101"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
@@ -1463,8 +1460,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		zs := http.context_add(&c.ctx, Zero_State{})
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-			zs := http.context_get(http.context_of_request(req), Zero_State)
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
+			zs := http.context_get(ctx, Zero_State)
 			zs.calls += 1
 			zs.is_partial = is_partial
 		})
@@ -1494,8 +1491,8 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		http._headers_set_readonly(&c.req.headers)
 
 		bs := http.context_add(&c.ctx, Buffered_State{})
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-			bs := http.context_get(http.context_of_request(req), Buffered_State)
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
+			bs := http.context_get(ctx, Buffered_State)
 			if len(body) > 0 {
 				bs.got_len += copy(bs.got[bs.got_len:], body)
 			}
@@ -1523,7 +1520,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Handling)
 		testing.expect_value(t, c.res._sends, 1)
 		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
@@ -1542,7 +1539,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.res.status, http.Status{})
 		testing.expect_value(t, len(c.res._buf), 0)
@@ -1561,7 +1558,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect_value(t, c.res.status, http.Status{})
 		testing.expect_value(t, len(c.res._buf), 0)
@@ -1578,7 +1575,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Transfer-Encoding", "chunked"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 		testing.expect(t, strings.has_prefix(string(c.res._buf[:]), "HTTP/1.1 413 "), "expected 413 heading without prior 100 Continue")
@@ -1598,7 +1595,7 @@ test_lazy_expect_continue :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.req.headers, "Content-Length", "5"), nil)
 		http._headers_set_readonly(&c.req.headers)
 
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Sending)
 		testing.expect_value(t, c.res._sends, 1)
 		testing.expect(t, c.scanner.scan.callback != nil, "expected body scan to be scheduled")
@@ -1707,14 +1704,13 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 			body_quota = http.UNLIMITED_QUOTA,
 			handlers   = {http.handler(&st, proc(user_data: rawptr, ctx: ^http.Ctx) {
 				st := (^State)(user_data)
-				c := http.connection_of_context(ctx)
 
 				temp, terr := make([]byte, 256, context.temp_allocator)
 				testing.expect_value(st.t, terr, nil)
 				for &b in temp { b = 0x5A }
 				st.temp_sentinel = temp
 
-				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 			})},
 		}, arena_counting_allocator(&counter))
 
@@ -1844,7 +1840,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 
 		// Original request line, headers, and temp_allocator data remain intact and unpoisoned.
 		testing.expect_value(t, c.req.line.target, "/upload")
-		tag, tag_ok := http.get_header(&c.req, "X-Tag")
+		tag, tag_ok := http.get_header(&c.ctx, "X-Tag")
 		testing.expect(t, tag_ok, "expected header preserved")
 		testing.expect_value(t, tag, "keep-me")
 		testing.expect(t, sanitizer.address_region_is_poisoned(st.temp_sentinel) == nil, "expected temp_allocator data unpoisoned")
@@ -1897,8 +1893,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		s := http.make_server({
 			body_quota = http.UNLIMITED_QUOTA,
 			handlers   = {proc(ctx: ^http.Ctx) {
-				c := http.connection_of_context(ctx)
-				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 			}},
 		}, arena_counting_allocator(&counter))
 
@@ -1936,8 +1931,7 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		s := http.make_server({
 			body_quota = http.UNLIMITED_QUOTA,
 			handlers   = {proc(ctx: ^http.Ctx) {
-				c := http.connection_of_context(ctx)
-				http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+				http.body(ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 			}},
 		}, arena_counting_allocator(&counter))
 
@@ -2000,16 +1994,16 @@ test_body_reusable_buffer_caps_untrusted_sizes_and_preserves_state :: proc(t: ^t
 		c.scanner.write_head   = copy(rbuf, payload)
 
 		ts := http.context_add(&c.ctx, Trailer_State{})
-		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
 			if !is_partial {
-				ts := http.context_get(http.context_of_request(req), Trailer_State)
+				ts := http.context_get(ctx, Trailer_State)
 				ts.done = true
 			}
 		})
 
 		testing.expect(t, ts.done, "expected chunked trailer body completion")
 		testing.expect(t, !c.scanner.buf_reusable, "expected on_trailer to clear buf_reusable")
-		tr_val, tr_ok := http.get_header(&c.req, "X-Trailer")
+		tr_val, tr_ok := http.get_header(&c.ctx, "X-Trailer")
 		testing.expect(t, tr_ok, "expected trailer header stored in request")
 		testing.expect_value(t, tr_val, "val")
 		testing.expect_value(t, string(c.scanner.buf[c.scanner.read_head:c.scanner.write_head]), "GET /next HTTP/1.1\r\n")
@@ -2315,7 +2309,7 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		defer http.temp_allocator_destroy(&c)
 		defer http.transaction_allocator_destroy(&c)
 
-		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {}, retain = retain)
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {}, retain = retain)
 		testing.expect_value(t, c.res.status, http.Status.Bad_Request)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
@@ -2344,7 +2338,7 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		defer http.temp_allocator_destroy(&c)
 		defer http.transaction_allocator_destroy(&c)
 
-		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
@@ -2366,7 +2360,7 @@ test_chunked_framing_bounds :: proc(t: ^testing.T) {
 		defer http.temp_allocator_destroy(&c)
 		defer http.transaction_allocator_destroy(&c)
 
-		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Request_Header_Fields_Too_Large)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 	}
@@ -2466,7 +2460,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.scanner.write_head += copy(c.scanner.buf[c.scanner.write_head:], rest)
 		testing.expect(t, !http._scanner_pump_buffered(&c.scanner))
 		testing.expect(t, ts.done, "expected trailer completion")
-		val, ok := http.get_header(&c.req, "X-Tr")
+		val, ok := http.get_header(&c.ctx, "X-Tr")
 		testing.expect(t, ok, "expected trailer header")
 		testing.expect_value(t, val, "ok")
 	}
@@ -2555,7 +2549,7 @@ test_body_mode_transition_to_grow_at_buffer_tail :: proc(t: ^testing.T) {
 		c.scanner.write_head += copy(c.scanner.buf[c.scanner.write_head:], rest)
 		testing.expect(t, !http._scanner_pump_buffered(&c.scanner))
 		testing.expect(t, ts.done, "expected trailer completion")
-		val, ok := http.get_header(&c.req, "X-Tr")
+		val, ok := http.get_header(&c.ctx, "X-Tr")
 		testing.expect(t, ok, "expected trailer header")
 		testing.expect_value(t, val, "ok")
 	}

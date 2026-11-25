@@ -510,14 +510,14 @@ rather than freed.
 
 For async consumers (`send`, `send_chunk`, `nbio.write`, etc.) with `retain = false`, either:
 1. Copy/clone `body` before returning, or
-2. Call `body_pause(req)` inside this callback before issuing the async operation, keeping `body`
-   valid zero-copy until the async completion calls `body_resume(req)` (which then continues
+2. Call `body_pause(ctx)` inside this callback before issuing the async operation, keeping `body`
+   valid zero-copy until the async completion calls `body_resume(ctx)` (which then continues
    scanning or delivers the final `(nil, is_partial = false)` callback).
 
 When `body` is called with `retain = true`, chunks live on `transaction_arena` for the duration of
 the request.
 */
-Body_Cb :: proc(req: ^Request, body: []byte, is_partial: bool)
+Body_Cb :: proc(ctx: ^Ctx, body: []byte, is_partial: bool)
 
 Body_Request :: struct {
 	cb:        Body_Cb,
@@ -543,7 +543,7 @@ _scan_body :: proc(c: ^Connection, split: Scan_Splitter, cb: Scan_Cb, hint := -1
 
 @(private="file")
 _request_is_chunked :: proc(req: ^Request) -> bool {
-	enc_header, ok := get_header(req, "Transfer-Encoding")
+	enc_header, ok := headers_get(req.headers, "Transfer-Encoding")
 	return ok && _headers_eq(enc_header, "chunked")
 }
 
@@ -557,37 +557,36 @@ With `retain = false` (default), chunks are scanned into a single O(1) reusable 
 `transaction_arena` (starting at `<= 16 KiB` and adaptively scaling up to `256 KiB` when recvs fill
 it). Returning from `cb` without calling `body_pause` allows subsequent reads to compact or
 overwrite that live buffer in place (undetectable by ASAN), so async consumers (`send`,
-`send_chunk`, `nbio.write`, etc.) must either copy `body` before returning or call `body_pause(req)`
-until their async work completes and calls `body_resume(req)`.
+`send_chunk`, `nbio.write`, etc.) must either copy `body` before returning or call `body_pause(ctx)`
+until their async work completes and calls `body_resume(ctx)`.
 
 With `retain = true`, chunks are scanned zero-copy into chained buffers on `transaction_arena`
 (starting at `<= 16 KiB` and progressively scaling up to `32 MiB` as blocks fill) and remain
 valid for the lifetime of the request transaction.
 */
-body :: proc(req: ^Request, cb: Body_Cb, retain := false, loc := #caller_location) {
-	ctx := context_of_request(req)
+body :: proc(ctx: ^Ctx, cb: Body_Cb, retain := false, loc := #caller_location) {
 	assert(context_get(ctx, Body_Request) == nil, "body already consumed", loc)
+	c := _connection_of_context(ctx)
 	if _, err := context_add(ctx, Body_Request{cb = cb, retain = retain}); err != nil {
-		c := connection_of_request(req)
 		log.errorf("http[t=%v][c=%v]: msg=\"body context_add OOM\", err=%v", td.id, c.socket, err)
 		invalid_request(c, .Internal_Server_Error)
 		return
 	}
 
-	if req.has_consumed_body {
-		_body_cb(req, nil, is_partial=false)
+	if ctx.req.has_consumed_body {
+		_body_cb(c, nil, is_partial=false)
 		return
 	}
 
-	if _request_is_chunked(req) {
-		_body_chunked(req)
+	if _request_is_chunked(&ctx.req) {
+		_body_chunked(c)
 	} else {
-		_body_length(req)
+		_body_length(c)
 	}
 }
 
 /*
-Pauses streaming body reads for `req` until `body_resume` is called.
+Pauses streaming body reads for `ctx` until `body_resume` is called.
 
 Call from within a `Body_Cb` (before dispatching any async operation that will call `body_resume`)
 to apply backpressure while an async consumer drains the current `body` chunk (e.g. `nbio.write`
@@ -598,12 +597,11 @@ with `retain = false`) until `body_resume` is called. When resuming after the fi
 
 No-op if `body` has not been called or the body has already been consumed (`is_partial == false`).
 */
-body_pause :: proc(req: ^Request) {
-	if req.has_consumed_body {
+body_pause :: proc(ctx: ^Ctx) {
+	if ctx.req.has_consumed_body {
 		return
 	}
-	c := connection_of_request(req)
-	body_req := context_get(&c.ctx, Body_Request)
+	body_req := context_get(ctx, Body_Request)
 	if body_req == nil {
 		return
 	}
@@ -620,17 +618,17 @@ have finished reading it first.
 Safe to call redundantly, synchronously inside `Body_Cb` (cancelling an earlier `body_pause`
 without recursion), after the body has finished, or after the response has ended/errored.
 */
-body_resume :: proc(req: ^Request) {
-	if req.has_consumed_body {
+body_resume :: proc(ctx: ^Ctx) {
+	if ctx.req.has_consumed_body {
 		return
 	}
-	c := connection_of_request(req)
-	body_req := context_get(&c.ctx, Body_Request)
+	body_req := context_get(ctx, Body_Request)
 	if body_req == nil || !body_req.paused {
 		return
 	}
 	body_req.paused = false
 
+	c := _connection_of_context(ctx)
 	// If called synchronously while the scanner pump is active (e.g. inside `Body_Cb`, or from a
 	// synchronous `on_sent` on a `HEAD` request), let the active continuation schedule the next
 	// scan iteratively upon return.
@@ -641,29 +639,28 @@ body_resume :: proc(req: ^Request) {
 		return
 	}
 
-	if _request_is_chunked(req) {
+	if _request_is_chunked(&ctx.req) {
 		_body_chunked_continue(c)
 	} else {
 		_body_length_continue(c)
 	}
 }
 
-_body_cb :: proc(req: ^Request, body: []byte, is_partial: bool) -> (destroyed: bool) {
+_body_cb :: proc(c: ^Connection, body: []byte, is_partial: bool) -> (destroyed: bool) {
 	if !is_partial {
-		req.has_consumed_body = true
+		c.req.has_consumed_body = true
 	}
-	c := connection_of_request(req)
 	body_req := context_get(&c.ctx, Body_Request)
 	assert(body_req != nil)
 
 	if !is_partial {
-		body_req.cb(req, body, false)
+		body_req.cb(&c.ctx, body, false)
 		return false
 	}
 
 	destroy_flag: _Destroy_Flag
 	_destroy_flag_push(c, &destroy_flag)
-	body_req.cb(req, body, true)
+	body_req.cb(&c.ctx, body, true)
 	return _destroy_flag_pop(c, &destroy_flag)
 }
 
@@ -691,8 +688,7 @@ Content-Length := length
 Remove "chunked" from Transfer-Encoding
 Remove Trailer from existing header fields
 */
-_body_chunked :: proc(req: ^Request) {
-	c := connection_of_request(req)
+_body_chunked :: proc(c: ^Connection) {
 	if !_maybe_send_continue(c) {
 		return
 	}
@@ -756,7 +752,7 @@ _body_chunked_on_body :: proc(c: ^Connection, data: []byte) {
 	body_req := context_get(&c.ctx, Body_Request)
 	body_req.curr_size -= len(data)
 
-	if _body_cb(&c.req, data, is_partial=true) {
+	if _body_cb(c, data, is_partial=true) {
 		return
 	}
 	if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil || body_req.paused {
@@ -792,7 +788,7 @@ _body_chunked_on_trailer :: proc(c: ^Connection, data: []byte) {
 			return
 		}
 
-		_body_cb(&c.req, nil, is_partial=false)
+		_body_cb(c, nil, is_partial=false)
 		return
 	}
 
@@ -815,16 +811,15 @@ _body_chunked_on_trailer :: proc(c: ^Connection, data: []byte) {
 	scan_line(&c.scanner, _body_chunked_on_trailer)
 }
 
-_body_length :: proc(req: ^Request) {
-	c := connection_of_request(req)
-	clen, has_clen, ok := get_content_length_header(req)
+_body_length :: proc(c: ^Connection) {
+	clen, has_clen, ok := get_content_length_header(&c.req)
 	if !ok {
 		invalid_request(c, .Bad_Request)
 		return
 	}
 
 	if !has_clen || clen == 0 {
-		_body_cb(&c.req, nil, is_partial=false)
+		_body_cb(c, nil, is_partial=false)
 		return
 	}
 
@@ -846,7 +841,7 @@ _body_length :: proc(req: ^Request) {
 _body_length_continue :: proc(c: ^Connection) {
 	body_req := context_get(&c.ctx, Body_Request)
 	if body_req.curr_size <= 0 {
-		_body_cb(&c.req, nil, is_partial=false)
+		_body_cb(c, nil, is_partial=false)
 		return
 	}
 	_scan_body(c, split_at_most(body_req.curr_size), _body_length_on_body, hint = body_req.curr_size)
@@ -856,7 +851,7 @@ _body_length_continue :: proc(c: ^Connection) {
 _body_length_on_body :: proc(c: ^Connection, data: []byte) {
 	body_req := context_get(&c.ctx, Body_Request)
 	body_req.curr_size -= len(data)
-	if _body_cb(&c.req, data, is_partial=true) {
+	if _body_cb(c, data, is_partial=true) {
 		return
 	}
 	if c.res._state == .Sent || c.res._state == .Error || c.scanner.scan.callback != nil || body_req.paused {
@@ -880,7 +875,7 @@ _maybe_send_continue :: proc(c: ^Connection) -> bool {
 	}
 	if expect, ok := headers_get(c.req.headers, "expect"); ok && _headers_eq(expect, "100-continue") {
 		CONTINUE_RESPONSE :: "HTTP/1.1 100 Continue\r\n\r\n"
-		_do_send(&c.res, {transmute([]byte)string(CONTINUE_RESPONSE)}, nil)
+		_do_send(c, {transmute([]byte)string(CONTINUE_RESPONSE)}, nil)
 		return c.res._state != .Error
 	}
 	return true

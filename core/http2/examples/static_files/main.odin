@@ -21,7 +21,7 @@ main :: proc() {
 	r := http.make_router()
 
 	http.route_get(&r, "/", proc(ctx: ^http.Ctx) {
-		http.respond_html(&ctx.res, `<ul>
+		http.respond_html(ctx, `<ul>
 <li><a href="/embedded">/embedded</a></li>
 <li><a href="/no-range">/no-range</a></li>
 <li><a href="/manual">/manual</a></li>
@@ -31,16 +31,16 @@ main :: proc() {
 
 	http.route_get(&r, "/embedded", proc(ctx: ^http.Ctx) {
 		// Explicitly overwrite content-type, by default it is inferred from the given file.
-		http.set_header(&ctx.res, "Content-Type", "text/plain; charset=utf-8")
+		http.set_header(ctx, "Content-Type", "text/plain; charset=utf-8")
 		// Setting an ETag before responding has the response support and handle the ETag condition.
-		http.set_header(&ctx.res, "ETag", `"v1"`)
-		http.respond_file_content(&ctx.res, "main.odin", SELF_SRC)
+		http.set_header(ctx, "ETag", `"v1"`)
+		http.respond_file_content(ctx, "main.odin", SELF_SRC)
 	})
 
 	http.route_get(&r, "/no-range", proc(ctx: ^http.Ctx) {
 		// Explicitly opt-out of range request by setting it to none before responding.
-		http.set_header(&ctx.res, "Accept-Ranges", "none")
-		http.respond_file_path(&ctx.res, "main.odin")
+		http.set_header(ctx, "Accept-Ranges", "none")
+		http.respond_file_path(ctx, "main.odin")
 	})
 
 	http.route_get(&r, "/manual", proc(ctx: ^http.Ctx) {
@@ -49,7 +49,7 @@ main :: proc() {
 		f, err := os.open("main.odin", {.Read, .Non_Blocking})
 		if err != nil {
 			ctx.res.status = .Not_Found
-			http.respond_plain(&ctx.res, "not found\n")
+			http.respond_plain(ctx, "not found\n")
 			return
 		}
 
@@ -60,13 +60,13 @@ main :: proc() {
 			os.close(http.context_get(ctx, ^os.File)^)
 		})
 
-		assoc_err := http.respond_file(&ctx.res, f)
+		assoc_err := http.respond_file(ctx, f)
 		assert(assoc_err == nil, "failed to associate file with the event loop, shouldn't be possible here")
 	})
 
 	// Serves the current working directory at /files
 	http.route_get(&r, "/files/*", proc(ctx: ^http.Ctx) {
-		http.respond_dir(&ctx.res, ".", http.route_suffix(ctx))
+		http.respond_dir(ctx, ".", http.route_suffix(ctx))
 	})
 
 	fmt.println("Listening on http://127.0.0.1:8080")

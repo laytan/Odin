@@ -119,7 +119,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		testing.expect_value(t, http.headers_set(&c.res.headers, "Upgrade", "websocket"), nil)
 		testing.expect_value(t, http.headers_set(&c.res.headers, "Connection", "upgrade"), nil)
 
-		http.write_response_heading(&c.res)
+		http.write_response_heading(&c.ctx)
 		heading := string(c.res._buf[:])
 		testing.expect(t, strings.has_prefix(heading, "HTTP/1.1 101 Switching Protocols\r\n"), "expected 101 status line")
 		testing.expect(t, !strings.contains(heading, "Content-Length:"), "expected no Content-Length on 101 heading")
@@ -132,8 +132,9 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 			type = .Send,
 			send = {sent = len(c.res._buf)},
 		}
-		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			chk := http.context_get(&c.ctx, Upgrade_Check)
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			chk := http.context_get(ctx, Upgrade_Check)
+			c   := http._connection_of_context(ctx)
 			chk.on_sent_called     = true
 			chk.last_err           = err
 			chk.temp_alloc_matched = context.temp_allocator.data == http.temp_allocator(c).data
@@ -167,8 +168,8 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 			type = .Send,
 			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
 		}
-		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			chk := http.context_get(&c.ctx, Upgrade_Check)
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			chk := http.context_get(ctx, Upgrade_Check)
 			chk.on_sent_called = true
 			chk.last_err       = err
 		})
@@ -187,7 +188,7 @@ test_send_heading_upgrade_flow :: proc(t: ^testing.T) {
 		c.res.status = .Switching_Protocols
 		c.res._state  = .Sending
 		c.res._sends  = 1
-		http.respond(&c.res)
+		http.respond(&c.ctx)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Sent)
 	}
 }
@@ -226,15 +227,15 @@ test_connection_close_waits_for_pending_sends :: proc(t: ^testing.T) {
 		// Idempotent second call and safe no-ops after .Error.
 		http.connection_close(c)
 		payload := transmute([]byte)string("ignored")
-		http.send(&c.res, {payload})
-		http.respond(&c.res)
+		http.send(&c.ctx, {payload})
+		http.respond(&c.ctx)
 		testing.expect_value(t, c.res._sends, 2)
 		testing.expect_value(t, c.res._state, type_of(c.res._state).Error)
 
 		// First of two pending sends finishes: connection remains alive until sends hits 0.
 		op1 := nbio.Operation{type = .Send, send = {sent = 8}}
-		http.on_send(&op1, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			st := http.context_get(&c.ctx, Close_State)
+		http.on_send(&op1, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			st := http.context_get(ctx, Close_State)
 			st.calls += 1
 		})
 		testing.expect_value(t, st.calls, 1)
@@ -414,7 +415,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 			append(order, 2)
 		})
 
-		sock, buffered, err := http.connection_detach(c, context.allocator)
+		sock, buffered, err := http.connection_detach(&c.ctx, context.allocator)
 		defer delete(buffered)
 
 		testing.expect_value(t, err, nil)
@@ -431,7 +432,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 		c := push_test_connection(t, &env, socket = nbio.TCP_Socket(43), payload = "abc")
 		c.scanner.read_head = 3
 
-		sock, buffered, err := http.connection_detach(c, context.allocator)
+		sock, buffered, err := http.connection_detach(&c.ctx, context.allocator)
 		testing.expect_value(t, err, nil)
 		testing.expect_value(t, sock, nbio.TCP_Socket(43))
 		testing.expect(t, buffered == nil, "expected nil buffered slice when no unread bytes exist")
@@ -448,11 +449,11 @@ test_connection_detach :: proc(t: ^testing.T) {
 		c.res._sends = 1
 
 		op := nbio.Operation{type = .Send, send = {sent = 16}}
-		http.on_send(&op, c, proc(c: ^http.Connection, send_err: http.Send_Error) {
-			st := http.context_get(&c.ctx, ^Detach_State)^
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, send_err: http.Send_Error) {
+			st := http.context_get(ctx, ^Detach_State)^
 			testing.expect_value(st.t, send_err, nil)
 			err: runtime.Allocator_Error
-			st.detached_fd, st.buffered, err = http.connection_detach(c, context.allocator)
+			st.detached_fd, st.buffered, err = http.connection_detach(ctx, context.allocator)
 			testing.expect_value(st.t, err, nil)
 		})
 		defer delete(st.buffered)
@@ -471,7 +472,7 @@ test_connection_detach :: proc(t: ^testing.T) {
 			st := http.context_get(&c.ctx, ^Detach_State)^
 			testing.expect_value(st.t, string(data), "HDR!")
 			err: runtime.Allocator_Error
-			st.detached_fd, st.buffered, err = http.connection_detach(c, context.allocator)
+			st.detached_fd, st.buffered, err = http.connection_detach(&c.ctx, context.allocator)
 			testing.expect_value(st.t, err, nil)
 		})
 		defer delete(st.buffered)
@@ -502,7 +503,7 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 
 	run_check_defer :: proc(ctx: ^http.Ctx) {
 		chk := http.context_get(ctx, ^Defer_Check)^
-		c := http.connection_of_response(&ctx.res)
+		c := http._connection_of_context(ctx)
 		chk.ran     = true
 		chk.matched = context.temp_allocator.data == http.temp_allocator(c).data
 
@@ -534,7 +535,7 @@ test_response_defer_binds_connection_temp_allocator :: proc(t: ^testing.T) {
 		http.context_add(&c.ctx, &chk)
 		http.response_defer(&c.ctx, run_check_defer)
 
-		sock, buffered, derr := http.connection_detach(c, context.allocator)
+		sock, buffered, derr := http.connection_detach(&c.ctx, context.allocator)
 		defer delete(buffered)
 
 		testing.expect_value(t, derr, nil)
@@ -701,7 +702,7 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		c.res.status = .OK
 		c.res._state = .Handling
 
-		hdr_err := http.write_response_heading(&c.res)
+		hdr_err := http.write_response_heading(&c.ctx)
 		testing.expect_value(t, hdr_err, runtime.Allocator_Error.Out_Of_Memory)
 		testing.expect_value(t, len(c.res._buf), 0)
 
@@ -709,7 +710,7 @@ test_oom_paths_teardown_cleanly :: proc(t: ^testing.T) {
 		c.res._buf.allocator = http.transaction_allocator(c)
 		prev_logger := context.logger
 		context.logger = log.nil_logger()
-		http.send_heading(&c.res)
+		http.send_heading(&c.ctx)
 		context.logger = prev_logger
 		testing.expect_value(t, active_connection_count(&thread), 0)
 	}
@@ -795,11 +796,11 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 			type = .Send,
 			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
 		}
-		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			st := http.context_get(&c.ctx, ^Cb_State)^
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			st := http.context_get(ctx, ^Cb_State)^
 			st.called  = true
 			st.got_err = err
-			http._connection_destroy(c)
+			http._connection_destroy(http._connection_of_context(ctx))
 		})
 
 		testing.expect(t, st.called, "expected on_sent callback to run on send error")
@@ -819,12 +820,12 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 			type = .Send,
 			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
 		}
-		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			st := http.context_get(&c.ctx, ^Cb_State)^
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			st := http.context_get(ctx, ^Cb_State)^
 			st.called  = true
 			st.got_err = err
 			derr: runtime.Allocator_Error
-			st.detached_fd, st.buffered, derr = http.connection_detach(c, context.allocator)
+			st.detached_fd, st.buffered, derr = http.connection_detach(ctx, context.allocator)
 			assert(derr == nil)
 		})
 		defer delete(st.buffered)
@@ -848,8 +849,9 @@ test_on_send_destroy_and_detach_in_callback_on_error :: proc(t: ^testing.T) {
 			type = .Send,
 			send = {sent = 0, err = nbio.TCP_Send_Error.Connection_Closed},
 		}
-		http.on_send(&op, c, proc(c: ^http.Connection, err: http.Send_Error) {
-			st := http.context_get(&c.ctx, ^Cb_State)^
+		http.on_send(&op, c, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			st := http.context_get(ctx, ^Cb_State)^
+			c  := http._connection_of_context(ctx)
 			st.called  = true
 			st.got_err = err
 			http.scan_temp_bytes(&c.scanner, 4, proc(c: ^http.Connection, data: []byte) {
@@ -910,13 +912,12 @@ test_body_partial_detach_in_callback :: proc(t: ^testing.T) {
 		st: Body_Detach_State
 		http.context_add(&c.ctx, &st)
 
-		http.body(&c.req, proc(req: ^http.Request, data: []byte, is_partial: bool) {
-			c  := http.connection_of_request(req)
-			st := http.context_get(&c.ctx, ^Body_Detach_State)^
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, data: []byte, is_partial: bool) {
+			st := http.context_get(ctx, ^Body_Detach_State)^
 			st.called     = true
 			st.is_partial = is_partial
 			st.got_len    = copy(st.got_chunk[:], data)
-			st.detached_fd, st.buffered, st.detach_err = http.connection_detach(c, context.allocator)
+			st.detached_fd, st.buffered, st.detach_err = http.connection_detach(ctx, context.allocator)
 		})
 		defer delete(st.buffered)
 
@@ -963,7 +964,7 @@ test_keepalive_deferred_lifo_and_next_request :: proc(t: ^testing.T) {
 	})
 	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
 		st := http.context_get(ctx, ^Defer_Keepalive_State)^
-		c  := http.connection_of_context(ctx)
+		c  := http._connection_of_context(ctx)
 		st.temp_matched = context.temp_allocator.data == http.temp_allocator(c).data
 		append(&st.order, 2)
 		http.response_defer(ctx, proc(ctx: ^http.Ctx) {

@@ -42,10 +42,10 @@ main :: proc() {
 		target := route_target(ctx)
 		if target == "" {
 			ctx.res.status = .Not_Found
-			respond(&ctx.res)
+			respond(ctx)
 			return
 		}
 
-		respond_dir(&ctx.res, "", target )
+		respond_dir(ctx, "", target)
 	}
 }

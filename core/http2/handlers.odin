@@ -71,9 +71,9 @@ handle :: proc(handlers: []Handler, ctx: ^Ctx) {
 	}
 }
 
-handler_404 :: proc(using ctx: ^Ctx) {
-	res.status = .Not_Found
-	respond(&res)
+handler_404 :: proc(ctx: ^Ctx) {
+	ctx.res.status = .Not_Found
+	respond(ctx)
 }
 
 /*
@@ -91,7 +91,6 @@ logged :: proc(ctx: ^Ctx, next: []Handler) {
 
 	if _, err := context_add(ctx, Logger_Ctx{now()}); err == nil {
 		response_defer(ctx, proc(ctx: ^Ctx) {
-			c          := connection_of_context(ctx)
 			logger_ctx := context_get(ctx, Logger_Ctx)
 
 			if context.logger.procedure == runtime.default_logger_proc {
@@ -100,7 +99,7 @@ logged :: proc(ctx: ^Ctx, next: []Handler) {
 				fmt.eprintfln(
 					"[%v] %v - %v %q %v.%v -> %v %m %v",
 					string(date[:]),
-					net.endpoint_to_string(c.remote, transaction_allocator(c)),
+					net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
 					method_string(ctx.req.line.method),
 					ctx.req.line.target,
 					ctx.req.line.version.major,
@@ -113,7 +112,7 @@ logged :: proc(ctx: ^Ctx, next: []Handler) {
 				context.logger.options -= {.Line, .Short_File_Path, .Long_File_Path, .Procedure}
 				log.infof(
 					"%v - %v %q %v.%v -> %v %m %v",
-					net.endpoint_to_string(c.remote, transaction_allocator(c)),
+					net.endpoint_to_string(remote_endpoint(ctx), transaction_allocator(ctx)),
 					method_string(ctx.req.line.method),
 					ctx.req.line.target,
 					ctx.req.line.version.major,
@@ -140,21 +139,20 @@ body_parser :: proc(ctx: ^Ctx, next: []Handler) {
 		next = next,
 	})
 	if add_err != nil {
-		invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+		invalid_request(_connection_of_context(ctx), .Internal_Server_Error)
 		return
 	}
 	s.parts.allocator = transaction_allocator(ctx)
 
-	body(&ctx.req, on_body, retain = true)
+	body(ctx, on_body, retain = true)
 
-	on_body :: proc(r: ^Request, body: []byte, is_partial: bool) {
-		ctx := context_of_request(r)
+	on_body :: proc(ctx: ^Ctx, body: []byte, is_partial: bool) {
 		s := context_get(ctx, Body_Parser_State)
 		assert(s != nil)
 
 		if len(body) > 0 {
 			if _, app_err := append(&s.parts, body); app_err != nil {
-				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+				invalid_request(_connection_of_context(ctx), .Internal_Server_Error)
 				return
 			}
 		}

@@ -52,15 +52,15 @@ Curl_Test_Context :: struct {
 http2_test_handler :: proc(ctx: ^http.Ctx) {
 	if ctx.req.line.target != "/ping" {
 		ctx.res.status = .Not_Found
-		http.respond(&ctx.res)
+		http.respond(ctx)
 		return
 	}
 
 	body := "pong"
-	http.set_header(&ctx.res, "connection", "close")
-	http.set_content_length_header(&ctx.res, len(body))
-	http.send(&ctx.res, {transmute([]byte)body})
-	http.respond(&ctx.res)
+	http.set_header(ctx, "connection", "close")
+	http.set_content_length_header(ctx, len(body))
+	http.send(ctx, {transmute([]byte)body})
+	http.respond(ctx)
 }
 
 curl_write_response :: proc "c" (contents: [^]byte, size: c.size_t, nmemb: c.size_t, userp: rawptr) -> c.size_t {
@@ -188,20 +188,19 @@ test_http2_lazy_expect_continue_with_curl :: proc(t: ^testing.T) {
 		eb := http.context_add(ctx, Echo_Buf{
 			data = make([dynamic]byte, http.transaction_allocator(ctx)),
 		})
-		http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-			ctx := http.context_of_request(req)
+		http.body(ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
 			eb := http.context_get(ctx, Echo_Buf)
 			if len(body) > 0 {
 				append(&eb.data, ..body)
 			}
 			if !is_partial {
-				http.respond_bytes(&ctx.res, eb.data[:])
+				http.respond_bytes(ctx, eb.data[:])
 			}
 		})
 	})
 	http.route_post(&r, "/reject", proc(ctx: ^http.Ctx) {
 		ctx.res.status = .Unauthorized
-		http.respond(&ctx.res)
+		http.respond(ctx)
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -352,20 +351,20 @@ test_http2_head_requests_with_curl :: proc(t: ^testing.T) {
 			st.ping_methods[st.ping_count] = ctx.req.line.method
 		}
 		st.ping_count += 1
-		http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
+		http.respond_bytes(ctx, transmute([]byte)string("pong"))
 	}))
 	http.route_head(&r, "/custom", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 		st := (^Head_Server_State)(user_data)
 		st.custom_head_count += 1
 		st.custom_head_method = ctx.req.line.method
-		http.set_content_length_header(&ctx.res, 9)
-		http.respond(&ctx.res)
+		http.set_content_length_header(ctx, 9)
+		http.respond(ctx)
 	}))
 	http.route_get(&r, "/custom", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 		st := (^Head_Server_State)(user_data)
 		st.custom_get_count += 1
 		st.custom_get_method = ctx.req.line.method
-		http.respond_bytes(&ctx.res, transmute([]byte)string("custom-ok"))
+		http.respond_bytes(ctx, transmute([]byte)string("custom-ok"))
 	}))
 
 	server := http.make_server(http.Server_Options{
@@ -535,14 +534,14 @@ test_http2_graceful_shutdown_with_curl :: proc(t: ^testing.T) {
 	r: http.Router
 	defer http.router_destroy(r)
 	http.route_get(&r, "/ping", proc(ctx: ^http.Ctx) {
-		http.respond_bytes(&ctx.res, transmute([]byte)string("pong"))
+		http.respond_bytes(ctx, transmute([]byte)string("pong"))
 	})
 	http.route_get(&r, "/slow", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 		st := (^Shutdown_Server_State)(user_data)
 		st.handler_saw_tls = len(_tls_test_buf) >= 6 && string(_tls_test_buf[:6]) == "tls-ok"
 		sync.one_shot_event_signal(&st.slow_started)
 		nbio.timeout_poly(40 * time.Millisecond, ctx, proc(_: ^nbio.Operation, ctx: ^http.Ctx) {
-			http.respond_bytes(&ctx.res, transmute([]byte)string("slow-ok"))
+			http.respond_bytes(ctx, transmute([]byte)string("slow-ok"))
 		})
 	}))
 
@@ -760,38 +759,38 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 	r: http.Router
 	defer http.router_destroy(r)
 	http.route_get(&r, "/readme", proc(ctx: ^http.Ctx) {
-		http.respond_file_path(&ctx.res, "core/http2/README.md")
+		http.respond_file_path(ctx, "core/http2/README.md")
 	})
 	http.route_get(&r, "/override", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "Content-Type", "application/custom")
-		http.respond_file_path(&ctx.res, "core/http2/README.md")
+		http.set_header(ctx, "Content-Type", "application/custom")
+		http.respond_file_path(ctx, "core/http2/README.md")
 	})
 	http.route_get(&r, "/license", proc(ctx: ^http.Ctx) {
-		http.respond_file_path(&ctx.res, "core/http/LICENSE")
+		http.respond_file_path(ctx, "core/http/LICENSE")
 	})
 	http.route_get(&r, "/dir-only", proc(ctx: ^http.Ctx) {
-		http.respond_file_path(&ctx.res, "core/http2")
+		http.respond_file_path(ctx, "core/http2")
 	})
 	http.route_get(&r, "/content", proc(ctx: ^http.Ctx) {
-		http.respond_file_content(&ctx.res, "hello.json", transmute([]byte)string(`{"ok":true}`))
+		http.respond_file_content(ctx, "hello.json", transmute([]byte)string(`{"ok":true}`))
 	})
 	http.route_get(&r, "/static/*", proc(ctx: ^http.Ctx) {
-		http.respond_dir(&ctx.res, "core/http2", http.route_suffix(ctx))
+		http.respond_dir(ctx, "core/http2", http.route_suffix(ctx))
 	})
 	http.route_get(&r, "/static", proc(ctx: ^http.Ctx) {
-		http.respond_dir(&ctx.res, "core/http2", http.route_suffix(ctx))
+		http.respond_dir(ctx, "core/http2", http.route_suffix(ctx))
 	})
 	http.route_get(&r, "/old/*", proc(ctx: ^http.Ctx) {
-		http.respond_dir(&ctx.res, "core/http", http.route_suffix(ctx))
+		http.respond_dir(ctx, "core/http", http.route_suffix(ctx))
 	})
 	http.route_get(&r, "/old", proc(ctx: ^http.Ctx) {
-		http.respond_dir(&ctx.res, "core/http", http.route_suffix(ctx))
+		http.respond_dir(ctx, "core/http", http.route_suffix(ctx))
 	})
 	http.route_get(&r, "/file", proc(ctx: ^http.Ctx) {
 		f, err := os.open("core/http2/README.md")
 		if err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond(&ctx.res)
+			http.respond(ctx)
 			return
 		}
 		File_Handle :: distinct ^os.File
@@ -800,9 +799,9 @@ test_http2_respond_file_content_type_with_curl :: proc(t: ^testing.T) {
 			fp := http.context_get(ctx, File_Handle)^
 			os.close((^os.File)(fp))
 		})
-		if assoc_err := http.respond_file(&ctx.res, f); assoc_err != nil {
+		if assoc_err := http.respond_file(ctx, f); assoc_err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond(&ctx.res)
+			http.respond(ctx)
 		}
 	})
 
@@ -938,43 +937,43 @@ test_http2_respond_helpers_and_chunked_with_curl :: proc(t: ^testing.T) {
 		step: int,
 	}
 
-	on_chunk_chain :: proc(c: ^http.Connection, err: http.Send_Error) {
+	on_chunk_chain :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
 		if err != nil { return }
-		st := http.context_get(&c.ctx, Chunk_Chain_State)
+		st := http.context_get(ctx, Chunk_Chain_State)
 		st.step += 1
 		switch st.step {
 		case 1:
-			http.send_chunk(&c.res, {nil, transmute([]byte)string("two-")})
-			http.send_chunk(&c.res, {transmute([]byte)string("three")}, on_chunk_chain)
+			http.send_chunk(ctx, {nil, transmute([]byte)string("two-")})
+			http.send_chunk(ctx, {transmute([]byte)string("three")}, on_chunk_chain)
 		case 2:
-			http.respond(&c.res)
+			http.respond(ctx)
 		}
 	}
 
 	r: http.Router
 	defer http.router_destroy(r)
 	http.route_get(&r, "/plain", proc(ctx: ^http.Ctx) {
-		http.respond_plain(&ctx.res, "hello plain")
+		http.respond_plain(ctx, "hello plain")
 	})
 	http.route_get(&r, "/html", proc(ctx: ^http.Ctx) {
-		http.respond_html(&ctx.res, "<h1>hello</h1>")
+		http.respond_html(ctx, "<h1>hello</h1>")
 	})
 	http.route_get(&r, "/json", proc(ctx: ^http.Ctx) {
-		if err := http.respond_json(&ctx.res, Json_Payload{msg = "ok", count = 3}); err != nil {
+		if err := http.respond_json(ctx, Json_Payload{msg = "ok", count = 3}); err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond_plain(&ctx.res, "marshal error")
+			http.respond_plain(ctx, "marshal error")
 		}
 	})
 	http.route_get(&r, "/json-err", proc(ctx: ^http.Ctx) {
 		bad := proc() {}
-		if err := http.respond_json(&ctx.res, bad); err != nil {
+		if err := http.respond_json(ctx, bad); err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond_plain(&ctx.res, "marshal error")
+			http.respond_plain(ctx, "marshal error")
 		}
 	})
 	http.route_get(&r, "/chunks", proc(ctx: ^http.Ctx) {
 		http.context_add(ctx, Chunk_Chain_State{})
-		http.send_chunk(&ctx.res, {transmute([]byte)string("one-")}, on_chunk_chain)
+		http.send_chunk(ctx, {transmute([]byte)string("one-")}, on_chunk_chain)
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -1565,8 +1564,8 @@ test_http2_peer_disconnect_during_inflight_send :: proc(t: ^testing.T) {
 		return
 	}
 
-	http.send(&c.res, {payload}, proc(c: ^http.Connection, err: http.Send_Error) {
-		f := http.context_get(&c.ctx, ^Flags)^
+	http.send(&c.ctx, {payload}, proc(ctx: ^http.Ctx, err: http.Send_Error) {
+		f := http.context_get(ctx, ^Flags)^
 		f.sent_ran = true
 	})
 	http.scan_bytes(&c.scanner, 64, proc(c: ^http.Connection, data: []byte) {})
@@ -1675,9 +1674,8 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 			http.context_add(ctx, st)
 			http.response_defer(ctx, proc(ctx: ^http.Ctx) {
 				st := http.context_get(ctx, ^Temp_Check_State)^
-				c := http.connection_of_response(&ctx.res)
 				st.defer_calls += 1
-				if context.temp_allocator.data == http.temp_allocator(c).data {
+				if context.temp_allocator.data == http.temp_allocator(ctx).data {
 					st.defer_matched += 1
 				}
 				scratch, serr := make([]byte, 64, context.temp_allocator)
@@ -1689,20 +1687,20 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 
 		http.route_get(&r, "/ok", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			register_defer_check(ctx, (^Temp_Check_State)(user_data))
-			http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
+			http.respond_bytes(ctx, transmute([]byte)string("ok"))
 		}))
 		http.route_get(&r, "/file", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			register_defer_check(ctx, (^Temp_Check_State)(user_data))
-			http.respond_file_path(&ctx.res, "core/http2/README.md")
+			http.respond_file_path(ctx, "core/http2/README.md")
 		}))
 		http.route_get(&r, "/missing", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			register_defer_check(ctx, (^Temp_Check_State)(user_data))
-			http.respond_file_path(&ctx.res, "core/http2/__does_not_exist__")
+			http.respond_file_path(ctx, "core/http2/__does_not_exist__")
 		}))
 		http.route_get(&r, "/close", http.handler(&srv_state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			register_defer_check(ctx, (^Temp_Check_State)(user_data))
-			http.set_header(&ctx.res, "connection", "close")
-			http.respond_bytes(&ctx.res, transmute([]byte)string("bye"))
+			http.set_header(ctx, "connection", "close")
+			http.respond_bytes(ctx, transmute([]byte)string("bye"))
 		}))
 
 		s := http.make_server(http.Server_Options{
@@ -1775,8 +1773,8 @@ test_http2_temp_allocator_binding_and_tick_reset :: proc(t: ^testing.T) {
 			port         = http.OS_ASSIGNED_PORT,
 			thread_count = 2,
 			handlers     = {proc(ctx: ^http.Ctx) {
-				http.set_header(&ctx.res, "connection", "close")
-				http.respond_bytes(&ctx.res, transmute([]byte)string("ok"))
+				http.set_header(ctx, "connection", "close")
+				http.respond_bytes(ctx, transmute([]byte)string("ok"))
 			}},
 		})
 		setup_err := http._setup(&s2)
@@ -2205,7 +2203,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 			sentinel, serr := make([]byte, 128, context.temp_allocator)
 			if serr != nil {
 				ctx.res.status = .Internal_Server_Error
-				http.respond(&ctx.res)
+				http.respond(ctx)
 				return
 			}
 			for &b in sentinel { b = 0x5A }
@@ -2218,8 +2216,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 			})
 			http.context_add(ctx, chk)
 
-			http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-				ctx := http.context_of_request(req)
+			http.body(ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
 				st  := http.context_get(ctx, Stream_State)
 				for b in body {
 					st.hash = (st.hash ~ u64(b)) * 1099511628211
@@ -2234,9 +2231,9 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 						if b != 0x5A { temp_ok = false }
 					}
 					chk.cl_temp_ok = temp_ok
-					tag, _ := http.get_header(req, "X-Request-Tag")
-					http.set_header(&ctx.res, "connection", "close")
-					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s", st.count, st.hash, tag, allocator = http.transaction_allocator(ctx)))
+					tag, _ := http.get_header(ctx, "X-Request-Tag")
+					http.set_header(ctx, "connection", "close")
+					http.respond_plain(ctx, fmt.aprintf("%d:%d:%s", st.count, st.hash, tag, allocator = http.transaction_allocator(ctx)))
 				}
 			})
 	}))
@@ -2246,7 +2243,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 			sentinel, serr := make([]byte, 128, context.temp_allocator)
 			if serr != nil {
 				ctx.res.status = .Internal_Server_Error
-				http.respond(&ctx.res)
+				http.respond(ctx)
 				return
 			}
 			for &b in sentinel { b = 0xA5 }
@@ -2259,8 +2256,7 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 			})
 			http.context_add(ctx, chk)
 
-			http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-				ctx := http.context_of_request(req)
+			http.body(ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
 				st  := http.context_get(ctx, Stream_State)
 				for b in body {
 					st.hash = (st.hash ~ u64(b)) * 1099511628211
@@ -2275,10 +2271,10 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 						if b != 0xA5 { temp_ok = false }
 					}
 					chk.chunked_temp_ok = temp_ok
-					tag, _ := http.get_header(req, "X-Request-Tag")
-					tr, _  := http.get_header(req, "X-Trailer-Check")
-					http.set_header(&ctx.res, "connection", "close")
-					http.respond_plain(&ctx.res, fmt.aprintf("%d:%d:%s:%s", st.count, st.hash, tag, tr, allocator = http.transaction_allocator(ctx)))
+					tag, _ := http.get_header(ctx, "X-Request-Tag")
+					tr, _  := http.get_header(ctx, "X-Trailer-Check")
+					http.set_header(ctx, "connection", "close")
+					http.respond_plain(ctx, fmt.aprintf("%d:%d:%s:%s", st.count, st.hash, tag, tr, allocator = http.transaction_allocator(ctx)))
 				}
 			})
 	}))
@@ -2304,12 +2300,12 @@ test_http2_streaming_body_bounded_memory :: proc(t: ^testing.T) {
 			}
 			if rerr != nil {
 				ctx.res.status = .Internal_Server_Error
-				http.respond(&ctx.res)
+				http.respond(ctx)
 				return
 			}
 		}
-		http.set_header(&ctx.res, "connection", "close")
-		http.respond_plain(&ctx.res, fmt.aprintf("%d:%d", total, h, allocator = http.transaction_allocator(ctx)))
+		http.set_header(ctx, "connection", "close")
+		http.respond_plain(ctx, fmt.aprintf("%d:%d", total, h, allocator = http.transaction_allocator(ctx)))
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -2564,22 +2560,23 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 		chk := (^Server_Peak_Check)(user_data)
 			if _, err := http.context_add(ctx, Seq_State{chk = chk}); err != nil {
 				ctx.res.status = .Internal_Server_Error
-				http.respond(&ctx.res)
+				http.respond(ctx)
 				return
 			}
 
-			send_next :: proc(c: ^http.Connection, err: http.Send_Error) {
-				if err != nil || c.res._state == .Error {
+			send_next :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
+				if err != nil || ctx.res._state == .Error {
 					return
 				}
-				st := http.context_get(&c.ctx, Seq_State)
+				c  := http._connection_of_context(ctx)
+				st := http.context_get(ctx, Seq_State)
 				if st.pos >= STREAM_SIZE {
 					st.chk.peak_seq = st.chk.track.peak_memory_allocated
 					st.chk.seq_zero_tx_growth =
 						st.tx_tail_1 != nil &&
 						rawptr(c.transaction_arena.tail) == st.tx_tail_1 &&
 						c.transaction_arena.tail.offset == st.tx_offset_1
-					http.respond(&c.res)
+					http.respond(ctx)
 					return
 				}
 				n := min(len(st.buf), STREAM_SIZE - st.pos)
@@ -2588,14 +2585,14 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 				}
 				st.pos    += n
 				st.chunks += 1
-				http.send_chunk(&c.res, {st.buf[:n]}, send_next)
+				http.send_chunk(ctx, {st.buf[:n]}, send_next)
 				if st.chunks == 1 && c.transaction_arena.tail != nil {
 					st.tx_tail_1   = c.transaction_arena.tail
 					st.tx_offset_1 = c.transaction_arena.tail.offset
 				}
 			}
 
-			send_next(http.connection_of_context(ctx), nil)
+			send_next(ctx, nil)
 	}))
 
 	// 2. Bursty send_chunk streaming (4 x 1 KiB chunks per burst, draining to _sends == 0 between bursts).
@@ -2611,22 +2608,23 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 		chk := (^Server_Peak_Check)(user_data)
 			if _, err := http.context_add(ctx, Burst_State{chk = chk}); err != nil {
 				ctx.res.status = .Internal_Server_Error
-				http.respond(&ctx.res)
+				http.respond(ctx)
 				return
 			}
 
-			send_burst :: proc(c: ^http.Connection) {
-				if c.res._state == .Error {
+			send_burst :: proc(ctx: ^http.Ctx) {
+				if ctx.res._state == .Error {
 					return
 				}
-				st := http.context_get(&c.ctx, Burst_State)
+				c  := http._connection_of_context(ctx)
+				st := http.context_get(ctx, Burst_State)
 				if st.pos >= STREAM_SIZE {
 					st.chk.peak_burst = st.chk.track.peak_memory_allocated
 					st.chk.burst_zero_tx_growth =
 						st.tx_tail_1 != nil &&
 						rawptr(c.transaction_arena.tail) == st.tx_tail_1 &&
 						c.transaction_arena.tail.offset == st.tx_offset_1
-					http.respond(&c.res)
+					http.respond(ctx)
 					return
 				}
 
@@ -2640,10 +2638,10 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 						st.bufs[i][j] = u8(((st.pos + j) * 31 + 7) & 0xFF)
 					}
 					st.pos += n
-					if c.res._sends > 0 {
+					if ctx.res._sends > 0 {
 						st.chk.burst_saw_multi = true
 					}
-					http.send_chunk(&c.res, {st.bufs[i][:n]}, on_burst_part)
+					http.send_chunk(ctx, {st.bufs[i][:n]}, on_burst_part)
 				}
 				if st.bursts == 1 && c.transaction_arena.tail != nil {
 					st.tx_tail_1   = c.transaction_arena.tail
@@ -2651,18 +2649,18 @@ test_http2_streaming_response_bounded_memory :: proc(t: ^testing.T) {
 				}
 			}
 
-			on_burst_part :: proc(c: ^http.Connection, err: http.Send_Error) {
-				if err != nil || c.res._state == .Error || c.res._sends > 0 {
+			on_burst_part :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
+				if err != nil || ctx.res._state == .Error || ctx.res._sends > 0 {
 					return
 				}
-				send_burst(c)
+				send_burst(ctx)
 			}
 
-			send_burst(http.connection_of_context(ctx))
+			send_burst(ctx)
 	}))
 
 	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
-		http.respond_plain(&ctx.res, "still-alive")
+		http.respond_plain(ctx, "still-alive")
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -2848,20 +2846,20 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 	handle_echo :: proc(ctx: ^http.Ctx, stats: ^Echo_Stats, kind: Echo_Kind) {
 		if _, err := http.context_add(ctx, Echo_Req{stats = stats, kind = kind}); err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond(&ctx.res)
+			http.respond(ctx)
 			return
 		}
 
-		on_echo_sent :: proc(c: ^http.Connection, err: http.Send_Error) {
-			if err != nil || c.res._state == .Error {
+		on_echo_sent :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
+			if err != nil || ctx.res._state == .Error {
 				return
 			}
-			http.body_resume(&c.req)
+			http.body_resume(ctx)
 		}
 
-		http.body(&ctx.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-			c := http.connection_of_request(req)
-			er := http.context_get(&c.ctx, Echo_Req)
+		http.body(ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
+			c := http._connection_of_context(ctx)
+			er := http.context_get(ctx, Echo_Req)
 			st := er.stats
 
 			if !is_partial {
@@ -2871,7 +2869,7 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 					case .Chunked:        st.chunked_unexpected_alloc = true
 					}
 				}
-				http.respond(&c.res)
+				http.respond(ctx)
 				return
 			}
 
@@ -2892,13 +2890,13 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 			}
 			er.prev_buf = cur_buf
 
-			http.body_pause(req)
+			http.body_pause(ctx)
 			switch er.kind {
 			case .Content_Length: st.cl_pauses += 1
 			case .Chunked:        st.chunked_pauses += 1
 			}
 			// Zero-copy pass of `retain = false` scanner slice directly into async `send_chunk`.
-			http.send_chunk(&c.res, {body}, on_echo_sent)
+			http.send_chunk(ctx, {body}, on_echo_sent)
 			er.prev_alloc = st.track.total_memory_allocated
 		}, retain = false)
 	}
@@ -2913,7 +2911,7 @@ test_http2_streaming_body_backpressure_zero_copy :: proc(t: ^testing.T) {
 		handle_echo(ctx, (^Echo_Stats)(user_data), .Chunked)
 	}))
 	http.route_get(&r, "/after", proc(ctx: ^http.Ctx) {
-		http.respond_plain(&ctx.res, "still-alive")
+		http.respond_plain(ctx, "still-alive")
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -3170,23 +3168,23 @@ test_http2_range_requests_with_curl :: proc(t: ^testing.T) {
 	r: http.Router
 	defer http.router_destroy(r)
 	http.route_get(&r, "/file", proc(ctx: ^http.Ctx) {
-		http.respond_file_path(&ctx.res, "core/http2/README.md")
+		http.respond_file_path(ctx, "core/http2/README.md")
 	})
 	http.route_get(&r, "/content", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "ETag", `"v1"`)
-		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+		http.set_header(ctx, "ETag", `"v1"`)
+		http.respond_file_content(ctx, "data.txt", transmute([]byte)string(CONTENT))
 	})
 	http.route_post(&r, "/content", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "ETag", `"v1"`)
-		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+		http.set_header(ctx, "ETag", `"v1"`)
+		http.respond_file_content(ctx, "data.txt", transmute([]byte)string(CONTENT))
 	})
 	http.route_get(&r, "/weak", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "ETag", `W/"v1"`)
-		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+		http.set_header(ctx, "ETag", `W/"v1"`)
+		http.respond_file_content(ctx, "data.txt", transmute([]byte)string(CONTENT))
 	})
 	http.route_get(&r, "/no-range", proc(ctx: ^http.Ctx) {
-		http.set_header(&ctx.res, "Accept-Ranges", "none")
-		http.respond_file_content(&ctx.res, "data.txt", transmute([]byte)string(CONTENT))
+		http.set_header(ctx, "Accept-Ranges", "none")
+		http.respond_file_content(ctx, "data.txt", transmute([]byte)string(CONTENT))
 	})
 
 	server := http.make_server(http.Server_Options{
@@ -3400,19 +3398,19 @@ test_http2_response_defer_sees_socket_on_destroy :: proc(t: ^testing.T) {
 		thread_count = 1,
 		handlers     = {http.handler(&state, proc(user_data: rawptr, ctx: ^http.Ctx) {
 			st := (^Defer_Socket_State)(user_data)
-			c := http.connection_of_response(&ctx.res)
+			c := http._connection_of_context(ctx)
 			st.handler_socket = c.socket
 
 			http.context_add(ctx, st)
 			http.response_defer(ctx, proc(ctx: ^http.Ctx) {
 				st := http.context_get(ctx, ^Defer_Socket_State)^
-				c := http.connection_of_response(&ctx.res)
+				c := http._connection_of_context(ctx)
 				st.defer_socket = c.socket
 				st.defer_ran = true
 			})
 
-			http.set_header(&ctx.res, "Connection", "close")
-			http.respond_plain(&ctx.res, "bye")
+			http.set_header(ctx, "Connection", "close")
+			http.respond_plain(ctx, "bye")
 		})},
 	})
 
@@ -3495,8 +3493,8 @@ test_http2_server_shutdown_async :: proc(t: ^testing.T) {
 		port         = http.OS_ASSIGNED_PORT,
 		thread_count = 2,
 		handlers     = {proc(ctx: ^http.Ctx) {
-			http.set_header(&ctx.res, "Connection", "close")
-			http.respond_plain(&ctx.res, "ok")
+			http.set_header(ctx, "Connection", "close")
+			http.respond_plain(ctx, "ok")
 		}},
 	})
 
@@ -3586,19 +3584,19 @@ test_http2_middleware_pipeline_and_subrouter_with_curl :: proc(t: ^testing.T) {
 	}
 
 	outer_mw := proc(ctx: ^http.Ctx, next: []http.Handler) {
-		http.set_header(&ctx.res, "X-Outer", "1")
+		http.set_header(ctx, "X-Outer", "1")
 		http.handle(next, ctx)
 	}
 
 	require_user := proc(ctx: ^http.Ctx, next: []http.Handler) {
-		u, ok := http.get_header(&ctx.req, "X-User")
+		u, ok := http.get_header(ctx, "X-User")
 		if !ok || u == "" {
 			ctx.res.status = .Unauthorized
-			http.respond_plain(&ctx.res, "unauthorized")
+			http.respond_plain(ctx, "unauthorized")
 			return
 		}
 		http.context_add(ctx, Auth_Tag{user = u})
-		http.set_header(&ctx.res, "X-Authed", u)
+		http.set_header(ctx, "X-Authed", u)
 		http.handle(next, ctx)
 	}
 
@@ -3608,11 +3606,11 @@ test_http2_middleware_pipeline_and_subrouter_with_curl :: proc(t: ^testing.T) {
 		body, ok := http.body_parser_collect(ctx)
 		if !ok {
 			ctx.res.status = .Bad_Request
-			http.respond(&ctx.res)
+			http.respond(ctx)
 			return
 		}
 		tag := http.context_get(ctx, Auth_Tag)
-		http.respond_plain(&ctx.res, fmt.aprintf("%s:%s", tag.user, string(body), allocator = http.transaction_allocator(ctx)))
+		http.respond_plain(ctx, fmt.aprintf("%s:%s", tag.user, string(body), allocator = http.transaction_allocator(ctx)))
 	})
 
 	root: http.Router

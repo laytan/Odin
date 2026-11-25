@@ -148,21 +148,20 @@ A HTTP handler that handles upgrade requests, adding upgraded connections to the
 handler :: proc(s: ^Server) -> http.Handler {
 	return http.handler(s, proc(user_data: rawptr, ctx: ^http.Ctx) {
 		s := (^Server)(user_data)
-		if !_prepare_upgrade(&ctx.req, &ctx.res) {
-			http.respond(&ctx.res)
+		if !_prepare_upgrade(ctx) {
+			http.respond(ctx)
 			return
 		}
 
-		c := http.connection_of_context(ctx)
 		ws := http.context_add(ctx, _Connection{
 			s = s,
 		})
-		ws.frames.allocator = http.transaction_allocator(c)
+		ws.frames.allocator = http.transaction_allocator(ctx)
 		if s.idle_timeout > 0 {
 			ws.recv_quota = {min = s.idle_timeout}
 		}
 
-		http.send_heading(&ctx.res, _on_upgrade)
+		http.send_heading(ctx, _on_upgrade)
 	})
 }
 
@@ -321,34 +320,34 @@ _freelist_release_all :: proc(fl: ^_Freelist($T)) {
 	}
 }
 
-_prepare_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
-	if req.line.method != .Get {
-		res.status = .Method_Not_Allowed
-		http.set_header(res, "Allow", "GET")
+_prepare_upgrade :: proc(ctx: ^http.Ctx) -> bool {
+	if ctx.req.line.method != .Get {
+		ctx.res.status = .Method_Not_Allowed
+		http.set_header(ctx, "Allow", "GET")
 		return false
 	}
 
-	res.status = .Bad_Request
+	ctx.res.status = .Bad_Request
 
-	if req.line.version != {1, 1} {
+	if ctx.req.line.version != {1, 1} {
 		return false
 	}
 
-	if !http.headers_has_token(&req.headers, "Upgrade", "websocket") {
+	if !http.headers_has_token(&ctx.req.headers, "Upgrade", "websocket") {
 		return false
 	}
 
-	if !http.headers_has_token(&req.headers, "Connection", "upgrade") {
+	if !http.headers_has_token(&ctx.req.headers, "Connection", "upgrade") {
 		return false
 	}
 
-	version, _ := http.get_header(req, "Sec-WebSocket-Version")
+	version, _ := http.get_header(ctx, "Sec-WebSocket-Version")
 	if version != "13" {
-		http.set_header(res, "Sec-WebSocket-Version", "13")
+		http.set_header(ctx, "Sec-WebSocket-Version", "13")
 		return false
 	}
 
-	key, _ := http.get_header(req, "Sec-WebSocket-Key")
+	key, _ := http.get_header(ctx, "Sec-WebSocket-Key")
 	if len(key) != 24 || key[22] != '=' || key[23] != '=' {
 		return false
 	}
@@ -358,21 +357,21 @@ _prepare_upgrade :: proc(req: ^http.Request, res: ^http.Response) -> bool {
 	}
 
 	{
-		ctx: hash.Context
-		hash.init(&ctx, .Insecure_SHA1)
-		hash.update(&ctx, transmute([]byte)key)
-		hash.update(&ctx, transmute([]byte)_GUID)
+		hctx: hash.Context
+		hash.init(&hctx, .Insecure_SHA1)
+		hash.update(&hctx, transmute([]byte)key)
+		hash.update(&hctx, transmute([]byte)_GUID)
 
 		accept_hash: [sha1.DIGEST_SIZE]byte
-		hash.final(&ctx, accept_hash[:])
+		hash.final(&hctx, accept_hash[:])
 
 		accept := base64.encode(accept_hash[:], allocator=context.temp_allocator)
-		http.set_header(res, "Sec-WebSocket-Accept", accept)
+		http.set_header(ctx, "Sec-WebSocket-Accept", accept)
 	}
 
-	http.set_header(res, "Upgrade", "websocket")
-	http.set_header(res, "Connection", "upgrade")
-	res.status = .Switching_Protocols
+	http.set_header(ctx, "Upgrade", "websocket")
+	http.set_header(ctx, "Connection", "upgrade")
+	ctx.res.status = .Switching_Protocols
 	return true
 }
 
@@ -419,17 +418,18 @@ _flush_in_flight_sends :: proc(c: ^http.Connection, ws: ^_Connection, err: http.
 	}
 }
 
-_on_frame_sent :: proc(c: ^http.Connection, err: http.Send_Error) {
-	ws := http.context_get(&c.ctx, _Connection)
+_on_frame_sent :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
+	ws := http.context_get(ctx, _Connection)
 	if ws == nil {
 		return
 	}
+	c := http._connection_of_context(ctx)
 
 	if err != nil && ws.send_err == nil {
 		ws.send_err = err
 	}
 
-	if c.res._sends != 0 {
+	if ctx.res._sends != 0 {
 		return
 	}
 
@@ -488,11 +488,11 @@ _recycle_arena_if_idle :: proc(c: ^http.Connection, ws: ^_Connection) {
 	}
 }
 
-_on_upgrade :: proc(c: ^http.Connection, err: http.Send_Error) {
+_on_upgrade :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
 	if err != nil {
 		return
 	}
-	_serve_connection(c)
+	_serve_connection(http._connection_of_context(ctx))
 }
 
 _serve_connection :: proc(c: ^http.Connection) {
@@ -503,7 +503,7 @@ _serve_connection :: proc(c: ^http.Connection) {
 	http.response_set_quota(&c.res, &ws.send_quota)
 
 	http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
-		c  := http.connection_of_context(ctx)
+		c  := http._connection_of_context(ctx)
 		ws := http.context_get(ctx, _Connection)
 		if ws.headers.in_flight != nil {
 			err := ws.send_err
@@ -875,7 +875,7 @@ _send_multi :: proc(c: ^http.Connection, opcode: _Opcode, data: [][]byte, fin :=
 	bufs[0] = ([^]byte)(f)[:length]
 	copy(bufs[1:], data)
 
-	http.send(&c.res, bufs, _on_frame_sent)
+	http.send(&c.ctx, bufs, _on_frame_sent)
 }
 
 _find_fragmented_head :: proc(ws: ^_Connection) -> (head: ^_Frame, head_idx: int, size: int) {

@@ -259,8 +259,8 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		testing.expect_value(t, c.res.progress.timeout, 3 * time.Second)
 
 		chk := http.context_add(&c.ctx, Body_Check{t = t})
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {
-			chk := http.context_get(http.context_of_request(req), Body_Check)
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {
+			chk := http.context_get(ctx, Body_Check)
 			chk.len += len(body)
 			if !is_partial {
 				chk.done = true
@@ -280,7 +280,7 @@ test_per_request_and_response_quota_overrides :: proc(t: ^testing.T) {
 		req_tight := http.Quota{max_size = 8}
 		http.request_set_quota(&c.req, &req_tight)
 		testing.expect_value(t, c.req.quota, &req_tight)
-		http.body(&c.req, proc(req: ^http.Request, body: []byte, is_partial: bool) {})
+		http.body(&c.ctx, proc(ctx: ^http.Ctx, body: []byte, is_partial: bool) {})
 		testing.expect_value(t, c.res.status, http.Status.Payload_Too_Large)
 		testing.expect(t, c.res._state == .Error)
 	}

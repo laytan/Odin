@@ -40,18 +40,18 @@ main :: proc() {
 }
 
 prepare_upgrade :: proc(ctx: ^http.Ctx, protocol: string) -> bool {
-	upgrade, has_upgrade := http.get_header(&ctx.req, "upgrade")
+	upgrade, has_upgrade := http.get_header(ctx, "upgrade")
 	if !http.headers_has_token(&ctx.req.headers, "connection", "upgrade") ||
 	   !has_upgrade || !strings.equal_fold(upgrade, protocol) {
 		ctx.res.status = .Upgrade_Required
-		http.set_header(&ctx.res, "Upgrade", protocol)
-		http.respond_plain(&ctx.res, fmt.tprintf("upgrade to %s required\n", protocol))
+		http.set_header(ctx, "Upgrade", protocol)
+		http.respond_plain(ctx, fmt.tprintf("upgrade to %s required\n", protocol))
 		return false
 	}
 
 	ctx.res.status = .Switching_Protocols
-	http.set_header(&ctx.res, "Connection", "upgrade")
-	http.set_header(&ctx.res, "Upgrade", protocol)
+	http.set_header(ctx, "Connection", "upgrade")
+	http.set_header(ctx, "Upgrade", protocol)
 	return true
 }
 
@@ -63,20 +63,23 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 	}
 
 	// send_ prefixed doesn't finish the response, this just sends the heading of the response.
-	http.send_heading(&ctx.res, on_upgraded)
+	http.send_heading(ctx, on_upgraded)
 
-	on_upgraded :: proc(c: ^http.Connection, err: http.Send_Error) {
+	on_upgraded :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
 		if err != nil {
 			return
 		}
+
+		// Low-level HTTP/1.1 connection hook for in-pool protocol takeover.
+		c := http._connection_of_context(ctx)
 
 		// Replace HTTP request/response quotas with protocol-appropriate limits (here: 60s idle recv, unlimited send).
 		http.request_set_quota(&c.req, &UPGRADE_RECV_QUOTA)
 		http.response_set_quota(&c.res, &http.UNLIMITED_QUOTA)
 
 		fmt.printfln("[in-pool] client %v upgraded", c.socket)
-		http.response_defer(&c.ctx, proc(ctx: ^http.Ctx) {
-			c := http.connection_of_context(ctx)
+		http.response_defer(ctx, proc(ctx: ^http.Ctx) {
+			c := http._connection_of_context(ctx)
 			fmt.printfln("[in-pool] client %v closed", c.socket)
 		})
 
@@ -98,17 +101,17 @@ handle_in_pool_upgrade :: proc(ctx: ^http.Ctx) {
 
 		crlf := transmute([]byte)string("\r\n")
 		bufs := [][]byte{line, crlf} if len(line) > 0 else [][]byte{crlf}
-		http.send(&c.res, bufs, on_sent)
+		http.send(&c.ctx, bufs, on_sent)
 	}
 
-	on_sent :: proc(c: ^http.Connection, err: http.Send_Error) {
+	on_sent :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
 		if err != nil {
 			return
 		}
 		// Calling `free_all(context.temp_allocator)` after `http.send` finishes recycles `c.temp_arena`
 		// blocks while automatically preserving any unread pipelined bytes still in `c.scanner`.
 		free_all(context.temp_allocator)
-		scan_next_line(c)
+		scan_next_line(http._connection_of_context(ctx))
 	}
 }
 
@@ -119,17 +122,17 @@ handle_detached_upgrade :: proc(ctx: ^http.Ctx) {
 		return
 	}
 
-	http.send_heading(&ctx.res, on_upgraded)
+	http.send_heading(ctx, on_upgraded)
 
-	on_upgraded :: proc(c: ^http.Connection, err: http.Send_Error) {
+	on_upgraded :: proc(ctx: ^http.Ctx, err: http.Send_Error) {
 		if err != nil {
 			return
 		}
 
-		// `connection_detach` removes `c` from the server pool and destroys its arenas, so `buffered`
-		// must use a non-connection allocator and `c` must not be touched afterwards. The returned
+		// `connection_detach` removes the connection from the server pool and destroys its arenas, so `buffered`
+		// must use a non-connection allocator and `ctx` must not be touched afterwards. The returned
 		// `sock` stays associated with the event loop.
-		sock, buffered, _ := http.connection_detach(c, context.allocator)
+		sock, buffered, _ := http.connection_detach(ctx, context.allocator)
 
 		ec := new(Echo_Conn)
 		ec.sock = sock

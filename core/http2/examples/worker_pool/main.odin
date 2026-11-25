@@ -30,7 +30,7 @@ main :: proc() {
 
 	r := http.make_router()
 	http.route_get(&r, "/ping", proc(ctx: ^http.Ctx) {
-		http.respond_plain(&ctx.res, "pong\n")
+		http.respond_plain(ctx, "pong\n")
 	})
 	http.route_get(&r, "/work/:ms", handle_work)
 
@@ -44,7 +44,7 @@ handle_work :: proc(ctx: ^http.Ctx) {
 	ms, ok := http.route_param_int(http.route_params(ctx), "ms")
 	if !ok {
 		ctx.res.status = .Bad_Request
-		http.respond_plain(&ctx.res, "expected integer milliseconds\n")
+		http.respond_plain(ctx, "expected integer milliseconds\n")
 		return
 	}
 
@@ -74,6 +74,6 @@ worker_task :: proc(task: thread.Task) {
 	on_done :: proc(_: ^nbio.Operation, job: ^Job) {
 		// Raw `nbio` callbacks run with the thread's tick-scoped temp allocator, so rebind it to the connection.
 		context.temp_allocator = http.temp_allocator(job.ctx)
-		http.respond_plain(&job.ctx.res, job.result)
+		http.respond_plain(job.ctx, job.result)
 	}
 }

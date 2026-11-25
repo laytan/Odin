@@ -58,10 +58,10 @@ main :: proc() {
 }
 
 require_auth :: proc(ctx: ^http.Ctx, next: []http.Handler) {
-	user, ok := http.request_cookie_get(&ctx.req, "session")
+	user, ok := http.request_cookie_get(ctx, "session")
 	if !ok || user == "" {
 		ctx.res.status = .Unauthorized
-		http.respond_plain(&ctx.res, "unauthorized\n")
+		http.respond_plain(ctx, "unauthorized\n")
 		return
 	}
 	http.context_add(ctx, Auth_User{name = user})
@@ -72,7 +72,7 @@ login :: proc(ctx: ^http.Ctx) {
 	body, body_ok := http.body_parser_collect(ctx)
 	if !body_ok {
 		ctx.res.status = .Bad_Request
-		http.respond(&ctx.res)
+		http.respond(ctx)
 		return
 	}
 
@@ -80,18 +80,18 @@ login :: proc(ctx: ^http.Ctx) {
 	user := form["user"]
 	if !form_ok || user == "" {
 		ctx.res.status = .Bad_Request
-		http.respond_plain(&ctx.res, "missing user\n")
+		http.respond_plain(ctx, "missing user\n")
 		return
 	}
 
-	http.set_cookie(&ctx.res, http.Cookie{
+	http.set_cookie(ctx, http.Cookie{
 		name      = "session",
 		value     = user,
 		path      = "/",
 		http_only = true,
 		same_site = .Lax,
 	})
-	http.respond_plain(&ctx.res, fmt.tprintf("logged in as %s\n", user))
+	http.respond_plain(ctx, fmt.tprintf("logged in as %s\n", user))
 }
 
 list_notes :: proc(ctx: ^http.Ctx) {
@@ -106,7 +106,7 @@ list_notes :: proc(ctx: ^http.Ctx) {
 	}
 
 	slice.sort_by_key(matching[:], proc(n: Note) -> int { return n.id })
-	http.respond_json(&ctx.res, matching[:])
+	http.respond_json(ctx, matching[:])
 }
 
 create_note :: proc(ctx: ^http.Ctx) {
@@ -118,14 +118,14 @@ create_note :: proc(ctx: ^http.Ctx) {
 	body, body_ok := http.body_parser_collect(ctx)
 	if !body_ok {
 		ctx.res.status = .Bad_Request
-		http.respond(&ctx.res)
+		http.respond(ctx)
 		return
 	}
 
 	input: Input
 	if json.unmarshal(body, &input) != nil || input.title == "" {
 		ctx.res.status = .Bad_Request
-		http.respond_plain(&ctx.res, "invalid json\n")
+		http.respond_plain(ctx, "invalid json\n")
 		return
 	}
 
@@ -143,14 +143,14 @@ create_note :: proc(ctx: ^http.Ctx) {
 	store.notes[note.id] = note
 
 	ctx.res.status = .Created
-	http.respond_json(&ctx.res, note)
+	http.respond_json(ctx, note)
 }
 
 get_note :: proc(ctx: ^http.Ctx) {
 	id, ok := http.route_param_int(http.route_params(ctx), "id")
 	if !ok {
 		ctx.res.status = .Bad_Request
-		http.respond_plain(&ctx.res, "invalid id\n")
+		http.respond_plain(ctx, "invalid id\n")
 		return
 	}
 
@@ -158,17 +158,17 @@ get_note :: proc(ctx: ^http.Ctx) {
 	note, found := store.notes[id]
 	if !found {
 		ctx.res.status = .Not_Found
-		http.respond_plain(&ctx.res, "not found\n")
+		http.respond_plain(ctx, "not found\n")
 		return
 	}
-	http.respond_json(&ctx.res, note)
+	http.respond_json(ctx, note)
 }
 
 delete_note :: proc(ctx: ^http.Ctx) {
 	id, ok := http.route_param_int(http.route_params(ctx), "id")
 	if !ok {
 		ctx.res.status = .Bad_Request
-		http.respond_plain(&ctx.res, "invalid id\n")
+		http.respond_plain(ctx, "invalid id\n")
 		return
 	}
 
@@ -185,9 +185,9 @@ delete_note :: proc(ctx: ^http.Ctx) {
 
 	if !deleted {
 		ctx.res.status = .Not_Found
-		http.respond_plain(&ctx.res, "not found\n")
+		http.respond_plain(ctx, "not found\n")
 		return
 	}
 	ctx.res.status = .No_Content
-	http.respond(&ctx.res)
+	http.respond(ctx)
 }

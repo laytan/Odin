@@ -207,7 +207,7 @@ transaction_allocator_from_connection :: proc(c: ^Connection) -> runtime.Allocat
 }
 
 transaction_allocator_from_ctx :: proc(ctx: ^Ctx) -> runtime.Allocator {
-	return transaction_allocator_from_connection(connection_of_context(ctx))
+	return transaction_allocator_from_connection(_connection_of_context(ctx))
 }
 
 transaction_allocator :: proc {
@@ -220,7 +220,7 @@ temp_allocator_from_connection :: proc(c: ^Connection) -> runtime.Allocator {
 }
 
 temp_allocator_from_ctx :: proc(ctx: ^Ctx) -> runtime.Allocator {
-	return temp_allocator_from_connection(connection_of_context(ctx))
+	return temp_allocator_from_connection(_connection_of_context(ctx))
 }
 
 temp_allocator :: proc {
@@ -664,9 +664,14 @@ _connection_destroy :: proc(c: ^Connection) {
 	}
 }
 
+remote_endpoint :: proc(ctx: ^Ctx) -> nbio.Endpoint {
+	return _connection_of_context(ctx).remote
+}
+
 // Removes the connection from the server pool without closing the socket, returning the underlying
 // socket and a copy of any unread bytes still buffered in the scanner.
-connection_detach :: proc(c: ^Connection, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error) {
+connection_detach :: proc(ctx: ^Ctx, allocator := context.allocator) -> (socket: nbio.TCP_Socket, buffered: []byte, err: runtime.Allocator_Error) {
+	c := _connection_of_context(ctx)
 	assert(c.res._sends == 0, "cannot detach connection while sends are in flight")
 	assert(allocator.data != &c.temp_arena && allocator.data != &c.transaction_arena, "cannot allocate detached buffer from connection's arena")
 
@@ -695,7 +700,7 @@ invalid_request :: proc(c: ^Connection, status: Status) {
 	log.warnf("http[t=%v][c=%v]: status=%v, msg=\"invalid request\"", td.id, c.socket, status)
 	c.res.status = status
 	headers_set(&c.res.headers, "connection", "close")
-	respond(&c.res)
+	respond(&c.ctx)
 }
 
 _serve_connection :: proc(c: ^Connection) {
@@ -821,7 +826,7 @@ on_headers :: proc(c: ^Connection) {
 	// check for server capabilities and should not be sent to handlers.
 	if c.req.line.method == .Options && c.req.line.target == "*" {
 		c.res.status = .OK
-		respond(&c.res)
+		respond(&c.ctx)
 	} else {
 		context.temp_allocator = temp_allocator(c)
 		c.ctx._vars.allocator   = transaction_allocator(c)
@@ -1023,18 +1028,19 @@ header_parse :: proc(line: string) -> (key, value: string, ok: bool) #no_bounds_
 
 // PERF: we could read the next request after "consume body" is done already, while response is still being sent
 
-write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error) {
+write_response_heading :: proc(ctx: ^Ctx) -> (err: runtime.Allocator_Error) {
 	append_str :: #force_inline proc(buf: ^[dynamic]byte, s: string) -> runtime.Allocator_Error {
 		_, aerr := append(buf, s)
 		return aerr
 	}
 
+	res := &ctx.res
 	assert(len(res._buf) == 0)
 	defer if err != nil {
 		clear(&res._buf)
 	}
 
-	c := connection_of_response(res)
+	c := _connection_of_context(ctx)
 
 	log.debugf("http[t=%v][c=%v]: msg=\"writing response heading\"", td.id, c.socket)
 
@@ -1111,7 +1117,7 @@ write_response_heading :: proc(res: ^Response) -> (err: runtime.Allocator_Error)
 
 Send_Error :: nbio.Send_File_Error
 
-Send_Callback :: proc(c: ^Connection, err: Send_Error)
+Send_Callback :: proc(ctx: ^Ctx, err: Send_Error)
 
 @(private="file")
 _send_error_skip_graceful_close :: proc(err: Send_Error) -> bool {
@@ -1168,7 +1174,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 	skip_graceful := _send_error_skip_graceful_close(err)
 
 	if !should_check {
-		if on_sent != nil { on_sent(c, err) }
+		if on_sent != nil { on_sent(&c.ctx, err) }
 		return
 	}
 
@@ -1176,7 +1182,7 @@ on_send :: proc(op: ^nbio.Operation, c: ^Connection, on_sent: Send_Callback) {
 		destroy_flag: _Destroy_Flag
 		_destroy_flag_push(c, &destroy_flag)
 
-		on_sent(c, err)
+		on_sent(&c.ctx, err)
 		if _destroy_flag_pop(c, &destroy_flag) {
 			return
 		}

@@ -381,28 +381,8 @@ date_parse :: proc(value: string) -> (t: time.Time, ok: bool) #no_bounds_check {
 	return
 }
 
-context_of_response :: proc(res: ^Response) -> ^Ctx {
-	return container_of(res, Ctx, "res")
-}
-
-context_of_request :: proc(req: ^Request) -> ^Ctx {
-	return container_of(req, Ctx, "req")
-}
-
-connection_of_response :: proc(res: ^Response) -> ^Connection {
-	return container_of(res, Connection, "res")
-}
-
-connection_of_request :: proc(req: ^Request) -> ^Connection {
-	return container_of(req, Connection, "req")
-}
-
-connection_of_context :: proc(ctx: ^Ctx) -> ^Connection {
+_connection_of_context :: proc(ctx: ^Ctx) -> ^Connection {
 	return container_of(ctx, Connection, "ctx")
-}
-
-request_of_response :: proc(res: ^Response) -> ^Request {
-	return &connection_of_response(res).req
 }
 
 Cookie_Same_Site :: enum u8 {
@@ -430,8 +410,8 @@ Retrieves the cookie with the given `key` out of the request's `Cookie` header.
 
 If the same key is in the header multiple times the last one is returned.
 */
-request_cookie_get :: proc(r: ^Request, key: string) -> (value: string, ok: bool) {
-	cookies := headers_get(r.headers, "cookie") or_return
+request_cookie_get :: proc(ctx: ^Ctx, key: string) -> (value: string, ok: bool) {
+	cookies := headers_get(ctx.req.headers, "cookie") or_return
 
 	for k, v in request_cookies_iter(&cookies) {
 		if key == k { return v, true }
@@ -445,10 +425,10 @@ Allocates a map with the given allocator and puts all cookie pairs from the requ
 
 If the same key is in the header multiple times the last one is returned.
 */
-request_cookies :: proc(r: ^Request, allocator := context.temp_allocator) -> (res: map[string]string) {
+request_cookies :: proc(ctx: ^Ctx, allocator := context.temp_allocator) -> (res: map[string]string) {
 	res.allocator = allocator
 
-	cookies := headers_get(r.headers, "cookie") or_else ""
+	cookies := headers_get(ctx.req.headers, "cookie") or_else ""
 	for k, v in request_cookies_iter(&cookies) {
 		// Don't overwrite, the iterator goes from right to left and we want the last.
 		if k in res { continue }

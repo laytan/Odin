@@ -13,15 +13,15 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 
-set_content_length_header :: proc(res: ^Response, length: int, loc := #caller_location) {
+set_content_length_header :: proc(ctx: ^Ctx, length: int, loc := #caller_location) {
 	if length <= 0 { return }
-	b := strings.builder_make(0, transaction_allocator(connection_of_response(res)))
+	b := strings.builder_make(0, transaction_allocator(ctx))
 	strings.write_int(&b, length)
-	set_header(res, "Content-Length", strings.to_string(b), loc)
+	set_header(ctx, "Content-Length", strings.to_string(b), loc)
 }
 
 get_content_length_header :: proc(req: ^Request) -> (clen: int, has, ok: bool) {
-	clen_str, has_clen := get_header(req, "Content-Length")
+	clen_str, has_clen := headers_get(req.headers, "Content-Length")
 	if !has_clen {
 		ok = true
 		return
@@ -32,8 +32,8 @@ get_content_length_header :: proc(req: ^Request) -> (clen: int, has, ok: bool) {
 	return
 }
 
-set_content_range_header :: proc(res: ^Response, range: Maybe([2]int), size: int, loc := #caller_location) {
-	b := strings.builder_make(0, 32, transaction_allocator(connection_of_response(res)))
+set_content_range_header :: proc(ctx: ^Ctx, range: Maybe([2]int), size: int, loc := #caller_location) {
+	b := strings.builder_make(0, 32, transaction_allocator(ctx))
 
 	strings.write_string(&b, "bytes ")
 	if r, has_range := range.?; has_range {
@@ -46,7 +46,7 @@ set_content_range_header :: proc(res: ^Response, range: Maybe([2]int), size: int
 	strings.write_string(&b, "/")
 	strings.write_int(&b, size)
 
-	set_header(res, "Content-Range", strings.to_string(b), loc)
+	set_header(ctx, "Content-Range", strings.to_string(b), loc)
 }
 
 Range :: struct {
@@ -55,7 +55,7 @@ Range :: struct {
 }
 
 get_range_header :: proc(req: ^Request) -> (range: Range, ok: bool) {
-	str := get_header(req, "range") or_return
+	str := headers_get(req.headers, "range") or_return
 
 	PREFIX :: "bytes="
 	if len(str) < len(PREFIX) || !_headers_eq(str[:len(PREFIX)], PREFIX) {
@@ -132,20 +132,20 @@ apply_range_to_size :: proc(range: Range, size: int) -> (offset, nbytes: int, ok
 	return
 }
 
-wants_body :: proc(req: ^Request) -> bool {
-	return req.line.method != .Head
+wants_body :: proc(ctx: ^Ctx) -> bool {
+	return ctx.req.line.method != .Head
 }
 
-set_header :: proc(res: ^Response, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
-	return headers_set(&res.headers, key, value, loc)
+set_header :: proc(ctx: ^Ctx, key, value: string, loc := #caller_location) -> mem.Allocator_Error {
+	return headers_set(&ctx.res.headers, key, value, loc)
 }
 
-get_header :: proc(req: ^Request, key: string) -> (string, bool) {
-	return headers_get(req.headers, key)
+get_header :: proc(ctx: ^Ctx, key: string) -> (string, bool) {
+	return headers_get(ctx.req.headers, key)
 }
 
-set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) -> mem.Allocator_Error {
-	b := strings.builder_make(0, 64, transaction_allocator(connection_of_response(res))) or_return
+set_cookie :: proc(ctx: ^Ctx, c: Cookie, loc := #caller_location) -> mem.Allocator_Error {
+	b := strings.builder_make(0, 64, transaction_allocator(ctx)) or_return
 	strings.write_string(&b, c.name)
 	strings.write_byte(&b, '=')
 	strings.write_string(&b, c.value)
@@ -191,7 +191,7 @@ set_cookie :: proc(res: ^Response, c: Cookie, loc := #caller_location) -> mem.Al
 		strings.write_string(&b, "; HttpOnly")
 	}
 
-	return headers_add(&res.headers, "Set-Cookie", strings.to_string(b), loc)
+	return headers_add(&ctx.res.headers, "Set-Cookie", strings.to_string(b), loc)
 }
 
 @(private="file")
@@ -228,34 +228,34 @@ _if_range_matches :: proc(res: ^Response, condition: string, last_modified: Mayb
 }
 
 @(private="file")
-_apply_request_range :: proc(res: ^Response, size: int, last_modified: Maybe(time.Time) = nil) -> (offset, nbytes: int, responded: bool) {
+_apply_request_range :: proc(ctx: ^Ctx, size: int, last_modified: Maybe(time.Time) = nil) -> (offset, nbytes: int, responded: bool) {
 	nbytes = size
 
-	if res.status != .OK {
+	if ctx.res.status != .OK {
 		return
 	}
 
-	if accept_ranges, has_ar := headers_get(res.headers, "accept-ranges"); has_ar {
+	if accept_ranges, has_ar := headers_get(ctx.res.headers, "accept-ranges"); has_ar {
 		// User can set this to none in their handler to disable our ranges functionality.
 		if _headers_eq(accept_ranges, "none") {
 			return
 		}
 	} else {
-		set_header(res, "Accept-Ranges", "bytes")
+		set_header(ctx, "Accept-Ranges", "bytes")
 	}
 
-	c := connection_of_response(res)
-	if c.req.line.method != .Get && c.req.line.method != .Head {
+	c := _connection_of_context(ctx)
+	if ctx.req.line.method != .Get && ctx.req.line.method != .Head {
 		return
 	}
 
-	if condition, has_condition := headers_get(c.req.headers, "if-range"); has_condition {
-		if !_if_range_matches(res, condition, last_modified) {
+	if condition, has_condition := headers_get(ctx.req.headers, "if-range"); has_condition {
+		if !_if_range_matches(&ctx.res, condition, last_modified) {
 			return
 		}
 	}
 
-	range, has_range := get_range_header(&c.req)
+	range, has_range := get_range_header(&ctx.req)
 	if !has_range {
 		return
 	}
@@ -264,41 +264,40 @@ _apply_request_range :: proc(res: ^Response, size: int, last_modified: Maybe(tim
 	range_ok: bool
 	if offset, nbytes, range_ok = apply_range_to_size(range, size); !range_ok {
 		log.debugf("http[t=%v][c=%v]: range=%v, size=%v, status=%v", td.id, c.socket, range, size, Status.Range_Not_Satisfiable)
-		res.status = .Range_Not_Satisfiable
-		set_content_range_header(res, nil, size)
-		respond(res)
+		ctx.res.status = .Range_Not_Satisfiable
+		set_content_range_header(ctx, nil, size)
+		respond(ctx)
 		return 0, 0, true
 	}
 
-	res.status = .Partial_Content
-	set_content_range_header(res, [2]int{offset, offset + max(0, nbytes - 1)}, size)
+	ctx.res.status = .Partial_Content
+	set_content_range_header(ctx, [2]int{offset, offset + max(0, nbytes - 1)}, size)
 	return offset, nbytes, false
 }
 
-_respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, last_modified: time.Time) {
+_respond_handle_with_size :: proc(c: ^Connection, file: nbio.Handle, size: int, last_modified: time.Time) {
 	assert(size > 0)
 
-	c := connection_of_response(res)
-	if !headers_has(res.headers, "last-modified") {
+	if !headers_has(c.res.headers, "last-modified") {
 		last_modified_buf, err := make([]byte, DATE_LENGTH, transaction_allocator(c))
 		if err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Last-Modified buffer\", err=%v", td.id, c.socket, err)
-			res._state = .Error
+			c.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return
 		}
 		date_write(last_modified_buf, last_modified)
-		set_header(res, "Last-Modified", string(last_modified_buf))
+		set_header(&c.ctx, "Last-Modified", string(last_modified_buf))
 	}
 
-	offset, nbytes, responded := _apply_request_range(res, size, last_modified)
+	offset, nbytes, responded := _apply_request_range(&c.ctx, size, last_modified)
 	if responded {
 		return
 	}
 
-	set_content_length_header(res, nbytes)
-	send_file(res, file, offset, nbytes)
-	respond(res)
+	set_content_length_header(&c.ctx, nbytes)
+	send_file(&c.ctx, file, offset, nbytes)
+	respond(&c.ctx)
 }
 
 // send_ procs are primitives which can be called multiple times
@@ -306,17 +305,17 @@ _respond_handle_with_size :: proc(res: ^Response, file: nbio.Handle, size: int, 
 
 SEND_ENTIRE_FILE :: nbio.SEND_ENTIRE_FILE
 
-send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: int = SEND_ENTIRE_FILE, on_sent: Send_Callback = nil) {
+send_file :: proc(ctx: ^Ctx, file: nbio.Handle, offset: int = 0, nbytes: int = SEND_ENTIRE_FILE, on_sent: Send_Callback = nil) {
 	nbytes := nbytes
-	c := connection_of_response(res)
+	c := _connection_of_context(ctx)
 	log.debugf("http[t=%v][c=%v]: offset=%v, nbytes=%v", td.id, c.socket, offset, nbytes)
 
-	switch res._state {
+	switch ctx.res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		send_heading(res)
-		if res._state == .Error {
+		send_heading(ctx)
+		if ctx.res._state == .Error {
 			return
 		}
 	case .Sending:
@@ -326,58 +325,58 @@ send_file :: proc(res: ^Response, file: nbio.Handle, offset: int = 0, nbytes: in
 		unreachable()
 	}
 
-	if nbytes > 0 && wants_body(&c.req) {
-		max := c.res.progress.max
-		timeout := c.res.progress.timeout
+	if nbytes > 0 && wants_body(ctx) {
+		max := ctx.res.progress.max
+		timeout := ctx.res.progress.timeout
 		if max == 0 || timeout == 0 {
-			res._state = .Error
+			ctx.res._state = .Error
 			_check_send_done(c)
 			return
 		}
 
 		if nbytes != SEND_ENTIRE_FILE && max >= 0 {
-			nbytes = min(nbytes, c.res.progress.max)
+			nbytes = min(nbytes, ctx.res.progress.max)
 		}
 
 		if timeout < 0 {
 			timeout = nbio.NO_TIMEOUT
 		}
 
-		res._sends += 1
-		res._last_send = now()
+		ctx.res._sends += 1
+		ctx.res._last_send = now()
 		nbio.sendfile_poly2(c.socket, file, c, on_sent, on_send, offset=offset, nbytes=nbytes, timeout=timeout)
 	}
 }
 
-send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
-	c := connection_of_response(res)
-	switch res._state {
+send :: proc(ctx: ^Ctx, bufs: [][]byte, on_sent: Send_Callback = nil) {
+	c := _connection_of_context(ctx)
+	switch ctx.res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		if err := write_response_heading(res); err != nil {
+		if err := write_response_heading(ctx); err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
-			res._state = .Error
+			ctx.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return
 		}
-		res._state = .Sending
-		if !wants_body(&c.req) || len(bufs) == 0 {
-			_do_send(res, {res._buf[:]}, on_sent)
+		ctx.res._state = .Sending
+		if !wants_body(ctx) || len(bufs) == 0 {
+			_do_send(c, {ctx.res._buf[:]}, on_sent)
 			return
 		}
 		new_bufs := ([^][]byte)(intrinsics.alloca(size_of([]byte) * (len(bufs) + 1), align_of([]byte)))[:len(bufs)+1]
-		new_bufs[0] = res._buf[:]
+		new_bufs[0] = ctx.res._buf[:]
 		copy(new_bufs[1:], bufs)
-		_do_send(res, new_bufs, on_sent)
+		_do_send(c, new_bufs, on_sent)
 	case .Sending:
-		if !wants_body(&c.req) || len(bufs) == 0 {
+		if !wants_body(ctx) || len(bufs) == 0 {
 			if on_sent != nil {
-				on_sent(c, nil)
+				on_sent(ctx, nil)
 			}
 			return
 		}
-		_do_send(res, bufs, on_sent)
+		_do_send(c, bufs, on_sent)
 	case .Sent:
 		panic("response has been sent already")
 	case:
@@ -405,14 +404,13 @@ _constraint_bufs :: proc(bufs: [][]byte, max: int) -> [][]byte {
 	return constrained
 }
 
-_do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
+_do_send :: proc(c: ^Connection, bufs: [][]byte, on_sent: Send_Callback) {
 	bufs := bufs
-	c := connection_of_response(res)
 
 	max := c.res.progress.max
 	timeout := c.res.progress.timeout
 	if max == 0 || timeout == 0 {
-		res._state = .Error
+		c.res._state = .Error
 		_check_send_done(c)
 		return
 	}
@@ -425,8 +423,8 @@ _do_send :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback) {
 		timeout = nbio.NO_TIMEOUT
 	}
 
-	res._sends += 1
-	res._last_send = now()
+	c.res._sends += 1
+	c.res._last_send = now()
 	nbio.send_poly2(c.socket, bufs, c, on_sent, on_send, timeout=timeout)
 }
 
@@ -449,20 +447,19 @@ _response_allows_body :: proc(c: ^Connection) -> bool {
 }
 
 @(private="file")
-_begin_chunked :: proc(res: ^Response) -> ^_Chunked_State {
-	ctx := context_of_response(res)
+_begin_chunked :: proc(ctx: ^Ctx) -> ^_Chunked_State {
 	if state := context_get(ctx, _Chunked_State); state != nil {
 		return state
 	}
 
-	assert(res._state == .None || res._state == .Handling, "cannot begin chunked response after headers have been sent")
-	assert(!headers_has(res.headers, "content-length"), "cannot use chunked encoding with Content-Length header")
+	assert(ctx.res._state == .None || ctx.res._state == .Handling, "cannot begin chunked response after headers have been sent")
+	assert(!headers_has(ctx.res.headers, "content-length"), "cannot use chunked encoding with Content-Length header")
 
-	if !headers_has(res.headers, "transfer-encoding") {
-		if err := set_header(res, "Transfer-Encoding", "chunked"); err != nil {
-			c := connection_of_response(res)
+	if !headers_has(ctx.res.headers, "transfer-encoding") {
+		if err := set_header(ctx, "Transfer-Encoding", "chunked"); err != nil {
+			c := _connection_of_context(ctx)
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to set Transfer-Encoding header\", err=%v", td.id, c.socket, err)
-			res._state = .Error
+			ctx.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return nil
 		}
@@ -470,9 +467,9 @@ _begin_chunked :: proc(res: ^Response) -> ^_Chunked_State {
 
 	state, err := context_add(ctx, _Chunked_State{})
 	if err != nil {
-		c := connection_of_response(res)
+		c := _connection_of_context(ctx)
 		log.errorf("http[t=%v][c=%v]: msg=\"failed to allocate Chunked_State\", err=%v", td.id, c.socket, err)
-		res._state = .Error
+		ctx.res._state = .Error
 		_check_send_done(c, skip_graceful = true)
 		return nil
 	}
@@ -489,32 +486,32 @@ _write_chunk_header :: proc(dst: []byte, size: int) -> []byte {
 }
 
 @(private="file")
-_set_default_content_type :: proc(res: ^Response, mime: Mime_Type, loc := #caller_location) {
-	if !headers_has(res.headers, "content-type") {
-		set_header(res, "Content-Type", mime_to_content_type(mime), loc)
+_set_default_content_type :: proc(ctx: ^Ctx, mime: Mime_Type, loc := #caller_location) {
+	if !headers_has(ctx.res.headers, "content-type") {
+		set_header(ctx, "Content-Type", mime_to_content_type(mime), loc)
 	}
 }
 
-respond :: proc(res: ^Response) {
-	c := connection_of_response(res)
-	is_chunked := context_get(context_of_response(res), _Chunked_State) != nil
+respond :: proc(ctx: ^Ctx) {
+	c := _connection_of_context(ctx)
+	is_chunked := context_get(ctx, _Chunked_State) != nil
 
-	switch res._state {
+	switch ctx.res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		if is_chunked && wants_body(&c.req) && _response_allows_body(c) {
-			send(res, {transmute([]byte)string("0\r\n\r\n")})
+		if is_chunked && wants_body(ctx) && _response_allows_body(c) {
+			send(ctx, {transmute([]byte)string("0\r\n\r\n")})
 		} else {
-			send_heading(res)
+			send_heading(ctx)
 		}
-		if res._state == .Error {
+		if ctx.res._state == .Error {
 			return
 		}
 	case .Sending:
-		if is_chunked && wants_body(&c.req) && _response_allows_body(c) {
-			send(res, {transmute([]byte)string("0\r\n\r\n")})
-			if res._state == .Error {
+		if is_chunked && wants_body(ctx) && _response_allows_body(c) {
+			send(ctx, {transmute([]byte)string("0\r\n\r\n")})
+			if ctx.res._state == .Error {
 				return
 			}
 		}
@@ -524,24 +521,24 @@ respond :: proc(res: ^Response) {
 		unreachable()
 	}
 
-	res._state = .Sent
+	ctx.res._state = .Sent
 	_check_send_done(c)
 }
 
-respond_bytes :: proc(res: ^Response, bytes: []byte) {
-	c := connection_of_response(res)
+respond_bytes :: proc(ctx: ^Ctx, bytes: []byte) {
+	c := _connection_of_context(ctx)
 
-	switch res._state {
+	switch ctx.res._state {
 	case .Error:
 		return
 	case .None, .Handling:
-		set_content_length_header(res, len(bytes))
+		set_content_length_header(ctx, len(bytes))
 		if len(bytes) > 0 {
-			send(res, {bytes})
+			send(ctx, {bytes})
 		} else {
-			send_heading(res)
+			send_heading(ctx)
 		}
-		if res._state == .Error {
+		if ctx.res._state == .Error {
 			return
 		}
 	case .Sent, .Sending:
@@ -550,18 +547,18 @@ respond_bytes :: proc(res: ^Response, bytes: []byte) {
 		unreachable()
 	}
 
-	res._state = .Sent
+	ctx.res._state = .Sent
 	_check_send_done(c)
 }
 
-respond_plain :: proc(res: ^Response, text: string) {
-	_set_default_content_type(res, .Plain)
-	respond_bytes(res, transmute([]byte)text)
+respond_plain :: proc(ctx: ^Ctx, text: string) {
+	_set_default_content_type(ctx, .Plain)
+	respond_bytes(ctx, transmute([]byte)text)
 }
 
-respond_html :: proc(res: ^Response, html: string) {
-	_set_default_content_type(res, .Html)
-	respond_bytes(res, transmute([]byte)html)
+respond_html :: proc(ctx: ^Ctx, html: string) {
+	_set_default_content_type(ctx, .Html)
+	respond_bytes(ctx, transmute([]byte)html)
 }
 
 /*
@@ -571,11 +568,10 @@ For custom streaming or incremental formatting without buffering the whole paylo
 `strings.Builder` (or buffer) and emit chunks with `send_chunk(..., on_sent)`, or build into `transaction_allocator`
 with `strings.to_writer` and finish with `respond_bytes`.
 */
-respond_json :: proc(res: ^Response, v: any, opt: json.Marshal_Options = {}, loc := #caller_location) -> json.Marshal_Error {
-	c := connection_of_response(res)
-	data := json.marshal(v, opt, transaction_allocator(c), loc) or_return
-	_set_default_content_type(res, .Json, loc)
-	respond_bytes(res, data)
+respond_json :: proc(ctx: ^Ctx, v: any, opt: json.Marshal_Options = {}, loc := #caller_location) -> json.Marshal_Error {
+	data := json.marshal(v, opt, transaction_allocator(ctx), loc) or_return
+	_set_default_content_type(ctx, .Json, loc)
+	respond_bytes(ctx, data)
 	return nil
 }
 
@@ -587,15 +583,15 @@ completes; the outer `bufs` slice itself may be temporary). Chunk headers are po
 recycled lazily whenever `res._sends == 0` (O(1) memory for sequential `on_sent` streaming and
 O(max_burst) memory for bursty streams that drain between bursts). Pass `on_sent` for async
 backpressure so a producer can wait for the previous chunk to drain before generating or reusing buffers.
-Streaming loops should check `wants_body(request_of_response(res))` to avoid generating bodies for `HEAD`.
+Streaming loops should check `wants_body(ctx)` to avoid generating bodies for `HEAD`.
 */
-send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil) {
-	if res._state == .Error {
+send_chunk :: proc(ctx: ^Ctx, bufs: [][]byte, on_sent: Send_Callback = nil) {
+	if ctx.res._state == .Error {
 		return
 	}
 
-	c := connection_of_response(res)
-	state := _begin_chunked(res)
+	c := _connection_of_context(ctx)
+	state := _begin_chunked(ctx)
 	if state == nil {
 		return
 	}
@@ -609,12 +605,12 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 	}
 
 	// Never emit a 0-length terminating chunk mid-stream; still flush headers or invoke `on_sent`.
-	if total == 0 || !wants_body(&c.req) || !_response_allows_body(c) {
-		send(res, nil, on_sent)
+	if total == 0 || !wants_body(ctx) || !_response_allows_body(c) {
+		send(ctx, nil, on_sent)
 		return
 	}
 
-	if res._sends == 0 {
+	if ctx.res._sends == 0 {
 		for state.in_flight != nil {
 			node := state.in_flight
 			state.in_flight = node.next
@@ -628,9 +624,9 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 		state.free = node.next
 	} else {
 		alloc_err: runtime.Allocator_Error
-		node, alloc_err = new(_Chunk_Header, transaction_allocator(c))
+		node, alloc_err = new(_Chunk_Header, transaction_allocator(ctx))
 		if alloc_err != nil {
-			res._state = .Error
+			ctx.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return
 		}
@@ -651,25 +647,24 @@ send_chunk :: proc(res: ^Response, bufs: [][]byte, on_sent: Send_Callback = nil)
 	}
 	framed_bufs[idx] = transmute([]byte)string("\r\n")
 
-	send(res, framed_bufs, on_sent)
+	send(ctx, framed_bufs, on_sent)
 }
 
-send_heading :: proc(res: ^Response, on_sent: Send_Callback = nil) {
-	if err := write_response_heading(res); err != nil {
-		c := connection_of_response(res)
+send_heading :: proc(ctx: ^Ctx, on_sent: Send_Callback = nil) {
+	c := _connection_of_context(ctx)
+	if err := write_response_heading(ctx); err != nil {
 		log.errorf("http[t=%v][c=%v]: msg=\"failed to write response heading\", err=%v", td.id, c.socket, err)
-		res._state = .Error
+		ctx.res._state = .Error
 		_check_send_done(c, skip_graceful = true)
 		return
 	}
 
-	res._state = .Sending
-	_do_send(res, {res._buf[:]}, on_sent)
+	ctx.res._state = .Sending
+	_do_send(c, {ctx.res._buf[:]}, on_sent)
 }
 
 @(private="file")
-_redirect_to_trailing_slash :: proc(res: ^Response) {
-	c := connection_of_response(res)
+_redirect_to_trailing_slash :: proc(c: ^Connection) {
 	allocator := transaction_allocator(c)
 	path_part, qmark, query_part := strings.partition(c.req.line.target, "?")
 	trimmed_lead := strings.trim_left(path_part, "/")
@@ -685,111 +680,107 @@ _redirect_to_trailing_slash :: proc(res: ^Response) {
 		strings.write_string(&b, query_part)
 	}
 
-	res.status = .Temporary_Redirect
-	set_header(res, "Location", strings.to_string(b))
-	respond(res)
+	c.res.status = .Temporary_Redirect
+	set_header(&c.ctx, "Location", strings.to_string(b))
+	respond(&c.ctx)
 }
 
 @(private="file")
-_respond_handle :: proc(res: ^Response, file: nbio.Handle, redirect_if_dir: bool, mime: Maybe(Mime_Type) = nil) {
-	nbio.stat_poly3(file, res, redirect_if_dir, mime, on_stat)
+_respond_handle :: proc(c: ^Connection, file: nbio.Handle, redirect_if_dir: bool, mime: Maybe(Mime_Type) = nil) {
+	nbio.stat_poly3(file, c, redirect_if_dir, mime, on_stat)
 
-	on_stat :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool, mime: Maybe(Mime_Type)) {
-		c := connection_of_response(res)
+	on_stat :: proc(op: ^nbio.Operation, c: ^Connection, redirect_if_dir: bool, mime: Maybe(Mime_Type)) {
 		context.temp_allocator = temp_allocator(c)
 
 		if op.stat.err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to stat\", err=%v", td.id, c.socket, op.stat.err)
-			res.status = .Not_Found
-			respond(res)
+			c.res.status = .Not_Found
+			respond(&c.ctx)
 			return
 		}
 
 		if op.stat.type == .Directory && redirect_if_dir {
-			_redirect_to_trailing_slash(res)
+			_redirect_to_trailing_slash(c)
 			return
 		}
 
 		if op.stat.type != .Regular || op.stat.size <= 0 || op.stat.size > i64(max(int)) {
 			log.warnf("http[t=%v][c=%v]: msg=\"not a regular file, too big, or no size\", type=%v, size=%v", td.id, c.socket, op.stat.type, op.stat.size)
-			res.status = .Not_Found
-			respond(res)
+			c.res.status = .Not_Found
+			respond(&c.ctx)
 			return
 		}
 
 		if m, ok := mime.?; ok {
-			_set_default_content_type(res, m)
+			_set_default_content_type(&c.ctx, m)
 		}
 
-		_respond_handle_with_size(res, op.stat.handle, int(op.stat.size), op.stat.last_modified)
+		_respond_handle_with_size(c, op.stat.handle, int(op.stat.size), op.stat.last_modified)
 	}
 }
 
-respond_handle :: proc(res: ^Response, file: nbio.Handle) {
-	_respond_handle(res, file, redirect_if_dir = false)
+respond_handle :: proc(ctx: ^Ctx, file: nbio.Handle) {
+	_respond_handle(_connection_of_context(ctx), file, redirect_if_dir = false)
 }
 
-respond_file :: proc(res: ^Response, file: ^os.File) -> nbio.Association_Error {
+respond_file :: proc(ctx: ^Ctx, file: ^os.File) -> nbio.Association_Error {
 	handle := nbio.associate_handle(os.fd(file)) or_return
 	mime: Maybe(Mime_Type)
-	if !headers_has(res.headers, "content-type") {
+	if !headers_has(ctx.res.headers, "content-type") {
 		if m, ok := mime_from_extension(os.name(file)); ok {
 			mime = m
 		}
 	}
-	_respond_handle(res, handle, redirect_if_dir = false, mime = mime)
+	_respond_handle(_connection_of_context(ctx), handle, redirect_if_dir = false, mime = mime)
 	return nil
 }
 
 @(private="file")
-_respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD, redirect_if_dir := false) {
-	nbio.open_poly2(file, res, redirect_if_dir, on_open, dir=dir)
+_respond_file_path :: proc(c: ^Connection, file: string, dir := nbio.CWD, redirect_if_dir := false) {
+	nbio.open_poly2(file, c, redirect_if_dir, on_open, dir=dir)
 
-	on_open :: proc(op: ^nbio.Operation, res: ^Response, redirect_if_dir: bool) {
-		c := connection_of_response(res)
+	on_open :: proc(op: ^nbio.Operation, c: ^Connection, redirect_if_dir: bool) {
 		context.temp_allocator = temp_allocator(c)
 
 		if op.open.err != nil {
 			log.warnf("http[t=%v][c=%v]: msg=\"failed to open\", path=%q, err=%v", td.id, c.socket, op.open.path, op.open.err)
-			res.status = .Not_Found
-			respond(res)
+			c.res.status = .Not_Found
+			respond(&c.ctx)
 			return
 		}
 
 		mime: Maybe(Mime_Type)
-		if !headers_has(res.headers, "content-type") {
+		if !headers_has(c.res.headers, "content-type") {
 			if m, ok := mime_from_extension(op.open.path); ok {
 				mime = m
 			}
 		}
 
-		ctx := context_of_response(res)
-
 		Respond_File_Path_Handle :: distinct nbio.Handle
-		if _, add_err := context_add(ctx, Respond_File_Path_Handle(op.open.handle)); add_err != nil {
+		if _, add_err := context_add(&c.ctx, Respond_File_Path_Handle(op.open.handle)); add_err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to record opened file handle\", err=%v", td.id, c.socket, add_err)
 			nbio.close(op.open.handle)
-			res._state = .Error
+			c.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return
 		}
-		if def_err := response_defer(ctx, proc(ctx: ^Ctx) {
+		if def_err := response_defer(&c.ctx, proc(ctx: ^Ctx) {
 			handle := context_get(ctx, Respond_File_Path_Handle)
 			nbio.close(nbio.Handle(handle^))
 		}); def_err != nil {
 			log.errorf("http[t=%v][c=%v]: msg=\"failed to register file handle defer\", err=%v", td.id, c.socket, def_err)
 			nbio.close(op.open.handle)
-			res._state = .Error
+			c.res._state = .Error
 			_check_send_done(c, skip_graceful = true)
 			return
 		}
 
-		_respond_handle(res, op.open.handle, redirect_if_dir, mime)
+		_respond_handle(c, op.open.handle, redirect_if_dir, mime)
 	}
 }
 
-respond_file_path :: proc(res: ^Response, file: string, dir := nbio.CWD) {
-	_respond_file_path(res, file, dir = dir, redirect_if_dir = false)
+respond_file_path :: proc(ctx: ^Ctx, file: string, dir := nbio.CWD) {
+	_respond_file_path(_connection_of_context(ctx), file, dir = dir, redirect_if_dir = false)
 }
 
 /*
@@ -800,17 +791,17 @@ Useful when serving files embedded at compile time with `#load(path)`.
 You can set the Last-Modified header before calling this (for example with the compilation timestamp)
 to add last modified ranges support.
 */
-respond_file_content :: proc(res: ^Response, file: string, content: []byte) {
+respond_file_content :: proc(ctx: ^Ctx, file: string, content: []byte) {
 	if mime, ok := mime_from_extension(file); ok {
-		_set_default_content_type(res, mime)
+		_set_default_content_type(ctx, mime)
 	}
 
-	offset, nbytes, responded := _apply_request_range(res, len(content))
+	offset, nbytes, responded := _apply_request_range(ctx, len(content))
 	if responded {
 		return
 	}
 
-	respond_bytes(res, content[offset:offset+nbytes])
+	respond_bytes(ctx, content[offset:offset+nbytes])
 }
 
 _resolve_dir_path :: proc(target, path: string, allocator: runtime.Allocator) -> (resolved: string, is_dir_redirect: bool, ok: bool) {
@@ -862,29 +853,29 @@ Serves a static file from `target` (optionally relative to `dir`) for the alread
 (such as `route_suffix(ctx)` from a wildcard route). Redirects bare-prefix (`""`) and directory paths without a
 trailing slash using `307 Temporary Redirect`.
 */
-respond_dir :: proc(res: ^Response, target, path: string, dir := nbio.CWD) {
-	c := connection_of_response(res)
-	without_query, _, _ := strings.partition(c.req.line.target, "?")
+respond_dir :: proc(ctx: ^Ctx, target, path: string, dir := nbio.CWD) {
+	c := _connection_of_context(ctx)
+	without_query, _, _ := strings.partition(ctx.req.line.target, "?")
 	// Reject percent-encoded slashes on the raw request target: decoding turns %2f into a '/'
 	// directory separator, whereas browsers still treat %2f as part of a single path segment
 	// (breaking relative URL resolution on directory redirects).
 	if strings.contains(without_query, "%2f") || strings.contains(without_query, "%2F") {
-		res.status = .Not_Found
-		respond(res)
+		ctx.res.status = .Not_Found
+		respond(ctx)
 		return
 	}
 
-	resolved, is_dir_redirect, ok := _resolve_dir_path(target, path, transaction_allocator(c))
+	resolved, is_dir_redirect, ok := _resolve_dir_path(target, path, transaction_allocator(ctx))
 	if !ok {
-		res.status = .Not_Found
-		respond(res)
+		ctx.res.status = .Not_Found
+		respond(ctx)
 		return
 	}
 	if is_dir_redirect {
-		_redirect_to_trailing_slash(res)
+		_redirect_to_trailing_slash(c)
 		return
 	}
 
 	has_trailing_slash := len(path) > 0 && path[len(path)-1] == '/'
-	_respond_file_path(res, resolved, dir = dir, redirect_if_dir = !has_trailing_slash)
+	_respond_file_path(c, resolved, dir = dir, redirect_if_dir = !has_trailing_slash)
 }

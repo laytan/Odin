@@ -307,11 +307,11 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 	expires, ok := time.datetime_to_time(2026, 11, 21, 15, 30, 0)
 	testing.expect(t, ok, "expected valid datetime")
 
-	http.set_cookie(&c.res, {
+	http.set_cookie(&c.ctx, {
 		name  = "session",
 		value = "abc123",
 	})
-	http.set_cookie(&c.res, {
+	http.set_cookie(&c.ctx, {
 		name         = "prefs",
 		value        = "dark\r\nmode",
 		domain       = "example.com",
@@ -323,12 +323,12 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 		partitioned  = true,
 		http_only    = true,
 	})
-	http.set_cookie(&c.res, {
+	http.set_cookie(&c.ctx, {
 		name      = "strict_tok",
 		value     = "s",
 		same_site = .Strict,
 	})
-	http.set_cookie(&c.res, {
+	http.set_cookie(&c.ctx, {
 		name      = "cross_tok",
 		value     = "n",
 		same_site = .None,
@@ -348,7 +348,7 @@ test_set_cookie_and_heading_serialization :: proc(t: ^testing.T) {
 	testing.expect_value(t, values[2], "strict_tok=s; SameSite=Strict")
 	testing.expect_value(t, values[3], "cross_tok=n; SameSite=None; Secure")
 
-	http.write_response_heading(&c.res)
+	http.write_response_heading(&c.ctx)
 	heading := string(c.res._buf[:])
 	testing.expect(t, strings.contains(heading, "Set-Cookie: session=abc123\r\n"), "expected first Set-Cookie header line")
 	testing.expect(t, strings.contains(heading, "Set-Cookie: prefs=dark  mode; Domain=example.com; Expires=Sat, 21 Nov 2026 15:30:00 GMT; Max-Age=3600; Path=/app; SameSite=Lax; Secure; Partitioned; HttpOnly\r\n"), "expected escaped second Set-Cookie header line")
@@ -478,7 +478,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{"ok":true}`))
+		http.respond_file_content(&c.ctx, "assets/data.json", transmute([]byte)string(`{"ok":true}`))
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "application/json")
@@ -493,8 +493,8 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.set_header(&c.res, "Content-Type", "application/vnd.custom+json")
-		http.respond_file_content(&c.res, "assets/data.json", transmute([]byte)string(`{}`))
+		http.set_header(&c.ctx, "Content-Type", "application/vnd.custom+json")
+		http.respond_file_content(&c.ctx, "assets/data.json", transmute([]byte)string(`{}`))
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "application/vnd.custom+json")
@@ -509,7 +509,7 @@ test_resolve_dir_path_and_respond_file_content :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.respond_file_content(&c.res, "LICENSE", transmute([]byte)string("MIT"))
+		http.respond_file_content(&c.ctx, "LICENSE", transmute([]byte)string("MIT"))
 		_, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, !has_ct)
 	}
@@ -530,7 +530,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.respond_plain(&c.res, "hello world")
+		http.respond_plain(&c.ctx, "hello world")
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "text/plain")
@@ -546,7 +546,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.respond_html(&c.res, "<p>hi</p>")
+		http.respond_html(&c.ctx, "<p>hi</p>")
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
 		testing.expect_value(t, ct, "text/html")
@@ -560,8 +560,8 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.set_header(&c.res, "Content-Type", "application/xhtml+xml")
-		http.respond_html(&c.res, "<p>hi</p>")
+		http.set_header(&c.ctx, "Content-Type", "application/xhtml+xml")
+		http.respond_html(&c.ctx, "<p>hi</p>")
 		ct, _ := http.headers_get(c.res.headers, "content-type")
 		testing.expect_value(t, ct, "application/xhtml+xml")
 	}
@@ -581,7 +581,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		err := http.respond_json(&c.res, Payload{name = "odin", n = 42})
+		err := http.respond_json(&c.ctx, Payload{name = "odin", n = 42})
 		testing.expect_value(t, err, nil)
 		ct, has_ct := http.headers_get(c.res.headers, "content-type")
 		testing.expect(t, has_ct)
@@ -599,7 +599,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res._sends        = 1
 
 		bad := proc() {}
-		err := http.respond_json(&c.res, bad)
+		err := http.respond_json(&c.ctx, bad)
 		testing.expect_value(t, err, json.Marshal_Error(json.Marshal_Data_Error.Unsupported_Type))
 		testing.expect(t, c.res._state == .Handling, "expected state to remain .Handling on marshal error")
 		testing.expect_value(t, len(c.res._buf), 0)
@@ -625,7 +625,7 @@ test_respond_helpers_and_send_chunk :: proc(t: ^testing.T) {
 		c.res.progress.max = 0
 		c.res._sends        = 1
 
-		http.send_chunk(&c.res, {transmute([]byte)string("hi!")})
+		http.send_chunk(&c.ctx, {transmute([]byte)string("hi!")})
 		te, has_te := http.headers_get(c.res.headers, "transfer-encoding")
 		testing.expect(t, has_te)
 		testing.expect_value(t, te, "chunked")

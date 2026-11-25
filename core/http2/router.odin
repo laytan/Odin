@@ -44,16 +44,16 @@ import "core:strings"
 // 	defer http.router_destroy(api)
 // 	http.route_get(&api, "/users/:id", proc(ctx: ^http.Ctx) {
 // 		id, ok := http.route_param_int(http.route_params(ctx), "id")
-// 		if !ok { ctx.res.status = .Bad_Request; http.respond(&ctx.res); return }
+// 		if !ok { ctx.res.status = .Bad_Request; http.respond(ctx); return }
 // 		_ = id
-// 		http.respond_plain(&ctx.res, "user")
+// 		http.respond_plain(ctx, "user")
 // 	})
 //
 // 	r: http.Router
 // 	defer http.router_destroy(r)
-// 	http.route_get(&r, "/", proc(ctx: ^http.Ctx) { http.respond_plain(&ctx.res, "home") })
+// 	http.route_get(&r, "/", proc(ctx: ^http.Ctx) { http.respond_plain(ctx, "home") })
 // 	http.route_get(&r, "/static/*", proc(ctx: ^http.Ctx) {
-// 		http.respond_dir(&ctx.res, "public", http.route_suffix(ctx))
+// 		http.respond_dir(ctx, "public", http.route_suffix(ctx))
 // 	})
 // 	http.route_all(&r, "/api/*", http.router(&api))
 Router :: struct {
@@ -92,7 +92,7 @@ router :: proc(router: ^Router) -> Handler {
 			add_err: runtime.Allocator_Error
 			match, add_err = context_add(ctx, _Route_Match{})
 			if add_err != nil {
-				invalid_request(connection_of_context(ctx), .Internal_Server_Error)
+				invalid_request(_connection_of_context(ctx), .Internal_Server_Error)
 				return
 			}
 			match.vars.allocator = transaction_allocator(ctx)
@@ -101,7 +101,7 @@ router :: proc(router: ^Router) -> Handler {
 			target, target_ok := net.percent_decode(without_query, transaction_allocator(ctx))
 			if !target_ok {
 				ctx.res.status = .Not_Found
-				respond(&ctx.res)
+				respond(ctx)
 				return
 			}
 			match.target = target

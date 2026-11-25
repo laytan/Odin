@@ -57,7 +57,7 @@ handle_upload :: proc(ctx: ^http.Ctx) {
 
 		if op.open.err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond_plain(&ctx.res, "failed to open upload file\n")
+			http.respond_plain(ctx, "failed to open upload file\n")
 			return
 		}
 
@@ -68,15 +68,14 @@ handle_upload :: proc(ctx: ^http.Ctx) {
 			nbio.close(state.file)
 		})
 
-		http.body(&ctx.req, on_chunk)
+		http.body(ctx, on_chunk)
 	}
 
-	on_chunk :: proc(req: ^http.Request, chunk: []byte, is_partial: bool) {
-		ctx := http.context_of_request(req)
+	on_chunk :: proc(ctx: ^http.Ctx, chunk: []byte, is_partial: bool) {
 		state := http.context_get(ctx, Upload_State)
 
 		if !is_partial {
-			http.respond_plain(&ctx.res, fmt.tprintf("uploaded %d bytes to %s\n", state.offset, state.path))
+			http.respond_plain(ctx, fmt.tprintf("uploaded %d bytes to %s\n", state.offset, state.path))
 			return
 		}
 		if len(chunk) == 0 {
@@ -85,22 +84,21 @@ handle_upload :: proc(ctx: ^http.Ctx) {
 
 		// With `retain = false` (default), returning from `on_chunk` lets the scanner overwrite the
 		// live buffer in place. Pausing holds `chunk` valid zero-copy until `body_resume`.
-		http.body_pause(req)
-		nbio.write_poly(state.file, state.offset, chunk, req, on_write)
+		http.body_pause(ctx)
+		nbio.write_poly(state.file, state.offset, chunk, ctx, on_write)
 	}
 
-	on_write :: proc(op: ^nbio.Operation, req: ^http.Request) {
-		ctx := http.context_of_request(req)
+	on_write :: proc(op: ^nbio.Operation, ctx: ^http.Ctx) {
 		context.temp_allocator = http.temp_allocator(ctx)
 
 		if op.write.err != nil {
 			ctx.res.status = .Internal_Server_Error
-			http.respond_plain(&ctx.res, "write failed\n")
+			http.respond_plain(ctx, "write failed\n")
 			return
 		}
 
 		state := http.context_get(ctx, Upload_State)
 		state.offset += op.write.written
-		http.body_resume(req)
+		http.body_resume(ctx)
 	}
 }
